@@ -1,1 +1,268 @@
+name: Build Android APK
 
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java (JDK 17)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install system dependencies for sharp
+        run: sudo apt-get update && sudo apt-get install -y libvips-dev
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+        env:
+          npm_config_sharp_libvips_binary_host: https://github.com/lovell/sharp-libvips/releases/download
+
+      - name: Bundle GSI client locally (Capacitor WebView fix)
+        run: |
+          # Download Google Identity Services script so Capacitor WebView
+          # can load it without blocking accounts.google.com
+          mkdir -p public
+          curl -fsSL "https://accounts.google.com/gsi/client" -o public/gsi-client.js
+          echo "✅ gsi-client.js bundled ($(wc -c < public/gsi-client.js) bytes)"
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Copy gsi-client.js to dist (Vite public dir fix)
+        run: |
+          cp public/gsi-client.js dist/gsi-client.js
+          echo "✅ gsi-client.js copied to dist/ ($(wc -c < dist/gsi-client.js) bytes)"
+
+      - name: Add Android platform
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          else
+            echo "Android already exists, skipping"
+          fi
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Install sharp (SVG→PNG converter)
+        run: npm install sharp --save-dev --legacy-peer-deps
+
+      - name: Generate icon foreground PNG
+        run: |
+          node -e "
+          const sharp = require('sharp');
+          const fs = require('fs');
+          const svg = \`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96' width='1024' height='1024'>
+            <defs>
+              <radialGradient id='core' cx='50%' cy='50%' r='50%'>
+                <stop offset='0%' stop-color='#00e5ff' stop-opacity='0.45'/>
+                <stop offset='100%' stop-color='#00e5ff' stop-opacity='0'/>
+              </radialGradient>
+              <filter id='glow' x='-40%' y='-40%' width='180%' height='180%'>
+                <feGaussianBlur stdDeviation='1.5' result='b'/>
+                <feMerge><feMergeNode in='b'/><feMergeNode in='SourceGraphic'/></feMerge>
+              </filter>
+            </defs>
+            <ellipse cx='48' cy='48' rx='42' ry='18' fill='none' stroke='#00e5ff' stroke-width='0.8' stroke-dasharray='4 3' stroke-opacity='0.45'/>
+            <ellipse cx='48' cy='48' rx='42' ry='18' fill='none' stroke='#00e5ff' stroke-width='0.8' stroke-dasharray='4 3' stroke-opacity='0.45' transform='rotate(60 48 48)'/>
+            <ellipse cx='48' cy='48' rx='42' ry='18' fill='none' stroke='#00e5ff' stroke-width='0.8' stroke-dasharray='4 3' stroke-opacity='0.45' transform='rotate(-60 48 48)'/>
+            <polygon points='48,26 64,36 64,56 48,66 32,56 32,36' fill='none' stroke='#00e5ff' stroke-width='1.5' stroke-opacity='0.85'/>
+            <circle cx='48' cy='46' r='14' fill='url(#core)'/>
+            <text x='48' y='52' font-family='monospace' font-size='14' font-weight='900' fill='white' text-anchor='middle' filter='url(#glow)'>SBM</text>
+            <circle cx='48' cy='4' r='2.5' fill='#00e5ff' opacity='0.9'/>
+            <circle cx='48' cy='92' r='3' fill='#00e5ff' opacity='0.9'/>
+            <circle cx='4' cy='48' r='3' fill='#00e5ff' opacity='0.9'/>
+            <circle cx='92' cy='48' r='3' fill='#00e5ff' opacity='0.9'/>
+          </svg>\`;
+          fs.mkdirSync('assets', { recursive: true });
+          sharp(Buffer.from(svg)).resize(1024,1024).png().toFile('assets/icon-foreground.png')
+            .then(()=>console.log('done')).catch(e=>{console.error(e);process.exit(1);});
+          "
+
+      - name: Generate icon background PNG
+        run: |
+          node -e "
+          const sharp = require('sharp');
+          const fs = require('fs');
+          const bg = \`<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024'>
+            <defs>
+              <linearGradient id='bg' x1='0%' y1='0%' x2='100%' y2='100%'>
+                <stop offset='0%' stop-color='#001a2c'/>
+                <stop offset='100%' stop-color='#003344'/>
+              </linearGradient>
+            </defs>
+            <rect width='1024' height='1024' fill='url(#bg)'/>
+          </svg>\`;
+          sharp(Buffer.from(bg)).resize(1024,1024).png().toFile('assets/icon-background.png')
+            .then(()=>console.log('done')).catch(e=>{console.error(e);process.exit(1);});
+          "
+
+      - name: Generate splash PNG
+        run: |
+          node -e "
+          const sharp = require('sharp');
+          const fs = require('fs');
+          const splash = \`<svg xmlns='http://www.w3.org/2000/svg' width='2732' height='2732'>
+            <defs>
+              <radialGradient id='sg' cx='50%' cy='40%' r='60%'>
+                <stop offset='0%' stop-color='#001a2c'/>
+                <stop offset='100%' stop-color='#000d18'/>
+              </radialGradient>
+            </defs>
+            <rect width='2732' height='2732' fill='url(#sg)'/>
+          </svg>\`;
+          sharp(Buffer.from(splash)).resize(2732,2732).png().toFile('assets/splash.png')
+            .then(()=>console.log('done')).catch(e=>{console.error(e);process.exit(1);});
+          "
+
+      - name: Install Capacitor Assets
+        run: npm install @capacitor/assets --save-dev --legacy-peer-deps
+
+      - name: Generate all Android icon sizes
+        run: npx capacitor-assets generate --android
+
+      - name: Add notification status bar icon (ic_stat_pulse)
+        run: |
+          mkdir -p "android/app/src/main/res/drawable-mdpi"
+          echo "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAACCklEQVR4nK2UPWtUURCGn7m7JiBEREEsEw0BBSGFopWNoo3BIqQUrMRK0P9gE0utLSzsTKO/QbEwWGkUSyUIAcVC87HZx2LnsFf3g9yQgWXmzrkz7533vLMwxtQYFh+IlYbqrHrxoJtXaqin1B/27GbmWk16VaPyESEwDxwFBK5mrhFVowBMfyPjAK6oE8BuE4DBzn3up9R1tavupL+UZ3umadgEJXcZOFnLBbCYz3umaRRFAEvpfwEbGS/si6ZUTUttpz+ifk31vFIfZrxbJFunqVZf/1XlcGBc9bp9u5u7sJvPy/lOe1R9rU+UC50GZuhR1gXuAwvANnAuIj6rn4A54CM9+e4AERFddQaYpq+4AH5GxCrqWfW7g7ajvq0t3aPMd2o0lWXcGFLfUW9VwDHgxJAJ28DziOjmgr2gd7ktUk21ZTwOdP6rbwHThaLFpOhdHp4GpoDH9BVzCHgPnAHWgPmI2FKfAreBTeAO8A2YBQ4DT0bdzz9Wu9DlmpoupFrWM/d6WG2VhXWJlrhdx0hfaKqAa8B5+su4kvc1OaR+T1OEOqF+KF+sPst4U53L98Yt71iAQlNR0x/1d8Zv8usHmjdBq9PUBSaBicytRES3Yb8hCH2a1uz9u3bUrXH0NEVsRcQ28LJg0pPuF7XKKfZvqbBIiRa7l2fNVDMGpCznkvqggB5I8/3YX5i8FDro5+AAAAAAAElFTkSuQmCC" | base64 --decode > "android/app/src/main/res/drawable-mdpi/ic_stat_pulse.png"
+          mkdir -p "android/app/src/main/res/drawable-hdpi"
+          echo "iVBORw0KGgoAAAANSUhEUgAAACQAAAAkCAYAAADhAJiYAAADAklEQVR4nMWYv2tUQRDHv/MuKsmZqBghha02WhrUxiYooraCWIQQsLKw8g+w9U+w8B+QgBYHNoLgIXb2KlglijFGjcT8uvtYvFlv3dy9vCPvzoHHvN3bm52dz+7svjX1KUAmqSapZWbtfv9fqQBWVB6qeGQETAMPgOm4fujOAAZcBNbJZR045/WVOVXWUGZmSLomaVTSmut7Xl8ZurIOhcl7VhLuDJJmgHEzaw1tPoWOgClgzXG1gZa/X/ffa1X0VyZCoaOrkg5LailHFKJ2swpHSku0uhoekR2PUNvLn4BxbzNYbAmuHxEuIucqxbYXshjXhKQd5bg2lE/qIMPB1gXXluuHwLcoUoPH1gVXQPULOAa8TJysBNtfZJ5x49GluLa83DSzVUnPvdxyXYiti/3e9XHq920iAw54OeDacD3vRs4Am1E+6omth/0srU+dGgPqSd1khKvt71OR4TdlsXWz7/V1YCyUR7xyRtJjSQa8V44SScfVWV01Sa/M7DNwyMw2gQVJ55VjO6AcWyMetZm1gSuSHkmqAe/U2fuQdCpvyryZvRAwASzSW9pRBOa8o4OuTxdh86cOLBXYD7IITJTZOsxH/1VSw+fHtjP/IOmtR3Rb0pSkSyH6fhI44lFuR09Pyczsp6RZSR8lrUhaTZ4V/+22mS1LMu8o8yPsgttKV1sY7GVJdXckc/3dn9j+rPuSCzBKnl+Ouo7fR72NRe1D0uyKjd1JddP1Xbc7mdpXarxIurWhs3zT1XbDfz/J7lV6osh+Jkm+Eqzo6fGF0QvbLddxUjXlSXUZGClpvz8pwPbFO33q5ZBU57z9yL47L3Iqwbbt+g6ddJIm1cGdm8JogfvJPFoiPy+FqDXCAAbmTNxBhC0+wEHnEDcXD2DgTiXY0mNuaVxVhS9dbeFbLaycpu+B4ftu4A6Fjp8p30LS3f5Jxf3tLRG2pqMK2PpaXVV6HLA1leP67fq146rthatSoXMhcYF/LySmqfhCoi+nXP//K5vIqX1dag0khbOPa78/PpaJXXQYprsAAAAASUVORK5CYII=" | base64 --decode > "android/app/src/main/res/drawable-hdpi/ic_stat_pulse.png"
+          mkdir -p "android/app/src/main/res/drawable-xhdpi"
+          echo "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAADuUlEQVR4nOWZO2sUURTH/2d2jSImUUTIFxCxEAwqWNloLAzaaMBS1FIQa/ETWNiJVtpYaAQfaJFCEEkRA36A+GhsEsQHMaKB7M7fYs7J3szeeezszmTEP1xmcp8n9/zmzD2zwD8u6XcCkgKgoX+GIhL2O2dlUuPjdUGVNhT2AEkREZIcBnAZwAiAByLy0doGZuWgRVJIBiR3k3zLjr6SPGTtm21nokg29XpVDf+jhSSfa1sjfZbBqFlwnOFxEECo8wRav5fkEIC1vq0rQ/bgkhwmuai7Huq1reWo9indC0U4tTHHAIwh8oAFg1Dbz+rffYfpvMYU0ZRe3bhv851RjNp9zD94ZeDDzcCoVw+k4WOqFKOiCPnwic9ZL4xy4lM5Rr14wIeP6QOA13ofokKMiiDk4mN4vABwS++JumGUgk9b7ydIbif5K9ZWOkZ5PZCETwBgCcC8iPwG8EbrK8OoV4R8+MyIyLLeP/TMXQ1GegRuesoWLaMJ+Ew6c4yRXC6CUcr6vhJ0Dc7xD06oYS0nfC4ySmjcI/ZLp9+a3t90+/iMz7HH8TEBADTZyaxGAFwEMKp9bNIAETLHnfo2oiP0jIisxHZ2GsApZywQYXQdniM2N2Z2lzzrr3fVEgJ4JCLvSQZglFntIjnP/NqAD8kGO5EqN0ZMzuyy9I3k+LrnSF7ThlVGbvcVM9rw+cwOPmZ8oNdcGLE7s0tb34plfs9cF5vb6HGdySLPmvb7pPgETgJv800749KiUTyzayBCM+lhF3SQHnHduI/k9x5cSJLndewGJPSaiRF7O1v5dA7634qILJA8AeAGgB0A5uCP2wcA7ARwR0SmdffX++nDGIjIEslZRA9zqDvdRPRSm3N2sg3/0fwHgNsAWgnr3xWRx7Rwyj7CmKfeuL6gO9Vi5/lZIDmknrN+97XNGCfJeznWl3hFoK4NmPwCsfbUF5JeszASDz7r0U3X29br+gMRc0QjbZ/Uujb9L8dMMsr6epYVjbbqfdLZaoVkY9M+T2ZgFJI8ojh88eGjY3NhUooH3GgEYFar7YgtAE4COAxgDzo7b0dz90ieqTI/wKZhdBrAFae+PviYUjCykLnKjgrhU7oSolFchaKPqexv+D6MTIZI/fAxZWBUb3xMGRj1hQ9QPkLuGj6M6ouPKYbRz9jO1xsfk4PRUzXe/TDQldn1oqp+SbR13iF6E7eQntnVS4yOwEJyP7szv67MrpZyMBon+YTkK5JTblvt5WO8X+NL/xUxLjVYoF9A3Jz6v9RfRLfJa2KKt7wAAAAASUVORK5CYII=" | base64 --decode > "android/app/src/main/res/drawable-xhdpi/ic_stat_pulse.png"
+          mkdir -p "android/app/src/main/res/drawable-xxhdpi"
+          echo "iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAYAAABV7bNHAAAFIklEQVR4nO2cvW8cRRiHn7k7GZQQB0cEGTqkiFQUqWgQHQIZJERhREGk/A+InpaKmo8iLVAgJAKJiJSGj2AhUdAgSgoIEkK2IyQ+fPej2HfiufV+zOztOnu3/kmjPe++M/Pu3PvMzO27MpzoRCfqUO44OpE0AWRlBEydczqOvnsvSYVfQtn5wSgcAEmXJX0i6aakNySdydsMTpJGksaS3tNRfSfpvNkMb5Akje34ug3IP5IOrPxt5z4IbQelYIA+lTSV9F8QPVMrv0o6bXa9jaJRR+3OJI2Ax62PsB9nf68DZzvqvzW1PkCSRraEXwCe4nBp93LAFDgNPGfneotZFxHk23wZeIBsMMr0qh1nHfjRT9nKNJJ02+acg4JVbGbHPUmbVq+X81CrEWR4zcjwukSGVxE+HrN14AU710vM2kYsxGuNary8tu24+phF4rVUmLUWQQl4eS0FZm0i1gQvr9XHLBGvpcGslQhqgJdX7zFrC7FF8PJaXcxq8PIY/SzpVsX1XmK2cARF4OWj6TPgnYImeo1ZG4jV4eWvfwHcBP4iG4CiZ9Krh1kkXr9JOmv2ny8TZgtFUAJeN5xze/b5w4KmeovZoojF4vVxcO4GsM8QMEvAy2cxJna8tiyYNY6gRLzuav7hfBhRXr3EbBHEmuDlba6zrJhJmijLZ41qireLxcvZcWTHTjBL8D9fxla3vL8GzjyhLOflb8zLp3mumt04qOPnoSsFAxT+fSW0j/SnlTkrbMc765xzcs5J0mXgFbK5wFH8goMjQ+MRMrzymBTh5ZXHbN3q5/vZBq4SgVkD/+eq2/EA+BJ41+ZMd+8FiwCZojRxqkrxCm6oVcxUneZO1XxaXIchX5QmrivTgg5K8QpuqDXMVJ3mTi35tPgkXMVeIwvnEdnqElOKVsERWdh+VPGld7GabTfwP1/WrI2XJD0ETP3NQJbphMVeqvJzyS7wrZ07cnM2V4ycc3eArwrs/MA/I2nTOTdTOWZVae4mcsCDwMQ5p7DB6/b5gMO3waaRZWb2/1oHO8CupHHFm2RVE3nUplH1aW4i7yPv/21gT9IESc4mpA1JOwVzSqr+lHTJt1syOOG+aFPZhCzNbxf8PHTND0ZBG34ue9Nsw7dIWvHfO+ks7M8BbwPPkyH3I3H8XwBOAV8DbznnftDhT5FSeRsbhC37Nn2keFz3gYvOuTsKl975QfsGeLqk/l3g+4X91/wrc6ckPVzTaFh3zr4qcnL1Gq9mOtwqPKmIzWor/ltYhbveqG16YD+OHRzfnx2TMVM9Xn4L8qL5udaa/zZQ0atZqn2ubqNNY3CDSb8FU/0vHC2/bY+9yVT7Eh+iVzM1eNRS5V+V/129gpeiJpvGJo9allcNMPOPMxbGq059iCBIxMw5N6UlvGIdu99KwswiYhh4eUViti/pMbPbqbBrBS/oTwRBHGZngGclnecY8AJ7otgTxT5p3AI2yHw/YP4eVhMvr0jMfpf0k32eFlxvDS/oF2JQjxnAo8DFnD10gFe+gz4oZjVTwTlYdby8ajArUyd4Qf8iCJpFQid49VKqfwRSpHuPNqzufc/pd6pEzDrDC/qJGKRhNhy8vBIxGxZeXpGYdYoX9BcxiMNseHh55TDbLcFsaue2zHYYeHkFmN2ywcj/NpspS/RtmF3r7zT2GTGoTounpLlXU6pPi0eluVdawVx0TtL7kn6R9Iey/+pwya4Nc3C8VJEWH/zgeOloWjwpzT0YaYE094lOdPz6HxM0TM2uzE9AAAAAAElFTkSuQmCC" | base64 --decode > "android/app/src/main/res/drawable-xxhdpi/ic_stat_pulse.png"
+          mkdir -p "android/app/src/main/res/drawable-xxxhdpi"
+          echo "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" | base64 --decode > "android/app/src/main/res/drawable-xxxhdpi/ic_stat_pulse.png"
+          echo "✅ ic_stat_pulse.png সব ডেনসিটিতে যোগ হয়েছে"
+
+      - name: Add google-services.json
+        run: |
+          mkdir -p android/app
+          cp google-services.json android/app/google-services.json
+
+      - name: Add Google Auth server_client_id to strings.xml
+        run: |
+          mkdir -p android/app/src/main/res/values
+          STRINGS_FILE="android/app/src/main/res/values/strings.xml"
+          if [ ! -f "$STRINGS_FILE" ]; then
+            echo '<?xml version="1.0" encoding="utf-8"?><resources></resources>' > "$STRINGS_FILE"
+          fi
+          # server_client_id = Web Application OAuth Client ID (from google-services.json)
+          WEB_CLIENT_ID=$(python3 -c "
+          import json
+          with open('google-services.json') as f:
+            d = json.load(f)
+          clients = d.get('client', [])
+          for c in clients:
+            for oc in c.get('oauth_client', []):
+              if oc.get('client_type') == 3:
+                print(oc['client_id'])
+                break
+          " 2>/dev/null || echo "")
+          if [ -n "$WEB_CLIENT_ID" ]; then
+            if ! grep -q "server_client_id" "$STRINGS_FILE"; then
+              sed -i 's|</resources>|    <string name="server_client_id">'"$WEB_CLIENT_ID"'</string>\n</resources>|' "$STRINGS_FILE"
+            fi
+            echo "✅ server_client_id added: $WEB_CLIENT_ID"
+          else
+            echo "⚠️ No web client ID found in google-services.json"
+          fi
+
+      - name: Add Firebase dependencies to build.gradle
+        run: |
+          sed -i '/dependencies {/a\        classpath '"'"'com.google.firebase:firebase-crashlytics-gradle:2.9.9'"'"'' android/build.gradle
+          sed -i '/apply plugin: '"'"'com.android.application'"'"'/a\apply plugin: '"'"'com.google.gms.google-services'"'"'' android/app/build.gradle
+          sed -i '/dependencies {/a\    implementation platform('"'"'com.google.firebase:firebase-bom:32.7.0'"'"')' android/app/build.gradle
+          sed -i '/implementation platform.*firebase-bom/a\    implementation '"'"'com.google.firebase:firebase-messaging'"'"'' android/app/build.gradle
+
+      - name: Add permissions to AndroidManifest.xml
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if ! grep -q "POST_NOTIFICATIONS" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <application|' "$MANIFEST"
+          fi
+          if ! grep -q "SCHEDULE_EXACT_ALARM" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <application|' "$MANIFEST"
+          fi
+          if ! grep -q "BLUETOOTH_CONNECT" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.BLUETOOTH"/>\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>\n    <application|' "$MANIFEST"
+          fi
+          if ! grep -q "WRITE_EXTERNAL_STORAGE" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>\n    <application|' "$MANIFEST"
+          fi
+          if ! grep -q "MANAGE_EXTERNAL_STORAGE" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <application|' "$MANIFEST"
+          fi
+          # ক্যামেরা পারমিশন — স্টাফ সেটআপ QR স্ক্যান ফিচারের জন্য
+          if ! grep -q "android.permission.CAMERA" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <uses-feature android:name="android.hardware.camera" android:required="false"/>\n    <application|' "$MANIFEST"
+            echo "✅ CAMERA permission added (QR scan feature)"
+          fi
+          # FileProvider — PDF ফাইল WhatsApp-এ শেয়ার করার জন্য
+          if ! grep -q "FileProvider" "$MANIFEST"; then
+            sed -i 's|</application>|    <provider\n            android:name="androidx.core.content.FileProvider"\n            android:authorities="com.protik.sbm.fileprovider"\n            android:exported="false"\n            android:grantUriPermissions="true">\n            <meta-data\n                android:name="android.support.FILE_PROVIDER_PATHS"\n                android:resource="@xml/file_paths"/>\n        </provider>\n    </application>|' "$MANIFEST"
+            echo "✅ FileProvider added"
+          fi
+          mkdir -p android/app/src/main/res/xml
+          if [ ! -f android/app/src/main/res/xml/file_paths.xml ]; then
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<paths>' '    <external-path name="external_files" path="." />' '    <cache-path name="cache_files" path="." />' '    <files-path name="files" path="." />' '    <external-cache-path name="external_cache" path="." />' '</paths>' > android/app/src/main/res/xml/file_paths.xml
+            echo "✅ file_paths.xml created"
+          fi
+          # OAuth deep link intent filter — com.protik.sbm://oauth2redirect
+          if ! grep -q "sbm_oauth" "$MANIFEST"; then
+            sed -i 's|</activity>|        <intent-filter android:label=\"sbm_oauth\">\n                <action android:name=\"android.intent.action.VIEW\"/>\n                <category android:name=\"android.intent.category.DEFAULT\"/>\n                <category android:name=\"android.intent.category.BROWSABLE\"/>\n                <data android:scheme=\"com.protik.sbm\" android:host=\"oauth2redirect\"/>\n            </intent-filter>\n        </activity>|' "$MANIFEST"
+          else
+            sed -i 's|android:scheme="com.protik.sbm" android:host="[^"]*"|android:scheme="com.protik.sbm" android:host="oauth2redirect"|' "$MANIFEST"
+          fi
+
+      - name: Set versionCode from run number
+        run: |
+          VERSION_CODE=${{ github.run_number }}
+          sed -i "s/versionCode [0-9]*/versionCode $VERSION_CODE/" android/app/build.gradle
+          echo "versionCode = $VERSION_CODE"
+
+      - name: Print SHA-1 fingerprint
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > /tmp/temp.jks
+          keytool -list -v -keystore /tmp/temp.jks \
+            -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
+            -alias "${{ secrets.KEY_ALIAS }}" 2>/dev/null | grep "SHA1:"
+          rm /tmp/temp.jks
+
+      - name: Decode Keystore from Secret
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/my-release-key.jks
+
+      - name: Build Release APK (signed)
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon --stacktrace \
+            -Pandroid.injected.signing.store.file=$(pwd)/app/my-release-key.jks \
+            -Pandroid.injected.signing.store.password=${{ secrets.KEYSTORE_PASSWORD }} \
+            -Pandroid.injected.signing.key.alias=${{ secrets.KEY_ALIAS }} \
+            -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hisabghor-apk-v${{ github.run_number }}
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
