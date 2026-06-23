@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ReactDOM from "react-dom";
 import { initializeApp, getApps, deleteApp } from "firebase/app";
-import { getFirestore, doc, getDoc, updateDoc, setDoc } from "firebase/firestore";
 import {
-  getDatabase, ref as dbRef, onValue, set as dbSet,
-  update as dbUpdate, off as dbOff, serverTimestamp, get as dbGet
-} from "firebase/database";
+  getFirestore, doc, getDoc, updateDoc, setDoc, deleteDoc,
+  collection, onSnapshot as fsOnSnapshot, writeBatch, getDocs
+} from "firebase/firestore";
 import { create } from "zustand";
 
 // ─── Zustand Store — 48 useState → একটি কেন্দ্রীয় store ─────────────────────
@@ -3361,44 +3360,40 @@ const DeviceID = (() => {
   };
 })();
 
-// ─── RT — Real-time Multi-Device Sync Layer (Firebase RTDB SDK, onValue) ─────
-// সব ডিভাইস (admin + staff) একই sbm/data/{key} path দেখে। কেউ লিখলে onValue
-// listener দিয়ে সব ডিভাইসে সাথে সাথেই (polling ছাড়া) পৌঁছায়।
-// Keys synced: customers, products, invoices, txns, smsLog, users, suppliers,
-// purchaseOrders, stockMovements, cashLogs, paymentInvoices, shopName,
-// smsTemplates, smsGateway
-const RT_KEYS = [
-  "customers", "products", "invoices", "txns", "smsLog", "users", "suppliers",
-  "purchaseOrders", "stockMovements", "cashLogs", "paymentInvoices",
-  "shopName", "smsTemplates", "smsGateway",
+// ─── FSS — Firestore Per-Record Sync Layer (replaces RT) ────────────────────
+// প্রতিটি collection-এর প্রতিটি document আলাদাভাবে sync হয় (onSnapshot)।
+// যেকোনো ফোন থেকে change হলে millisecond-এর মধ্যে সব ফোনে (admin+staff) পৌঁছায়।
+// Collections: customers, products, invoices, txns, paymentInvoices,
+// purchaseOrders, stockMovements, cashLogs, suppliers, smsLog, users
+// + settings/main (shopName, smsTemplates, smsGateway)
+const FSS_KEYS = [
+  "customers", "products", "invoices", "txns", "paymentInvoices",
+  "purchaseOrders", "stockMovements", "cashLogs", "suppliers",
+  "smsLog", "users",
 ];
 
-const RT = {
+const FSS = {
   _app: null,
   _db: null,
   _cfg: null,
-  _listeners: {},     // key -> unsubscribe fn
-  _echoGuard: {},      // key -> last value JSON this device itself wrote (skip re-applying it)
+  _listeners: {},        // key -> unsubscribe fn
+  _settingsListener: null,
   _connectionState: "offline",
 
   isReady() { return !!this._db; },
 
-  // (Re)initialise the RTDB app for a given shop config. Safe to call repeatedly —
-  // if config unchanged, no-op; if changed, tears down old app + listeners first.
   init(cfg) {
-    if (!cfg?.databaseURL) return false;
-    const same = this._cfg && this._cfg.databaseURL === cfg.databaseURL
-      && this._cfg.apiKey === cfg.apiKey && this._cfg.projectId === cfg.projectId;
+    if (!cfg?.projectId) return false;
+    const same = this._cfg && this._cfg.projectId === cfg.projectId
+      && this._cfg.apiKey === cfg.apiKey;
     if (same && this._db) return true;
 
     this.teardown();
     try {
-      // Use a named app per databaseURL so this never collides with the
-      // default Firestore app (protik-aa991) used for central recovery.
-      const appName = "sbm-rtdb-" + (cfg.projectId || "default");
+      const appName = "sbm-firestore-" + cfg.projectId;
       const existing = getApps().find(a => a.name === appName);
       this._app = existing || initializeApp(cfg, appName);
-      this._db = getDatabase(this._app);
+      this._db = getFirestore(this._app);
       this._cfg = cfg;
       this._connectionState = "online";
       return true;
@@ -3411,6 +3406,7 @@ const RT = {
 
   teardown() {
     this.unsubscribeAll();
+    if (this._settingsListener) { this._settingsListener(); this._settingsListener = null; }
     if (this._app) {
       try { deleteApp(this._app); } catch {}
     }
@@ -3419,27 +3415,22 @@ const RT = {
     this._cfg = null;
   },
 
-  // Subscribe to one key (e.g. "products"). callback(value) fires on every
-  // remote change AND once immediately with current value.
+  // Subscribe to one collection. callback(array) fires with the full current
+  // array on every change (own writes included — Firestore local cache
+  // applies instantly, so this also gives optimistic-UI for free).
   subscribe(key, callback) {
     if (!this._db) return () => {};
     this.unsubscribe(key);
-    const r = dbRef(this._db, `sbm/data/${key}`);
-    const handler = onValue(r, (snap) => {
-      const val = snap.val();
-      const json = JSON.stringify(val);
-      // Skip applying the echo of our own most-recent write for this key
-      if (this._echoGuard[key] !== undefined && this._echoGuard[key] === json) {
-        delete this._echoGuard[key];
-        return;
-      }
+    const colRef = collection(this._db, key);
+    const unsub = fsOnSnapshot(colRef, (snap) => {
+      const arr = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       this._connectionState = "online";
-      callback(val, key);
+      callback(arr);
     }, (err) => {
       this._connectionState = "offline";
     });
-    this._listeners[key] = () => dbOff(r, "value", handler);
-    return this._listeners[key];
+    this._listeners[key] = unsub;
+    return unsub;
   },
 
   unsubscribe(key) {
@@ -3450,118 +3441,149 @@ const RT = {
     Object.keys(this._listeners).forEach(k => this.unsubscribe(k));
   },
 
-  // Subscribe to every shared data key at once.
   subscribeAll(onChange) {
-    RT_KEYS.forEach(key => this.subscribe(key, (val) => onChange(key, val)));
+    FSS_KEYS.forEach(key => this.subscribe(key, (arr) => onChange(key, arr)));
   },
 
-  // Instantly write a key's full value to Firebase. Marks echoGuard so the
-  // listener this device just triggered doesn't re-apply the same data.
-  // Guard auto-clears after 5s as a safety net in case the exact echo never
-  // arrives (e.g. server-side JSON normalization).
-  //
-  // ⚠️ Per-key write queue: যদি একই key-তে আগের push এখনো network-এ pending
-  // থাকা অবস্থায় নতুন push আসে (যেমন: পণ্য delete করার ৩০০ms-এর মধ্যেই আরেকটা
-  // পরিবর্তন), দুটো dbSet() call একসাথে in-flight থাকলে network response
-  // out-of-order আসতে পারে — ফলে পুরনো (delete-এর আগের) ডেটা শেষে গিয়ে লেখা
-  // হয়ে যায় এবং মুছে ফেলা পণ্য আবার ফিরে আসে। তাই প্রতিটা key-র push
-  // একে অপরের পরে সিরিয়ালি (queue করে) পাঠানো হয়, কখনো overlap করে না।
-  async push(key, value) {
-    if (!this._db) return { ok: false, msg: "Firebase সংযুক্ত নেই" };
-    if (!this._writeQueues) this._writeQueues = {};
-    const prevInFlight = this._writeQueues[key] || Promise.resolve();
-    const run = prevInFlight.then(() => this._doPush(key, value));
-    // queue chain রাখি কিন্তু এর reject অন্য কারো await-কে যেন না আটকায়
-    this._writeQueues[key] = run.catch(() => {});
-    return run;
-  },
-
-  async _doPush(key, value) {
-    try {
-      const json = JSON.stringify(value === undefined ? null : value);
-      this._echoGuard[key] = json;
-      if (this._echoGuardTimers?.[key]) clearTimeout(this._echoGuardTimers[key]);
-      if (!this._echoGuardTimers) this._echoGuardTimers = {};
-      this._echoGuardTimers[key] = setTimeout(() => { delete this._echoGuard[key]; }, 5000);
-      await dbSet(dbRef(this._db, `sbm/data/${key}`), value === undefined ? null : value);
+  subscribeSettings(callback) {
+    if (!this._db) return () => {};
+    if (this._settingsListener) this._settingsListener();
+    const ref = doc(this._db, "settings", "main");
+    this._settingsListener = fsOnSnapshot(ref, (snap) => {
       this._connectionState = "online";
-      return { ok: true };
-    } catch (e) {
-      delete this._echoGuard[key];
-      this._connectionState = "offline";
-      return { ok: false, msg: e.message || "Firebase write ব্যর্থ" };
-    }
+      callback(snap.exists() ? snap.data() : {});
+    }, () => { this._connectionState = "offline"; });
+    return this._settingsListener;
   },
 
-  // Push multiple keys atomically (one network round-trip).
-  async pushMany(obj) {
+  // Write/update one record. `data` must include `id` matching the doc id
+  // (caller's record id), or pass id separately.
+  async setRecord(key, id, data) {
     if (!this._db) return { ok: false, msg: "Firebase সংযুক্ত নেই" };
     try {
-      const updates = {};
-      if (!this._echoGuardTimers) this._echoGuardTimers = {};
-      Object.entries(obj).forEach(([key, value]) => {
-        updates[`sbm/data/${key}`] = value === undefined ? null : value;
-        this._echoGuard[key] = JSON.stringify(value === undefined ? null : value);
-        if (this._echoGuardTimers[key]) clearTimeout(this._echoGuardTimers[key]);
-        this._echoGuardTimers[key] = setTimeout(() => { delete this._echoGuard[key]; }, 5000);
-      });
-      await dbUpdate(dbRef(this._db), updates);
+      await setDoc(doc(this._db, key, String(id)), data);
       this._connectionState = "online";
       return { ok: true };
     } catch (e) {
       this._connectionState = "offline";
-      return { ok: false, msg: e.message || "Firebase write ব্যর্থ" };
+      return { ok: false, msg: e.message || "Firestore write ব্যর্থ" };
     }
   },
 
-  // One-time fetch of a key (used for migration / manual checks).
-  async getOnce(key) {
-    if (!this._db) return null;
-    try {
-      const snap = await dbGet(dbRef(this._db, `sbm/data/${key}`));
-      return snap.val();
-    } catch { return null; }
-  },
-
-  getConnectionState() { return this._connectionState; },
-
-  // Remove the old polling-era snapshot rotation data (sbm/snaps, sbm/idx,
-  // sbm/bk) and replace it with a fresh sbm/data/* structure seeded from this
-  // device's current local data. Use once when migrating from the old
-  // slot-rotation sync system to real-time per-key sync.
-  async purgeLegacyAndReseed(localData) {
+  async deleteRecord(key, id) {
     if (!this._db) return { ok: false, msg: "Firebase সংযুক্ত নেই" };
     try {
-      await dbSet(dbRef(this._db, "sbm/snaps"), null);
-      await dbSet(dbRef(this._db, "sbm/idx"), null);
-      await dbSet(dbRef(this._db, "sbm/bk"), null);
-      await dbSet(dbRef(this._db, "sbm/ctrl"), null);
-      const result = await this.pushMany(localData);
-      return result;
+      await deleteDoc(doc(this._db, key, String(id)));
+      return { ok: true };
     } catch (e) {
-      return { ok: false, msg: e.message || "Cleanup ব্যর্থ" };
+      return { ok: false, msg: e.message || "Firestore delete ব্যর্থ" };
     }
   },
 
-  // Firebase-এর সব ব্যবসায়িক ডেটা মুছে শূন্য থেকে শুরু
+  async setSettings(data) {
+    if (!this._db) return { ok: false, msg: "Firebase সংযুক্ত নেই" };
+    try {
+      await setDoc(doc(this._db, "settings", "main"), data, { merge: true });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, msg: e.message || "Firestore write ব্যর্থ" };
+    }
+  },
+
+  // Batched write of many records to one collection (≤500 per batch).
+  // Used for: one-time migration/seeding from old RTDB/local arrays.
+  async setMany(key, records) {
+    if (!this._db) return { ok: false, msg: "Firebase সংযুক্ত নেই" };
+    if (!records?.length) return { ok: true };
+    try {
+      for (let i = 0; i < records.length; i += 450) {
+        const slice = records.slice(i, i + 450);
+        const batch = writeBatch(this._db);
+        slice.forEach(rec => {
+          if (rec?.id === undefined || rec?.id === null) return;
+          batch.set(doc(this._db, key, String(rec.id)), rec);
+        });
+        await batch.commit();
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, msg: e.message || "Firestore batch write ব্যর্থ" };
+    }
+  },
+
+  // Wipe an entire collection (used by Master Full Reset).
+  async clearCollection(key) {
+    if (!this._db) return { ok: false, msg: "Firebase সংযুক্ত নেই" };
+    try {
+      const snap = await getDocs(collection(this._db, key));
+      const ids = snap.docs.map(d => d.id);
+      for (let i = 0; i < ids.length; i += 450) {
+        const slice = ids.slice(i, i + 450);
+        const batch = writeBatch(this._db);
+        slice.forEach(id => batch.delete(doc(this._db, key, id)));
+        await batch.commit();
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, msg: e.message || "Firestore clear ব্যর্থ" };
+    }
+  },
+
+  // Wipe everything (all FSS_KEYS collections + settings/main).
   async clearAllData() {
     if (!this._db) return { ok: false, msg: "Firebase সংযুক্ত নেই" };
     try {
-      await dbSet(dbRef(this._db, "sbm"), null);
+      for (const key of FSS_KEYS) {
+        const r = await this.clearCollection(key);
+        if (!r.ok) return r;
+      }
+      await deleteDoc(doc(this._db, "settings", "main")).catch(() => {});
       return { ok: true };
     } catch (e) {
-      return { ok: false, msg: e.message || "Firebase clear ব্যর্থ" };
+      return { ok: false, msg: e.message || "Firestore clear ব্যর্থ" };
     }
   },
+
+  // One-time fetch of a whole collection (used for migration checks).
+  async getAllOnce(key) {
+    if (!this._db) return [];
+    try {
+      const snap = await getDocs(collection(this._db, key));
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch { return []; }
+  },
+
+  // পুরনো sync data মুছে এই ডিভাইসের বর্তমান data দিয়ে নতুন করে শুরু —
+  // Settings-এর "Reset Sync" বাটনে ব্যবহৃত।
+  async purgeAndReseed(localData) {
+    if (!this._db) return { ok: false, msg: "Firebase সংযুক্ত নেই" };
+    try {
+      const clr = await this.clearAllData();
+      if (!clr.ok) return clr;
+      const { shopName, smsTemplates, smsGateway, ...rest } = localData || {};
+      for (const key of Object.keys(rest)) {
+        if (FSS_KEYS.includes(key) && Array.isArray(rest[key])) {
+          const r = await this.setMany(key, rest[key]);
+          if (!r.ok) return r;
+        }
+      }
+      await this.setSettings({ shopName, smsTemplates, smsGateway });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, msg: e.message || "Reseed ব্যর্থ" };
+    }
+  },
+
+  getConnectionState() { return this._connectionState; },
 };
 
 // ─── Firebase Realtime Database Layer (Legacy REST — backup/restore/devices) ─
 // Uses Firebase REST API — no SDK, works in any browser/WebView
 // Rules must be: { "rules": { ".read": true, ".write": true } }
 // Multi-device: up to 5 devices can sync simultaneously via Firebase
-// NOTE: live multi-device data sync now goes through RT (above) using onValue
-// real-time listeners. FB below is kept for manual JSON backup/restore,
-// snapshot history list, and device presence tracking in Settings.
+// NOTE: live multi-device data sync now goes through FSS (Firestore, above)
+// using onSnapshot per-record listeners. FB below is kept for manual JSON
+// backup/restore, snapshot history list, and device presence tracking in Settings.
 const FB = {
   _cfg: null,
   _pollTimer: null,
@@ -7880,7 +7902,7 @@ function SmartBusinessMgmt() {
       const fbOn  = (await load(SK.firebaseEnabled)) ?? false;
       setFirebaseConfig(fbCfg);
       setFirebaseEnabled(fbOn);
-      if (fbCfg && fbOn) { FB.init(fbCfg); RT.init(fbCfg); }
+      if (fbCfg && fbOn) { FB.init(fbCfg); FSS.init(fbCfg); }
       // Auto-login: restore last logged-in user (PIN-based, stored locally)
       const savedUser = await load(SK.authSession);
       if (savedUser?.id) {
@@ -7912,9 +7934,9 @@ function SmartBusinessMgmt() {
     })();
   }, []);
 
-  // 📱 Multi-device REAL-TIME sync: RTDB onValue listeners (no polling)
-  // যেকোনো ডিভাইসে (admin/staff) data বদলালেই onValue handler সাথে সাথে ফায়ার
-  // করে — Firebase Realtime Database এর native push mechanism ব্যবহার করে।
+  // 📱 Multi-device REAL-TIME sync: Firestore per-record onSnapshot listeners
+  // (no polling)। যেকোনো ডিভাইসে (admin/staff) data বদলালেই onSnapshot handler
+  // সাথে সাথে ফায়ার করে — Firestore-এর native push mechanism ব্যবহার করে।
   const _rtSetterMap = useRef(null);
   const _rtValuesRef = useRef(null);
   const _deletedProductIdsRef = useRef(new Set());
@@ -7937,31 +7959,30 @@ function SmartBusinessMgmt() {
     };
   });
 
-  // Firebase-এ এই key এর data না থাকলে, বর্তমান local data দিয়ে seed করে —
-  // যাতে প্রথম যে ডিভাইস Firebase enable করে সেটাই initial source of truth হয়।
-  const _rtSeedIfEmpty = useCallback((key) => {
+  // Firebase-এ এই collection-এ কোনো document না থাকলে, বর্তমান local data
+  // দিয়ে seed করে — যাতে প্রথম যে ডিভাইস Firebase enable করে সেটাই initial
+  // source of truth হয়।
+  const _fssSeedIfEmpty = useCallback((key, arr) => {
+    if (Array.isArray(arr) && arr.length > 0) return; // already has data, nothing to seed
     let val = _rtValuesRef.current?.[key];
-    const isEmptyArray = Array.isArray(val) && val.length === 0;
-    const isEmptyScalar = val === null || val === undefined;
-    if (isEmptyArray || isEmptyScalar) return; // nothing meaningful to seed
+    if (!Array.isArray(val) || val.length === 0) return; // nothing meaningful to seed
     if (key === "products") {
-      // মুছে ফেলা পণ্য যেন seed-এর মাধ্যমে আবার Firebase-এ ফিরে না যায়
       const deletedIds = _deletedProductIdsRef.current;
-      val = Array.isArray(val) ? val.filter(p => !deletedIds.has(p.id)) : val;
+      val = val.filter(p => !deletedIds.has(p.id));
     }
-    RT.push(key, val);
+    FSS.setMany(key, val);
   }, []);
 
   useEffect(() => {
     if (!loaded || !firebaseEnabled || !firebaseConfig) {
-      RT.teardown();
-      FB.stopPolling(); // legacy — ensure old polling never runs alongside RT
+      FSS.teardown();
+      FB.stopPolling(); // legacy — device presence polling বন্ধ
       return;
     }
-    const ok = RT.init(firebaseConfig);
+    const ok = FSS.init(firebaseConfig);
     if (!ok) return;
 
-    // Legacy device presence (Settings screen device list) — kept as-is
+    // Legacy device presence (Settings screen device list) — কেপ্ট as-is
     FB.init(firebaseConfig);
     FB.registerDevice({
       platform: typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.() ? "android" : "web",
@@ -7973,16 +7994,16 @@ function SmartBusinessMgmt() {
     }, 5 * 60 * 1000);
     FB.getActiveDevices().then(devs => setActiveDevices(devs));
 
-    let firstApply = true; // first onValue fire per key = current snapshot, not a "remote change"
-
-    RT.subscribeAll((key, val) => {
+    FSS.subscribeAll((key, arr) => {
       const setter = _rtSetterMap.current?.[key];
       if (!setter) return;
 
-      if (val === null || val === undefined) {
-        // Firebase-এ এখনো এই key এর জন্য কোনো data নেই — এই ডিভাইসের বর্তমান
-        // local data দিয়ে seed করি, যাতে অন্য ডিভাইস প্রথমবার পেতেই data পায়।
-        _rtSeedIfEmpty(key);
+      // baseline রাখি যাতে diff-push নিজের তাজা remote data-কে আবার re-write না করে
+      _fssPrevArr.current[key] = arr;
+      _fssFirstRun.current[key] = true;
+
+      if ((arr?.length || 0) === 0) {
+        _fssSeedIfEmpty(key, arr);
         return;
       }
 
@@ -7990,46 +8011,48 @@ function SmartBusinessMgmt() {
       SyncLog.add("sync", `Firebase থেকে রিয়েলটাইম আপডেট: ${key}`);
 
       if (key === "users") {
-        setter(val);
+        setter(arr);
         // staff device-এ লগইন করা currentUser-এর permission instantly update;
         // admin যদি স্টাফকে মুছে দেয়, সাথে সাথে সেই ডিভাইস থেকে লগআউট করে দিই
         setCurrentUser(prev => {
           if (!prev || prev.role !== "staff") return prev;
-          const updated = (val || []).find(u => u.id === prev.id);
+          const updated = (arr || []).find(u => u.id === prev.id);
           if (!updated) {
             showToast?.("আপনার অ্যাকাউন্ট মুছে ফেলা হয়েছে — লগআউট হচ্ছে", "#ef4444");
             return null; // force logout
           }
           return { ...prev, tempPermissions: updated.tempPermissions || [], canAddProduct: !!updated.canAddProduct };
         });
-      } else if (key === "shopName" || key === "smsTemplates" || key === "smsGateway") {
-        setter(val);
+      } else if (key === "products") {
+        const deletedIds = _deletedProductIdsRef.current;
+        const filtered = arr.filter(p => !deletedIds.has(p.id));
+        setter(filtered);
       } else {
-        // array collections — products-এর ক্ষেত্রে deletedProducts ফিল্টার করো
-        if (key === "products") {
-          const deletedIds = _deletedProductIdsRef.current;
-          const filtered = Array.isArray(val) ? val.filter(p => !deletedIds.has(p.id)) : [];
-          setter(filtered);
-        } else {
-          setter(Array.isArray(val) ? val : []);
-        }
+        setter(arr);
       }
 
-      RT._connectionState = "online";
+      FSS._connectionState = "online";
       setSyncToast("synced");
       setTimeout(() => setSyncToast(null), 1500);
     });
 
-    SyncLog.add("info", "রিয়েলটাইম সিঙ্ক চালু হয়েছে (instant, polling নেই)");
+    FSS.subscribeSettings((data) => {
+      if (data?.shopName !== undefined) setShopName(data.shopName);
+      if (data?.smsTemplates !== undefined) setSmsTemplates(data.smsTemplates);
+      if (data?.smsGateway !== undefined) setSmsGateway(data.smsGateway);
+      _fssSettingsFirstRun.current = true;
+    });
 
-    const onOnline  = () => { RT.init(firebaseConfig); };
-    const onOffline = () => { RT._connectionState = "offline"; };
+    SyncLog.add("info", "Firestore রিয়েলটাইম সিঙ্ক চালু হয়েছে (per-record, polling নেই)");
+
+    const onOnline  = () => { FSS.init(firebaseConfig); };
+    const onOffline = () => { FSS._connectionState = "offline"; };
     window.addEventListener("online",  onOnline);
     window.addEventListener("offline", onOffline);
 
     return () => {
       clearInterval(devTimer);
-      RT.teardown();
+      FSS.teardown();
       window.removeEventListener("online",  onOnline);
       window.removeEventListener("offline", onOffline);
     };
@@ -8283,9 +8306,9 @@ function SmartBusinessMgmt() {
   }, []);
 
   const buildBackupData = useCallback(() => {
-    const payload = { customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users };
+    const payload = { customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers };
     // Simple checksum: total record count hash
-    const checksum = [customers.length, products.length, invoices.length, txns.length, smsLog.length, paymentInvoices.length, purchaseOrders.length, stockMovements.length, (users||[]).length].join("-");
+    const checksum = [customers.length, products.length, invoices.length, txns.length, smsLog.length, paymentInvoices.length, purchaseOrders.length, stockMovements.length, (users||[]).length, (cashLogs||[]).length, (suppliers||[]).length].join("-");
     return {
       ...payload,
       _meta: {
@@ -8301,10 +8324,12 @@ function SmartBusinessMgmt() {
           smsLog: smsLog.length, paymentInvoices: paymentInvoices.length,
           purchaseOrders: purchaseOrders.length, stockMovements: stockMovements.length,
           users: (users||[]).length,
+          cashLogs: (cashLogs||[]).length,
+          suppliers: (suppliers||[]).length,
         },
       },
     };
-  }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users]);
+  }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers]);
 
   const performDriveBackup = useCallback(async () => {
     setDriveStatus("uploading");
@@ -8341,16 +8366,25 @@ function SmartBusinessMgmt() {
           showToast(`💾 লোকাল সেভ | Firebase: ${result.msg}`, "#f59e0b");
           setTimeout(() => setFbStatus(null), 6000);
         }
-        // 4️⃣ 🔄 Real-time data (sbm/data/*) force re-seed — কোনো corrupt/stale
-        // remote state থাকলে এই ডিভাইসের বর্তমান data দিয়ে সব key জোর করে
-        // ওভাররাইট করে দেয়, সবার অ্যাপে সাথে সাথে সঠিক data পৌঁছায়।
-        if (RT.isReady()) {
-          await RT.pushMany({
-            customers, products, invoices, txns, smsLog, users, suppliers,
-            purchaseOrders, stockMovements, cashLogs, paymentInvoices,
-            shopName, smsTemplates, smsGateway,
-          });
-          SyncLog.add("sync", "✓ Real-time data সব ডিভাইসে push করা হয়েছে");
+        // 4️⃣ 🔄 Firestore force re-seed — কোনো corrupt/stale remote state থাকলে
+        // এই ডিভাইসের বর্তমান data দিয়ে সব collection জোর করে ওভাররাইট করে দেয়,
+        // সবার অ্যাপে সাথে সাথে সঠিক data পৌঁছায়।
+        if (FSS.isReady()) {
+          await Promise.all([
+            FSS.setMany("customers", customers),
+            FSS.setMany("products", products),
+            FSS.setMany("invoices", invoices),
+            FSS.setMany("txns", txns),
+            FSS.setMany("smsLog", smsLog),
+            FSS.setMany("users", users),
+            FSS.setMany("suppliers", suppliers),
+            FSS.setMany("purchaseOrders", purchaseOrders),
+            FSS.setMany("stockMovements", stockMovements),
+            FSS.setMany("cashLogs", cashLogs),
+            FSS.setMany("paymentInvoices", paymentInvoices),
+            FSS.setSettings({ shopName, smsTemplates, smsGateway }),
+          ]);
+          SyncLog.add("sync", "✓ Firestore data সব ডিভাইসে push করা হয়েছে");
         }
       } else {
         showToast("💾 লোকাল ব্যাকআপ সম্পন্ন");
@@ -8368,45 +8402,58 @@ function SmartBusinessMgmt() {
       smsLog, users, suppliers, purchaseOrders, stockMovements, cashLogs,
       paymentInvoices, shopName, smsTemplates, smsGateway]);
 
-  // 🔥 Real-time per-key push — কোনো synced key বদলালে অল্প debounce (300ms,
-  // দ্রুত পরপর change কোয়ালেস করতে) পর সরাসরি সেই key Firebase এ push হয়।
-  // RT.push() নিজেই echo-guard করে রাখে যাতে নিজের লেখা data নিজের listener
-  // আবার re-apply না করে।
-  const _rtPushTimers = useRef({});
-  const _rtFirstRun = useRef({});
-  const _rtPushKey = useCallback((key, value) => {
-    if (!loaded || !firebaseEnabled || !RT.isReady()) return;
-    if (!_rtFirstRun.current[key]) {
-      // প্রথমবার (app load/firebase connect) এ push করব না — শুধু remote data pull করব
-      _rtFirstRun.current[key] = true;
+  // 🔥 Firestore per-record push — array বদলালে পুরনো vs নতুন compare করে শুধু
+  // যা যোগ/পরিবর্তন/মুছা হয়েছে সেই record-টাই Firestore-এ লেখা হয় (পুরো array
+  // ওভাররাইট নয়)। কম ডেটা ট্রান্সফার, কনফ্লিক্ট-মুক্ত, এবং offline-এ built-in cache কাজ করে।
+  const _fssPrevArr = useRef({});
+  const _fssFirstRun = useRef({});
+  const _fssPushArrayKey = useCallback((key, arr) => {
+    if (!loaded || !firebaseEnabled || !FSS.isReady()) return;
+    if (!_fssFirstRun.current[key]) {
+      // প্রথমবার (app load/Firebase connect) — শুধু baseline রাখি, push করি না
+      _fssFirstRun.current[key] = true;
+      _fssPrevArr.current[key] = arr || [];
       return;
     }
-    if (_rtPushTimers.current[key]) clearTimeout(_rtPushTimers.current[key]);
-    _rtPushTimers.current[key] = setTimeout(() => {
-      RT.push(key, value);
-      delete _rtPushTimers.current[key];
-    }, 300);
+    const prev = _fssPrevArr.current[key] || [];
+    const cur  = arr || [];
+    _fssPrevArr.current[key] = cur;
+
+    const prevMap = new Map(prev.map(r => [String(r?.id), r]));
+    const curIds  = new Set();
+    cur.forEach(rec => {
+      if (rec?.id === undefined || rec?.id === null) return;
+      curIds.add(String(rec.id));
+      const prevRec = prevMap.get(String(rec.id));
+      if (!prevRec || JSON.stringify(prevRec) !== JSON.stringify(rec)) {
+        FSS.setRecord(key, rec.id, rec);
+      }
+    });
+    prevMap.forEach((_, id) => {
+      if (!curIds.has(id)) FSS.deleteRecord(key, id);
+    });
   }, [loaded, firebaseEnabled]);
 
-  useEffect(() => { _rtPushKey("customers", customers); }, [customers, _rtPushKey]);
-  useEffect(() => { _rtPushKey("products", products); }, [products, _rtPushKey]);
-  useEffect(() => { _rtPushKey("invoices", invoices); }, [invoices, _rtPushKey]);
-  useEffect(() => { _rtPushKey("txns", txns); }, [txns, _rtPushKey]);
-  useEffect(() => { _rtPushKey("smsLog", smsLog); }, [smsLog, _rtPushKey]);
-  useEffect(() => { _rtPushKey("paymentInvoices", paymentInvoices); }, [paymentInvoices, _rtPushKey]);
-  useEffect(() => { _rtPushKey("purchaseOrders", purchaseOrders); }, [purchaseOrders, _rtPushKey]);
-  useEffect(() => { _rtPushKey("stockMovements", stockMovements); }, [stockMovements, _rtPushKey]);
-  useEffect(() => { _rtPushKey("cashLogs", cashLogs); }, [cashLogs, _rtPushKey]);
-  useEffect(() => { _rtPushKey("suppliers", suppliers); }, [suppliers, _rtPushKey]);
-  useEffect(() => { _rtPushKey("shopName", shopName); }, [shopName, _rtPushKey]);
-  useEffect(() => { _rtPushKey("smsTemplates", smsTemplates); }, [smsTemplates, _rtPushKey]);
-  useEffect(() => { _rtPushKey("smsGateway", smsGateway); }, [smsGateway, _rtPushKey]);
-  // 🔑 users (permissions) — সবচেয়ে জরুরি, debounce ছাড়াই তাৎক্ষণিক push
-  useEffect(() => {
-    if (!loaded || !firebaseEnabled || !RT.isReady()) return;
-    if (!_rtFirstRun.current.users) { _rtFirstRun.current.users = true; return; }
-    RT.push("users", users);
-  }, [users, loaded, firebaseEnabled]);
+  // 🔥 Firestore settings (shopName/smsTemplates/smsGateway) push — একটাই doc
+  const _fssSettingsFirstRun = useRef(false);
+  const _fssPushSettings = useCallback(() => {
+    if (!loaded || !firebaseEnabled || !FSS.isReady()) return;
+    if (!_fssSettingsFirstRun.current) { _fssSettingsFirstRun.current = true; return; }
+    FSS.setSettings({ shopName, smsTemplates, smsGateway });
+  }, [loaded, firebaseEnabled, shopName, smsTemplates, smsGateway]);
+
+  useEffect(() => { _fssPushArrayKey("customers", customers); }, [customers, _fssPushArrayKey]);
+  useEffect(() => { _fssPushArrayKey("products", products); }, [products, _fssPushArrayKey]);
+  useEffect(() => { _fssPushArrayKey("invoices", invoices); }, [invoices, _fssPushArrayKey]);
+  useEffect(() => { _fssPushArrayKey("txns", txns); }, [txns, _fssPushArrayKey]);
+  useEffect(() => { _fssPushArrayKey("smsLog", smsLog); }, [smsLog, _fssPushArrayKey]);
+  useEffect(() => { _fssPushArrayKey("paymentInvoices", paymentInvoices); }, [paymentInvoices, _fssPushArrayKey]);
+  useEffect(() => { _fssPushArrayKey("purchaseOrders", purchaseOrders); }, [purchaseOrders, _fssPushArrayKey]);
+  useEffect(() => { _fssPushArrayKey("stockMovements", stockMovements); }, [stockMovements, _fssPushArrayKey]);
+  useEffect(() => { _fssPushArrayKey("cashLogs", cashLogs); }, [cashLogs, _fssPushArrayKey]);
+  useEffect(() => { _fssPushArrayKey("suppliers", suppliers); }, [suppliers, _fssPushArrayKey]);
+  useEffect(() => { _fssPushArrayKey("users", users); }, [users, _fssPushArrayKey]);
+  useEffect(() => { _fssPushSettings(); }, [shopName, smsTemplates, smsGateway, _fssPushSettings]);
 
   // 🔥 Restore from Firebase backup — optionally pass a specific slot number
   const restoreFromFirebase = useCallback(async (slot = null) => {
@@ -9811,7 +9858,7 @@ function LoginScreen({ users, onLogin, shopName, T, setUsers, devContact, master
   };
 
   // ── স্টাফ লগইন ──
-  // RT sync এখনো নতুন স্টাফ pull না করে থাকলে (race condition — staff তৈরির
+  // Firestore sync এখনো নতুন স্টাফ pull না করে থাকলে (race condition — staff তৈরির
   // ঠিক পরপরই login করতে চাইলে), local users-এ না পেলে একবার সরাসরি Firebase
   // থেকে fresh users fetch করে আবার চেষ্টা করি — fail করার আগে শেষ চেষ্টা।
   const [staffChecking, setStaffChecking] = useState(false);
@@ -9823,10 +9870,10 @@ function LoginScreen({ users, onLogin, shopName, T, setUsers, devContact, master
     const uname = staffUsername.trim().toLowerCase();
     let user = tryStaffMatch(users, uname);
 
-    if (!user && RT.isReady()) {
-      // local list-এ নেই — Firebase-এ সরাসরি একবার দেখি (RT sync এখনো না পৌঁছালে)
+    if (!user && FSS.isReady()) {
+      // local list-এ নেই — Firebase-এ সরাসরি একবার দেখি (sync এখনো না পৌঁছালে)
       setStaffChecking(true);
-      const remoteUsers = await RT.getOnce("users");
+      const remoteUsers = await FSS.getAllOnce("users");
       setStaffChecking(false);
       if (Array.isArray(remoteUsers) && remoteUsers.length) {
         user = tryStaffMatch(remoteUsers, uname);
@@ -17554,8 +17601,8 @@ function Settings_({ T, S, shopName,
       // 2️⃣ Firebase — লাইভ রিয়েল-টাইম ডেটা (sbm/data/*) + ব্যাকআপ স্ন্যাপশট সব মুছো
       if (firebaseEnabled && firebaseConfig) {
         try {
-          RT.init(firebaseConfig);
-          await RT.clearAllData();
+          FSS.init(firebaseConfig);
+          await FSS.clearAllData();
         } catch {}
         try {
           FB.init(firebaseConfig);
@@ -18503,7 +18550,7 @@ function Settings_({ T, S, shopName,
                   showToast("Enter valid Firebase URL","#ef4444"); return;
                 }
                 FB.init(fbForm);
-                RT.init(fbForm);
+                FSS.init(fbForm);
                 setFirebaseConfig({ ...fbForm });
                 setFirebaseEnabled(true);
                 setShowFbSetup(false);
@@ -18515,7 +18562,7 @@ function Settings_({ T, S, shopName,
           </div>
           {firebaseEnabled && (
             <button style={{ ...S.cancelBtn, width:"100%", marginTop:8, color:"#ef4444" }}
-              onClick={() => { RT.teardown(); setFirebaseEnabled(false); setShowFbSetup(false); showToast("Firebase Disabled","#f59e0b"); }}>
+              onClick={() => { FSS.teardown(); setFirebaseEnabled(false); setShowFbSetup(false); showToast("Firebase Disabled","#f59e0b"); }}>
               Disable Firebase
             </button>
           )}
@@ -18526,8 +18573,8 @@ function Settings_({ T, S, shopName,
               onClick={async () => {
                 if (!window.confirm("পুরনো Firebase sync data মুছে এই ডিভাইসের বর্তমান data দিয়ে নতুন করে শুরু হবে। সব ডিভাইসে এই data পৌঁছাবে। আগে নিশ্চিত হোন এই ডিভাইসের data-ই সবচেয়ে সঠিক। চালিয়ে যাবেন?")) return;
                 setFbMigrating(true);
-                RT.init(fbForm);
-                const result = await RT.purgeLegacyAndReseed({
+                FSS.init(fbForm);
+                const result = await FSS.purgeAndReseed({
                   customers, products, invoices, txns, smsLog, users,
                   purchaseOrders, stockMovements, cashLogs, paymentInvoices,
                   shopName, smsTemplates, smsGateway,
@@ -18547,8 +18594,8 @@ function Settings_({ T, S, shopName,
                 if (!window.confirm("⚠️ Firebase-এর সব ব্যবসায়িক ডেটা (পণ্য, কাস্টমার, ইনভয়েস সব) চিরতরে মুছে যাবে। নিশ্চিত?")) return;
                 if (!window.confirm("শেষ সুযোগ — Firebase-এর সব ডেটা মুছবেন?")) return;
                 setFbClearing(true);
-                RT.init(fbForm);
-                const result = await RT.clearAllData();
+                FSS.init(fbForm);
+                const result = await FSS.clearAllData();
                 setFbClearing(false);
                 if (result.ok) showToast("✅ Firebase ডেটা মুছা হয়েছে", "#ef4444");
                 else showToast(`❌ ব্যর্থ: ${result.msg}`, "#ef4444");
@@ -19566,9 +19613,6 @@ function GoogleDriveSection({ data, setters, showToast, T, S }) {
   const [statusMsg, setStatusMsg] = useState("");
   const [needAuth, setNeedAuth] = useState(false);
   const autoTimer = useRef(null);
-  // gisLoaded — Firebase-এ আর দরকার নেই, কিন্তু UI compat-এর জন্য রাখা হলো
-  const [gisLoaded] = useState(true);
-
   // ── Google Drive OAuth via @capacitor/browser + deep link ────────────────
   // Flow:
   // 1. @capacitor/browser দিয়ে Chrome Custom Tab-এ Google OAuth URL খোলো
@@ -19650,6 +19694,7 @@ function GoogleDriveSection({ data, setters, showToast, T, S }) {
         invoices: data.invoices, txns: data.txns,
         paymentInvoices: data.paymentInvoices, smsLog: data.smsLog,
         purchaseOrders: data.purchaseOrders, stockMovements: data.stockMovements,
+        users: data.users, cashLogs: data.cashLogs, suppliers: data.suppliers,
         _savedAt: new Date().toISOString(), _version: "3.0",
       });
       const now = new Date().toISOString();
@@ -21281,18 +21326,22 @@ const GDrive = {
 
   async getBackupInfo(token) {
     // Search both compressed (.json.gz) and plain (.json) — try gz first
-    const names = [this.BACKUP_FILENAME + ".gz", this.BACKUP_FILENAME];
-    for (const name of names) {
-      const enc = encodeURIComponent(`"${name}"`);
-      const r = await fetch(
-        `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D${enc}&fields=files(id,name,modifiedTime,size)&orderBy=modifiedTime+desc`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (!r.ok) continue;
-      const data = await r.json();
-      const file = data.files?.[0];
-      if (file) return file;
-    }
+    // "SBM Backups" visible folder-এ খুঁজতে হবে (appDataFolder নয়)
+    try {
+      const folderId = await this._ensureFolder(token);
+      const names = [this.BACKUP_FILENAME + ".gz", this.BACKUP_FILENAME];
+      for (const name of names) {
+        const q = encodeURIComponent(`name="${name}" and "${folderId}" in parents and trashed=false`);
+        const r = await fetch(
+          `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime,size)&orderBy=modifiedTime+desc`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!r.ok) continue;
+        const data = await r.json();
+        const file = data.files?.[0];
+        if (file) return file;
+      }
+    } catch {}
     return null;
   },
 
