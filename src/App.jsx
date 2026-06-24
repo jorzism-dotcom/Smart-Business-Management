@@ -7733,7 +7733,26 @@ function SmartBusinessMgmt() {
       // ব্যবসায়িক ডেটা ইতিমধ্যে Firestore-এ রিয়েল-টাইম record-level sync হয়ে
       // যাচ্ছে (useFSSCollection হুকগুলো দিয়ে) — এখানে আলাদা করে push করার
       // দরকার নেই। Google Drive ও Local File auto-backup আলাদা টাইমারে চলে।
-      showToast("💾 লোকাল ব্যাকআপ সম্পন্ন");
+
+      // 3️⃣ Google Drive-এও upload (token থাকলে)
+      let driveUploaded = false;
+      try {
+        const tk = googleDriveToken;
+        const lsToken = localStorage.getItem("sbm_gd_token");
+        const lsAt    = parseInt(localStorage.getItem("sbm_gd_token_at") || "0");
+        const freshLs = !!(lsToken && (Date.now() - lsAt) < 58 * 60 * 1000);
+        const token   = (tk?.token && (Date.now() - (tk?.savedAt||0)) < 58*60*1000)
+                        ? tk.token
+                        : freshLs ? lsToken : null;
+        if (token) {
+          await GDrive.uploadBackup(token, { ...data, _savedAt: ts });
+          driveUploaded = true;
+        }
+      } catch (driveErr) {
+        console.warn("[DriveBackup] Drive upload failed:", driveErr?.message);
+      }
+
+      showToast(driveUploaded ? "☁️ Drive ও লোকাল ব্যাকআপ সম্পন্ন" : "💾 লোকাল ব্যাকআপ সম্পন্ন");
 
       setBackupNeeded(false);
       setDriveStatus("success");
@@ -7743,7 +7762,7 @@ function SmartBusinessMgmt() {
       showToast("ব্যাকআপ ব্যর্থ হয়েছে", "#ef4444");
       setTimeout(() => setDriveStatus(null), 4000);
     }
-  }, [buildBackupData, showToast]);
+  }, [buildBackupData, showToast, googleDriveToken]);
 
   // ── Master Sync Engine: Firestore + Drive backup merge (_updatedAt দেখে নতুনটা জেতে) ──
   // Option B: merge করে, তারপর Drive-এও updated backup রাখে
@@ -7992,19 +8011,21 @@ function SmartBusinessMgmt() {
     }
 
     // ── 3. Reverse customer balance with CORRECT balanceAfter ─────────────────
+    // নেট প্রভাব: এই ইনভয়েস বাকি যোগ করেছিল (+bakiAmount), আর overpay থাকলে আগের
+    // বাকি কমিয়েছিল (-overpayAmount) — ভয়েডে দুটোই সঠিকভাবে উল্টাতে হবে
     if ((inv.payType === "baki" || inv.payType === "partial") && inv.customerId) {
-      const bakiToReverse = inv.payType === "baki" ? inv.total : (inv.bakiAmount || 0);
-      if (bakiToReverse > 0) {
+      const netChange = (inv.payType === "baki" ? inv.total : (inv.bakiAmount || 0)) - (inv.overpayAmount || 0);
+      if (netChange !== 0) {
         // read current customers state to get real balance
         setCustomers(prev => {
           const updated = prev.map(c => {
             if (c.id !== inv.customerId) return c;
             const currentBal = c.balance || 0;
-            const newBal = Math.max(0, currentBal - bakiToReverse);
+            const newBal = Math.max(0, currentBal - netChange);
             // addTxn inside setCustomers updater won't work — use setTimeout to fire after state commits
             setTimeout(() => {
               addTxn(
-                inv.customerId, "joma", bakiToReverse, newBal,
+                inv.customerId, netChange > 0 ? "joma" : "baki", Math.abs(netChange), newBal,
                 inv.id,
                 `ইনভয়েস ভয়েড — #${inv.id.slice(-6).toUpperCase()}${voidReason ? ` · ${voidReason}` : ""}`,
                 null, "void-reversal"
@@ -10179,6 +10200,7 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
       const _prevBal = selCust.balance || 0;
       const _isOverpay = effectivePayType === "partial" && paidAmt > total && _prevBal > 0;
       const _overpayAmt = _isOverpay ? Math.min(paidAmt - total, _prevBal) : 0;
+      inv.overpayAmount = _overpayAmt; // রিসিট/হিস্টোরিতে "বর্তমান বাকি" ঠিকভাবে দেখানোর জন্য সংরক্ষণ
       const newBal = _prevBal + bakiAmt - _overpayAmt;
       setCustomers(prev => prev.map(c => c.id === selCust.id ? { ...c, balance: Math.max(0, newBal) } : c));
       if (bakiAmt > 0) addTxn(selCust.id, "baki", bakiAmt, Math.max(0, newBal), inv.id, note);
@@ -11228,8 +11250,14 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
             )}
 
             {/* Note */}
-            <textarea placeholder="" value={note} onChange={e => setNote(e.target.value)}
-              rows={2} style={{ ...S.input, resize:"none", marginBottom:8 }} />
+            <div style={{ marginBottom:8 }}>
+              <div style={{ color: T.sub, fontSize:11, fontWeight:700, marginBottom:5, display:"flex", alignItems:"center", gap:6 }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                ইনভয়েস নোট (ঐচ্ছিক)
+              </div>
+              <textarea placeholder="যেমন: পরের সপ্তাহে ডেলিভারি, বিশেষ ছাড় দেওয়া হয়েছে..." value={note} onChange={e => setNote(e.target.value)}
+                rows={2} style={{ ...S.input, resize:"none" }} />
+            </div>
 
           </div>
 
@@ -14357,11 +14385,114 @@ function CustomerDetail({ T, S, customer, txns, invoices, customers, paymentInvo
   const handleCall = () => {
     if (customer.mobile) window.open(`tel:${customer.mobile}`, "_self");
   };
-  const handleWhatsApp = () => {
-    if (customer.mobile) {
-      const num = customer.mobile.replace(/\D/g,"");
-      const bdNum = num.startsWith("88") ? num : "88" + num;
-      window.open(`https://wa.me/${bdNum}`, "_blank");
+  const [waBusy, setWaBusy] = useState(false);
+  const handleWhatsApp = async () => {
+    if (!customer.mobile) return;
+    const num    = customer.mobile.replace(/\D/g,"");
+    const bdNum  = num.startsWith("88") ? num : "88" + num;
+    const waBase = `https://wa.me/${bdNum}`;
+
+    // সর্বশেষ ইনভয়েস খুঁজো
+    const custInvs = (invoices || [])
+      .filter(inv => inv.customerId === customer.id && !inv.voided)
+      .sort((a,b) => (b.dateKey||b.date||"").localeCompare(a.dateKey||a.date||""));
+    const lastInv  = custInvs[0];
+
+    if (!lastInv) {
+      // ইনভয়েস নেই — সরাসরি WhatsApp চ্যাট খোলো
+      window.open(waBase, "_blank");
+      return;
+    }
+
+    setWaBusy(true);
+    try {
+      // ইনভয়েস HTML তৈরি
+      const sn      = lastInv.shopName || shopName || "SBM";
+      const iRows   = (lastInv.items||[]).map((item,i) =>
+        `<tr><td class="serial">${i+1}</td><td>${item.name}</td><td class="num">${item.qty}</td><td class="num">৳${item.price}</td><td class="amount">৳${(item.qty*item.price).toLocaleString("en-US")}</td></tr>`
+      ).join("");
+      const content = `
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+          <div style="flex:1;background:#0369a115;border-radius:10px;padding:10px 14px;">
+            <div style="color:#666;font-size:11px;">কাস্টমার</div>
+            <div style="font-weight:800;font-size:15px;">${lastInv.customerName}</div>
+            <div style="color:#666;font-size:11px;">${lastInv.customerMobile||""}</div>
+          </div>
+          <div style="flex:1;background:#0369a115;border-radius:10px;padding:10px 14px;">
+            <div style="color:#666;font-size:11px;">ইনভয়েস</div>
+            <div style="font-weight:800;">#${(lastInv.id||"").toUpperCase()}</div>
+            <div style="color:#666;font-size:11px;">${lastInv.date||""}</div>
+            <div style="color:#666;font-size:11px;">ক্রেতার কপি</div>
+          </div>
+        </div>
+        <table><thead><tr><th class="serial">#</th><th>পণ্য</th><th class="num">পরিমাণ</th><th class="num">দাম</th><th class="num">মোট</th></tr></thead><tbody>${iRows}</tbody></table>
+        <div style="margin-top:14px;background:#0369a115;border-radius:10px;padding:12px 16px;">
+          <div class="info-row"><span class="info-label">সর্বমোট:</span><span class="info-val">৳${(lastInv.subtotal||lastInv.total||0).toLocaleString("en-US")}</span></div>
+          ${(lastInv.discount||0)>0?`<div class="info-row"><span class="info-label" style="color:#22c55e;">ডিসকাউন্ট:</span><span class="info-val" style="color:#22c55e;">– ৳${(lastInv.discount).toLocaleString("en-US")}</span></div>`:""}
+          <div class="info-row"><span class="info-label">মোট খরচ:</span><span class="info-val" style="font-size:18px;font-weight:800;">৳${(lastInv.total||0).toLocaleString("en-US")}</span></div>
+          ${lastInv.payType==="partial"?`<div class="info-row"><span class="info-label">নগদ পেয়েছি:</span><span class="info-val" style="color:#22c55e;">৳${(lastInv.paidAmount||0).toLocaleString("en-US")}</span></div><div class="info-row"><span class="info-label">এই বাকি:</span><span class="info-val" style="color:#ef4444;">৳${(lastInv.bakiAmount||0).toLocaleString("en-US")}</span></div>`:""}
+          <div class="info-row"><span class="info-label">পরিশোধ:</span><span class="info-val">${lastInv.payType==="baki"?"বাকি":lastInv.payType==="partial"?"আংশিক":"নগদ"}</span></div>
+          ${(lastInv.payType!=="cash"||(lastInv.prevBalance||0)>0)?`<div class="info-row" style="border-top:1px dashed #ccc;padding-top:8px;margin-top:8px;"><span class="info-label" style="color:#f59e0b;font-weight:700;">বর্তমান বাকি:</span><span class="info-val" style="color:#ef4444;font-size:16px;font-weight:800;">৳${((lastInv.prevBalance||0)+(lastInv.bakiAmount||0)-(lastInv.overpayAmount||0)).toLocaleString("en-US")}</span></div>`:""}
+        </div>`;
+      const html  = buildPdfHtml(content, sn, "ক্রেতার ইনভয়েস");
+      const title = `ইনভয়েস_${(lastInv.id||"").slice(0,6).toUpperCase()}`;
+
+      // APK-এ: JPG হিসেবে save করে WhatsApp-এ direct share
+      if (window.Capacitor?.isNativePlatform?.()) {
+        const Filesystem = window.Capacitor?.Plugins?.Filesystem;
+        const Share      = window.Capacitor?.Plugins?.Share;
+
+        if (Filesystem && Share) {
+          // html2canvas লোড করো
+          if (!window.html2canvas) {
+            await new Promise((res,rej) => {
+              const s = document.createElement("script");
+              s.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+              s.onload = res; s.onerror = rej; document.head.appendChild(s);
+            });
+          }
+          // Iframe-এ render
+          const iframe = document.createElement("iframe");
+          iframe.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:900px;height:1px;border:none;visibility:hidden;";
+          document.body.appendChild(iframe);
+          await new Promise(res => { iframe.onload = res; iframe.srcdoc = html; });
+          const iDoc = iframe.contentDocument || iframe.contentWindow.document;
+          iframe.style.height = Math.max(iDoc.body.scrollHeight, 800) + "px";
+          await new Promise(r => setTimeout(r, 600));
+          const canvas = await window.html2canvas(iDoc.body, {
+            scale:2, useCORS:true, allowTaint:true,
+            backgroundColor:"#ffffff", logging:false, width:900, windowWidth:900,
+          });
+          document.body.removeChild(iframe);
+
+          // Canvas → JPG base64
+          const jpgBase64 = canvas.toDataURL("image/jpeg", 0.92).split(",")[1];
+          const jpgName   = `${title}.jpg`;
+
+          try {
+            await Filesystem.writeFile({ path: jpgName, data: jpgBase64, directory: "CACHE", recursive:true });
+            const { uri } = await Filesystem.getUri({ path: jpgName, directory: "CACHE" });
+            // WhatsApp package-এ direct share (fallback: system share sheet)
+            try {
+              await Share.share({ title: `${sn} — ${title}`, files:[uri], dialogTitle:"WhatsApp-এ পাঠান" });
+            } finally {
+              setTimeout(async () => { try { await Filesystem.deleteFile({ path:jpgName, directory:"CACHE" }); } catch {} }, 10000);
+            }
+            return;
+          } catch (shareErr) {
+            // share বাতিল বা ব্যর্থ
+            console.warn("[WA-Share]", shareErr);
+          }
+        }
+      }
+
+      // Web fallback — সরাসরি WhatsApp chat খোলো
+      window.open(waBase, "_blank");
+    } catch (err) {
+      console.error("[handleWhatsApp]", err);
+      window.open(waBase, "_blank");
+    } finally {
+      setWaBusy(false);
     }
   };
   const handleHistoryPdf = (months) => {
@@ -14434,10 +14565,13 @@ function CustomerDetail({ T, S, customer, txns, invoices, customers, paymentInvo
             </button>
           )}
           {customer.mobile && (
-            <button onClick={handleWhatsApp}
-              style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:6, background:"linear-gradient(135deg,#128C7E,#25D366)", border:"none", borderRadius:12, padding:"9px 12px", cursor:"pointer", fontFamily:"inherit", boxShadow:"0 3px 12px #25D36633" }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z"/></svg>
-              <span style={{ color:"#fff", fontSize:12, fontWeight:800 }}>WhatsApp</span>
+            <button onClick={handleWhatsApp} disabled={waBusy}
+              style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:6, background: waBusy ? "#128C7E88" : "linear-gradient(135deg,#128C7E,#25D366)", border:"none", borderRadius:12, padding:"9px 12px", cursor: waBusy ? "not-allowed" : "pointer", fontFamily:"inherit", boxShadow:"0 3px 12px #25D36633", opacity: waBusy ? 0.7 : 1, transition:"all 0.2s" }}>
+              {waBusy
+                ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round"><path d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0"/></svg>
+                : <svg width="16" height="16" viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z"/></svg>
+              }
+              <span style={{ color:"#fff", fontSize:12, fontWeight:800 }}>{waBusy ? "তৈরি হচ্ছে..." : "WhatsApp"}</span>
             </button>
           )}
         </div>
@@ -14920,7 +15054,7 @@ function InvoiceReceipt({ T, S, inv, customer, type = "buyer" }) {
         <div class="info-row"><span class="info-label">পরিশোধ পদ্ধতি:</span><span class="info-val">${inv.payType==="baki"?"বাকি":inv.payType==="partial"?"আংশিক":"নগদ"}</span></div>
         ${(inv.payType !== "cash" || (inv.prevBalance||0) > 0) ? `
         <div class="info-row" style="border-top:1px dashed #ccc;padding-top:8px;margin-top:8px;"><span class="info-label" style="color:#f59e0b;font-weight:700;">পূর্বের বাকি:</span><span class="info-val" style="color:#f59e0b;font-weight:700;">৳${(inv.prevBalance||0).toLocaleString("en-US")}</span></div>
-        <div class="info-row"><span class="info-label" style="color:#ef4444;font-weight:800;">বর্তমান বাকি:</span><span class="info-val" style="color:#ef4444;font-size:16px;font-weight:800;">৳${((inv.prevBalance||0)+(inv.bakiAmount||0)).toLocaleString("en-US")}</span></div>
+        <div class="info-row"><span class="info-label" style="color:#ef4444;font-weight:800;">বর্তমান বাকি:</span><span class="info-val" style="color:#ef4444;font-size:16px;font-weight:800;">৳${((inv.prevBalance||0)+(inv.bakiAmount||0)-(inv.overpayAmount||0)).toLocaleString("en-US")}</span></div>
         ` : ""}
         ${inv.note?`<div class="info-row"><span class="info-label">নোট:</span><span class="info-val">${inv.note}</span></div>`:""}
       </div>`;
@@ -14957,7 +15091,7 @@ function InvoiceReceipt({ T, S, inv, customer, type = "buyer" }) {
         <div class="info-row"><span>পরিশোধ:</span><span>${inv.payType==="baki"?"বাকি":inv.payType==="partial"?"আংশিক":"নগদ"}</span></div>
         ${(inv.payType !== "cash" || (inv.prevBalance||0) > 0) ? `
         <div class="info-row" style="border-top:1px dashed #ccc;padding-top:8px;margin-top:8px;"><span style="color:#f59e0b;font-weight:700;">পূর্বের বাকি:</span><span style="color:#f59e0b;font-weight:700;">৳${(inv.prevBalance||0).toLocaleString("en-US")}</span></div>
-        <div class="info-row"><span style="color:#ef4444;font-weight:800;">বর্তমান বাকি:</span><span style="color:#ef4444;font-size:16px;font-weight:800;">৳${((inv.prevBalance||0)+(inv.bakiAmount||0)).toLocaleString("en-US")}</span></div>
+        <div class="info-row"><span style="color:#ef4444;font-weight:800;">বর্তমান বাকি:</span><span style="color:#ef4444;font-size:16px;font-weight:800;">৳${((inv.prevBalance||0)+(inv.bakiAmount||0)-(inv.overpayAmount||0)).toLocaleString("en-US")}</span></div>
         ` : ""}
       </div>`;
     const html = buildPdfHtml(content, shopName, `${isBuyer?"ক্রেতার":"বিক্রেতার"} ইনভয়েস`);
@@ -15045,7 +15179,7 @@ function InvoiceReceipt({ T, S, inv, customer, type = "buyer" }) {
               <span style={{ fontWeight: 700 }}>পূর্বের বাকি</span><span style={{ fontWeight: 700 }}>৳{fmt(inv.prevBalance || 0)}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", color: "#ef4444", fontSize: 14, padding: "8px 10px", background: "#ef444415", borderRadius: 10, marginTop: 4 }}>
-              <span style={{ fontWeight: 800 }}>বর্তমান বাকি</span><span style={{ fontWeight: 900 }}>৳{fmt((inv.prevBalance || 0) + (inv.bakiAmount || 0))}</span>
+              <span style={{ fontWeight: 800 }}>বর্তমান বাকি</span><span style={{ fontWeight: 900 }}>৳{fmt((inv.prevBalance || 0) + (inv.bakiAmount || 0) - (inv.overpayAmount || 0))}</span>
             </div>
           </>
         )}
@@ -15074,7 +15208,7 @@ function InvoiceReceipt({ T, S, inv, customer, type = "buyer" }) {
               <div class="info total"><span>মোট খরচ:</span><span>৳${(inv.total||0).toLocaleString("en-US")}</span></div>
               ${inv.payType==="baki"?`<div class="info"><span>পরিশোধ:</span><span>বাকি</span></div>`:""}
               <div class="info"><span>পূর্বের বাকি:</span><span>৳${(inv.prevBalance||0).toLocaleString("en-US")}</span></div>
-              <div class="info"><span>বর্তমান বাকি:</span><span>৳${((inv.prevBalance||0)+(inv.bakiAmount||0)).toLocaleString("en-US")}</span></div>`;
+              <div class="info"><span>বর্তমান বাকি:</span><span>৳${((inv.prevBalance||0)+(inv.bakiAmount||0)-(inv.overpayAmount||0)).toLocaleString("en-US")}</span></div>`;
             printThermalDirect(content, shopName, `${isBuyer?"ক্রেতার":"বিক্রেতার"} ইনভয়েস`);
           }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/></svg>
@@ -17672,7 +17806,14 @@ function Settings_({ T, S, shopName,
         {(() => {
           const MS_COLOR = "#a855f7";
           const fsConnected = !!(firebaseEnabled && fssReady);
-          const gdConnected = !!(googleDriveToken?.token && (Date.now() - (googleDriveToken?.savedAt||0)) < 58*60*1000);
+          // Zustand state অথবা localStorage — যেকোনো একটাতে fresh token থাকলেই active
+          const _gdLsToken = localStorage.getItem("sbm_gd_token");
+          const _gdLsAt    = parseInt(localStorage.getItem("sbm_gd_token_at") || "0");
+          const _gdLsFresh = !!(_gdLsToken && (Date.now() - _gdLsAt) < 58*60*1000);
+          const gdConnected = !!(
+            (googleDriveToken?.token && (Date.now() - (googleDriveToken?.savedAt||0)) < 58*60*1000)
+            || _gdLsFresh
+          );
           const isAdmin = currentUser?.role !== "staff";
 
           // শেষ sync কতক্ষণ আগে
