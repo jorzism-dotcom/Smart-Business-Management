@@ -489,9 +489,8 @@ const _db = getFirestore(_fbApp);
 // ─── Central Recovery Backup (protik-aa991 → subscriptions/{phone}) ──────────
 // দোকানের shopFirebaseConfig + users + recoveryPinHash সেন্ট্রালে ব্যাকআপ রাখে,
 // যাতে app uninstall/reinstall হলে phone+PIN দিয়ে ফিরে পাওয়া যায়।
-// recoveryPinPlain শুধুমাত্র PIN সেট/পরিবর্তনের মুহূর্তে পাঠানো হয় (admin panel-এ
-// মালিক ভুলে গেলে দেখানোর জন্য) — top-level state-এ plaintext PIN কখনো রাখা হয় না।
-async function centralRecoveryPush(phone, { shopFirebaseConfig, users, recoveryPinHash, recoveryPinPlain, shopName, googleDriveConnected }) {
+// ⚠️ সিকিউরিটি নীতি: plain PIN কখনো সেভ হয় না — শুধু hash পাঠানো হয়।
+async function centralRecoveryPush(phone, { shopFirebaseConfig, users, recoveryPinHash, shopName, googleDriveConnected }) {
   if (!phone) return false;
   try {
     const payload = {
@@ -501,7 +500,6 @@ async function centralRecoveryPush(phone, { shopFirebaseConfig, users, recoveryP
       shopName: shopName || null,
       recoveryUpdatedAt: new Date().toISOString(),
     };
-    if (recoveryPinPlain !== undefined) payload.recoveryPinPlain = recoveryPinPlain;
     if (googleDriveConnected !== undefined) payload.googleDriveConnected = googleDriveConnected;
     await setDoc(doc(_db, "subscriptions", phone), payload, { merge: true });
     return true;
@@ -3356,7 +3354,7 @@ const DEV_CONTACT = {
   whatsapp:  "+8801572931230",
   phone:     "+8801572931230",
 };
-// Master Code "169133" এর SHA-256 hash
+// Developer master reset hash (plain code is never stored in source)
 const DEV_MASTER_HASH = "ef920d5cd2e23582ee35e6b1c9b18f9f94f5f88f3d5d03b422137208ce4ecc0b";
 
 // SBM Backup project — Google OAuth Web Client ID (Drive auto-backup)
@@ -4138,8 +4136,9 @@ async function checkPassword(plain, hash) {
   try {
     return (await hashPassword(plain)) === hash;
   } catch {
-    // crypto API unavailable — fallback to plain comparison (should not happen)
-    return plain === hash;
+    // crypto API unavailable — নিরাপত্তার জন্য false return (plain compare বন্ধ)
+    console.error("[checkPassword] crypto.subtle unavailable — login blocked for safety");
+    return false;
   }
 }
 
@@ -7937,7 +7936,15 @@ function SmartBusinessMgmt() {
   );
 
   if (!currentUser) return (
-    <LoginScreen users={users} onLogin={setCurrentUser} shopName={shopName} T={T} setUsers={setUsers}
+    <LoginScreen users={users} onLogin={(u) => {
+      setCurrentUser(u);
+      // offline cache দিয়ে login হলে toast দেখাও
+      window._sbmOfflineLoginToast = () => {
+        setToast({ msg: "📶 অফলাইন মোডে লগইন — নেট ফিরলে sync হবে", color: "#f59e0b" });
+        setTimeout(() => setToast(null), 4000);
+        window._sbmOfflineLoginToast = null;
+      };
+    }} shopName={shopName} T={T} setUsers={setUsers}
       devContact={devContact} masterResetHash={masterResetHash} />
   );
 
@@ -9036,49 +9043,73 @@ function LoginScreen({ users, onLogin, shopName, T, setUsers, devContact, master
   const [resetMsg,  setResetMsg]  = useState("");
   const [resetting, setResetting] = useState(false);
 
-  // ── মালিক PIN verify করো Firebase থেকে ──
+  // ── মালিক PIN verify করো Firebase থেকে, offline হলে local cache ──
   const handleOwnerLogin = async () => {
     if (ownerPin.length !== 6) { setOwnerPinError("৬ ডিজিটের PIN দিন"); return; }
     setOwnerChecking(true); setOwnerPinError("");
     try {
-      // getStorage (Capacitor Preferences) থেকে প্রথমে phone নাও, না পেলে localStorage fallback
+      // phone নাও
       let phone = "";
       try { phone = (await getStorage("sbm_phone")) || ""; } catch {}
       if (!phone) phone = localStorage.getItem("sbm_phone_sync") || "";
       if (!phone) phone = localStorage.getItem("sbm_phone") || "";
       if (!phone) { setOwnerPinError("ফোন নম্বর পাওয়া যায়নি"); setOwnerChecking(false); return; }
 
-      // Firebase থেকে ownerPinHash আনো
-      const snap = await getDoc(doc(_db, "subscriptions", phone));
-      if (!snap.exists()) { setOwnerPinError("সাবস্ক্রিপশন ডেটা পাওয়া যায়নি"); setOwnerChecking(false); return; }
-      const data = snap.data();
-
-      // Master PIN check (permission error হলে skip)
-      let masterPlain = "";
-      try {
-        const masterSnap = await getDoc(doc(_db, "admin_config", "masterPin"));
-        masterPlain = masterSnap.exists() ? (masterSnap.data().plain || "") : "";
-      } catch {}
-
-      if (masterPlain && ownerPin === masterPlain) {
-        // Master PIN দিয়ে ঢুকলে → PIN reset mode
-        setStage("resetPin");
-        setOwnerChecking(false);
-        return;
-      }
-
-      if (!data.ownerPinHash) { setOwnerPinError("Owner PIN সেট করা নেই। Admin-এর সাথে যোগাযোগ করুন।"); setOwnerChecking(false); return; }
-
-      // PIN hash করে compare
+      // PIN hash (owner-specific salt — Firebase-এর সাথে মিল রাখতে হবে)
       const enc = new TextEncoder().encode("sbm_owner_" + ownerPin);
       const buf = await crypto.subtle.digest("SHA-256", enc);
       const hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
 
-      if (hash !== data.ownerPinHash) {
+      let ownerPinHash = null;
+      let usedCache = false;
+
+      try {
+        // Firebase থেকে hash আনো
+        const snap = await Promise.race([
+          getDoc(doc(_db, "subscriptions", phone)),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 5000))
+        ]);
+        if (!snap.exists()) { setOwnerPinError("সাবস্ক্রিপশন ডেটা পাওয়া যায়নি"); setOwnerChecking(false); return; }
+        const data = snap.data();
+
+        // Master PIN check
+        let masterPlain = "";
+        try {
+          const masterSnap = await getDoc(doc(_db, "admin_config", "masterPin"));
+          masterPlain = masterSnap.exists() ? (masterSnap.data().plain || "") : "";
+        } catch {}
+        if (masterPlain && ownerPin === masterPlain) {
+          setStage("resetPin"); setOwnerChecking(false); return;
+        }
+
+        ownerPinHash = data.ownerPinHash || null;
+
+        // ✅ সফল fetch হলে local cache আপডেট করো (offline-এর জন্য)
+        if (ownerPinHash) {
+          try { localStorage.setItem("sbm_owner_pin_hash_cache", ownerPinHash); } catch {}
+        }
+      } catch {
+        // 🔌 Offline বা timeout — local cache থেকে চেষ্টা করো
+        const cached = localStorage.getItem("sbm_owner_pin_hash_cache");
+        if (!cached) {
+          setOwnerPinError("নেট সংযোগ নেই এবং কোনো cached PIN নেই। একবার নেট দিয়ে লগইন করুন।");
+          setOwnerChecking(false); return;
+        }
+        ownerPinHash = cached;
+        usedCache = true;
+      }
+
+      if (!ownerPinHash) { setOwnerPinError("Owner PIN সেট করা নেই। Admin-এর সাথে যোগাযোগ করুন।"); setOwnerChecking(false); return; }
+
+      if (hash !== ownerPinHash) {
         setOwnerPinError("ভুল PIN, আবার চেষ্টা করুন"); setOwnerPin(""); setOwnerChecking(false); return;
       }
 
       // ✅ PIN সঠিক
+      if (usedCache) {
+        // offline mode notice — optional toast (onLogin এর পরে দেখাবে)
+        setTimeout(() => { try { window._sbmOfflineLoginToast?.(); } catch {} }, 500);
+      }
       let adminUser = users.find(u => u.role === "admin" || u.username === "admin");
       if (!adminUser) {
         adminUser = { id: uid(), username: "admin", name: "মালিক", role: "admin", email: "", pin: "", password: "" };
@@ -9277,8 +9308,10 @@ function LoginScreen({ users, onLogin, shopName, T, setUsers, devContact, master
         const buf   = await crypto.subtle.digest("SHA-256", enc);
         const hash  = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
         await updateDoc(doc(_db, "subscriptions", phone), {
-          ownerPinHash: hash, ownerPinPlain: newPin1, pinUpdatedAt: new Date().toISOString()
+          ownerPinHash: hash, pinUpdatedAt: new Date().toISOString()
         });
+        // ✅ সফল PIN set হলে local cache আপডেট (offline login-এর জন্য)
+        try { localStorage.setItem("sbm_owner_pin_hash_cache", hash); } catch {}
         setResetMsg("✅ PIN পরিবর্তন হয়েছে! এখন login করুন।");
         setTimeout(() => { setStage("ownerPin"); setOwnerPin(""); setOwnerPinError(""); setNewPin1(""); setNewPin2(""); setResetMsg(""); }, 1800);
       } catch(e) { setResetMsg("❌ সমস্যা হয়েছে, আবার চেষ্টা করুন"); }
@@ -16121,7 +16154,7 @@ function PasswordChange({ T, S, currentUser, setUsers, showToast }) {
 
   const handleChange = async () => {
     // Bug fix: login uses .pin field, not .password
-    const ok = await checkPassword(oldPass, currentUser.pin) || oldPass === "169133";
+    const ok = await checkPassword(oldPass, currentUser.pin);
     if (!ok) { showToast("পুরনো পাসওয়ার্ড ভুল", "#ef4444"); return; }
     if (newPass.length < 4) { showToast("নতুন পাসওয়ার্ড কমপক্ষে ৪ অক্ষর হতে হবে", "#ef4444"); return; }
     if (newPass !== confirmPass) { showToast("নতুন পাসওয়ার্ড মিলছে না", "#ef4444"); return; }
@@ -16524,7 +16557,7 @@ function RecoverySetupCard({ T, S, showToast, recoveryPhone, setRecoveryPhone, r
     try {
       const hash = await hashPassword(pin);
       const ok = await centralRecoveryPush(phone, {
-        shopFirebaseConfig: firebaseConfig, users, recoveryPinHash: hash, recoveryPinPlain: pin, shopName,
+        shopFirebaseConfig: firebaseConfig, users, recoveryPinHash: hash, shopName,
       });
       if (!ok) { showToast("সংযোগ ব্যর্থ, আবার চেষ্টা করুন", "#ef4444"); setSaving(false); return; }
       setRecoveryPhone(phone);
@@ -16794,7 +16827,7 @@ function Settings_({ T, S, shopName,
   const verifyMasterKey = async () => {
     setMkChecking(true); setMkError("");
     const hashed = await hashPassword(mkInput);
-    const ok = mkInput === "169133" || (masterResetHash && hashed === masterResetHash);
+    const ok = (masterResetHash && hashed === masterResetHash);
     if (ok) {
       if (mkTarget === "firebase") { setFbUnlocked(true); setShowFbSetup(true); }
       if (mkTarget === "sms")      { setSmsUnlocked(true); setShowGateway(true); }
@@ -18393,8 +18426,10 @@ onChange={()=>{}} />
                     const buf = await crypto.subtle.digest("SHA-256", enc);
                     const hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
                     await updateDoc(doc(_db, "subscriptions", phone), {
-                      ownerPinHash: hash, ownerPinPlain: newPinInput, pinUpdatedAt: new Date().toISOString()
+                      ownerPinHash: hash, pinUpdatedAt: new Date().toISOString()
                     });
+                    // ✅ সফল PIN change হলে local cache আপডেট (offline login-এর জন্য)
+                    try { localStorage.setItem("sbm_owner_pin_hash_cache", hash); } catch {}
                     setShowPinChange(false); setOldPinInput(""); setNewPinInput(""); setNewPinConfirm(""); setPinStep(1);
                     showToast("✅ PIN সফলভাবে পরিবর্তন হয়েছে");
                   } catch(e) { setPinChangeErr("সংযোগ সমস্যা: " + (e?.code || "আবার চেষ্টা করুন")); }
@@ -18439,7 +18474,7 @@ onChange={()=>{}} />
             <input style={S.input} type="text" placeholder="যেমন: rahim123" value={userForm.username}
               onChange={e => setUserForm(f => ({ ...f, username: e.target.value.replace(/\s/g,"") }))} />
             <label style={S.label}>পাসওয়ার্ড</label>
-            <input style={S.input} type="text" placeholder="পাসওয়ার্ড দিন" value={userForm.password}
+            <input style={S.input} type="password" placeholder="পাসওয়ার্ড দিন" value={userForm.password}
               onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))} />
             <label style={S.label}>PIN (ঐচ্ছিক)</label>
             <input style={{ ...S.input, textAlign:"center", letterSpacing:6, fontSize:18, fontWeight:800 }}
@@ -19805,13 +19840,25 @@ function validateBackup(data) {
   if (data.smsLog       && !Array.isArray(data.smsLog))       return { ok: false, msg: "smsLog ডেটা corrupt" };
   // Checksum verify (যদি থাকে)
   if (data._meta?.checksum) {
-    const expected = [
+    // v3 checksum: buildBackupData-এর মতো ১১টি collection (সঠিক)
+    const expectedV3 = [
+      (data.customers?.length || 0),     (data.products?.length || 0),
+      (data.invoices?.length || 0),       (data.txns?.length || 0),
+      (data.smsLog?.length || 0),         (data.paymentInvoices?.length || 0),
+      (data.purchaseOrders?.length || 0), (data.stockMovements?.length || 0),
+      (data.users?.length || 0),          (data.cashLogs?.length || 0),
+      (data.suppliers?.length || 0),
+    ].join("-");
+    // v2 legacy checksum: পুরনো ৬-field ব্যাকআপও accept করতে হবে
+    const expectedV2 = [
       (data.customers?.length || 0), (data.products?.length || 0),
       (data.invoices?.length || 0),  (data.txns?.length || 0),
       (data.smsLog?.length || 0),    (data.paymentInvoices?.length || 0),
     ].join("-");
-    if (expected !== data._meta.checksum) {
-      return { ok: false, msg: `Checksum mismatch — ব্যাকআপ incomplete হতে পারে (expected: ${data._meta.checksum}, got: ${expected})` };
+    const checksumOk = expectedV3 === data._meta.checksum || expectedV2 === data._meta.checksum;
+    if (!checksumOk) {
+      // Warning only — strict reject করব না, partial backup-ও কাজে লাগতে পারে
+      console.warn("[validateBackup] Checksum mismatch", { v3: expectedV3, v2: expectedV2, got: data._meta.checksum });
     }
   }
   return {
