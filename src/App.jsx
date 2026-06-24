@@ -67,6 +67,8 @@ const useAppStore = create((set) => ({
   driveStatus:       null,
   backupNeeded:      false,
   autoBackupEnabled: false,
+  lastMasterSync:    null,
+  autoMasterSyncEnabled: false,
 
   // ── Firebase ─────────────────────────────────────────────────────────────
   firebaseConfig:    null,
@@ -3384,6 +3386,8 @@ const SK = {
   cashLogs:        "sbm-cash-logs",          // 💰 ওপেনিং ক্যাশ ও মালিকের উইথড্রয়াল
   recoveryPhone:   "sbm-recovery-phone",     // 📱 Recovery ফোন নম্বর
   recoveryPinHash: "sbm-recovery-pin-hash",  // 🔐 Recovery PIN hash
+  lastMasterSync:  "sbm-last-master-sync",   // 🔄 Master Sync শেষ কখন হয়েছিল
+  autoMasterSyncEnabled: "sbm-auto-master-sync-on", // ⏰ Hourly auto Master Sync toggle
 };
 // ─── Device ID Layer (Multi-Device Support) ───────────────────────────────────
 // প্রতিটি ডিভাইসের আলাদা ID, যাতে ৫টি ডিভাইস একসাথে সিঙ্ক করতে পারে
@@ -3594,6 +3598,10 @@ const FSS = {
 // পরিবর্তন push effect আবার re-push করে না (lastSynced ref দিয়ে echo-guard) —
 // তাই কখনো conflict/mismatch হয় না, আর নেট না থাকলে Firestore-এর built-in
 // cache দিয়ে local-এ কাজ করে, নেট ফিরলে নিজেই sync হয়।
+
+// ── withTs: record-এ _updatedAt timestamp যোগ করে (Master Sync merge-এর জন্য) ──
+const withTs = (rec) => ({ ...rec, _updatedAt: Date.now() });
+
 function useFSSCollection(name, value, setValue, ready, opts = {}) {
   const { instant = false, filterIncoming = null, onSync = null } = opts;
   const lastSynced  = useRef(null);
@@ -3633,7 +3641,11 @@ function useFSSCollection(name, value, setValue, ready, opts = {}) {
     const run = () => {
       nextMap.forEach((rec, id) => {
         const old = prevMap.get(id);
-        if (!old || JSON.stringify(old) !== JSON.stringify(rec)) FSS.setRecord(name, id, rec);
+        if (!old || JSON.stringify(old) !== JSON.stringify(rec)) {
+          // _updatedAt inject করো (নতুন বা পরিবর্তিত record-এ) — Master Sync merge-এর জন্য
+          const recWithTs = rec._updatedAt ? rec : withTs(rec);
+          FSS.setRecord(name, id, recWithTs);
+        }
       });
       prevMap.forEach((rec, id) => { if (!nextMap.has(id)) FSS.deleteRecord(name, id); });
       lastSynced.current = value;
@@ -7142,6 +7154,8 @@ function SmartBusinessMgmt() {
   const setAnthropicKey     = (v) => _set("anthropicKey",     v);
   const setSmsTemplates     = (v) => _set("smsTemplates",     v);
   const setAutoBackupEnabled= (v) => _set("autoBackupEnabled",v);
+  const setLastMasterSync   = (v) => _set("lastMasterSync",   v);
+  const setAutoMasterSyncEnabled = (v) => _set("autoMasterSyncEnabled", v);
   const setFirebaseConfig   = (v) => _set("firebaseConfig",   v);
   const setFirebaseEnabled  = (v) => _set("firebaseEnabled",  v);
   const setAuthSession      = (v) => _set("authSession",      v);
@@ -7291,6 +7305,8 @@ function SmartBusinessMgmt() {
       setAnthropicKey    ((await load(SK.anthropicKey))     || "");
       setSmsTemplates    ((await load(SK.smsTemplates))     || null);
       setAutoBackupEnabled((await load(SK.autoBackupEnabled)) ?? false);
+      setLastMasterSync  ((await load(SK.lastMasterSync))   || null);
+      setAutoMasterSyncEnabled((await load(SK.autoMasterSyncEnabled)) ?? false);
       // 🔥 Firebase
       const fbCfg = (await load(SK.firebaseConfig)) || null;
       const fbOn  = (await load(SK.firebaseEnabled)) ?? false;
@@ -7455,6 +7471,8 @@ function SmartBusinessMgmt() {
   useEffect(() => { if (loaded) save(SK.anthropicKey, anthropicKey); }, [anthropicKey, loaded]);
   useEffect(() => { if (loaded) save(SK.smsTemplates, smsTemplates); }, [smsTemplates, loaded]);
   useEffect(() => { if (loaded) save(SK.autoBackupEnabled, autoBackupEnabled); }, [autoBackupEnabled, loaded]);
+  useEffect(() => { if (loaded) save(SK.autoMasterSyncEnabled, autoMasterSyncEnabled); }, [autoMasterSyncEnabled, loaded]);
+  useEffect(() => { if (loaded && lastMasterSync) save(SK.lastMasterSync, lastMasterSync); }, [lastMasterSync, loaded]);
   useEffect(() => { if (loaded) save(SK.firebaseConfig,  firebaseConfig);  }, [firebaseConfig, loaded]);   // 🔥
   useEffect(() => { if (loaded) save(SK.firebaseEnabled, firebaseEnabled); }, [firebaseEnabled, loaded]);
   useEffect(() => { if (loaded) save(SK.recoveryPhone,   recoveryPhone);   }, [recoveryPhone, loaded]);
@@ -7687,6 +7705,94 @@ function SmartBusinessMgmt() {
     };
   }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers]);
 
+  // ── Master Sync Engine: Firestore + Drive backup merge (_updatedAt দেখে নতুনটা জেতে) ──
+  // Option B: merge করে, তারপর Drive-এও updated backup রাখে
+  const [masterSyncStatus, setMasterSyncStatus] = React.useState(null); // null | "running" | "done" | "error"
+  const [masterSyncDetail, setMasterSyncDetail] = React.useState("");
+
+  const performMasterSync = useCallback(async () => {
+    if (masterSyncStatus === "running") return;
+    setMasterSyncStatus("running");
+    setMasterSyncDetail("Firestore থেকে data নেওয়া হচ্ছে...");
+    try {
+      // ১. Google Drive থেকে latest backup নাও
+      let driveData = null;
+      const tk = googleDriveToken;
+      const fresh = tk?.token && tk?.savedAt && (Date.now() - tk.savedAt) < 58 * 60 * 1000;
+      if (fresh) {
+        try {
+          setMasterSyncDetail("Drive থেকে backup নেওয়া হচ্ছে...");
+          driveData = await GDrive.downloadBackup(tk.token);
+        } catch { driveData = null; }
+      }
+
+      // ২. Firestore collections — ইতিমধ্যে local state-এ আছে (onSnapshot দিয়ে sync)
+      const COLLECTIONS = [
+        ["customers", customers, setCustomers],
+        ["products", products, setProducts],
+        ["invoices", invoices, setInvoices],
+        ["txns", txns, setTxns],
+        ["smsLog", smsLog, setSmsLog],
+        ["paymentInvoices", paymentInvoices, setPaymentInvoices],
+        ["purchaseOrders", purchaseOrders, setPurchaseOrders],
+        ["stockMovements", stockMovements, setStockMovements],
+        ["cashLogs", cashLogs, setCashLogs],
+        ["suppliers", suppliers, setSuppliers],
+      ];
+
+      if (driveData) {
+        setMasterSyncDetail("Merge করা হচ্ছে...");
+        // ৩. প্রতিটা collection merge করো — _updatedAt দেখে নতুনটা জেতে
+        let anyChange = false;
+        COLLECTIONS.forEach(([colName, localArr, setter]) => {
+          const driveArr = driveData[colName] || [];
+          if (!driveArr.length) return;
+
+          const merged = new Map();
+          // প্রথমে local state রাখো
+          (localArr || []).forEach(r => { if (r?.id != null) merged.set(String(r.id), r); });
+          // Drive-এর record দেখো — _updatedAt বেশি হলে জেতে
+          driveArr.forEach(dr => {
+            if (dr?.id == null) return;
+            const key = String(dr.id);
+            const existing = merged.get(key);
+            if (!existing || (dr._updatedAt || 0) > (existing._updatedAt || 0)) {
+              merged.set(key, dr);
+              anyChange = true;
+            }
+          });
+
+          const mergedArr = Array.from(merged.values());
+          if (mergedArr.length !== (localArr || []).length || anyChange) {
+            setter(mergedArr);
+            // Firestore-এও push করো (merged records)
+            mergedArr.forEach(rec => {
+              if (rec?.id != null) FSS.setRecord(colName, rec.id, rec);
+            });
+          }
+        });
+      }
+
+      setMasterSyncDetail("Drive backup আপডেট করা হচ্ছে...");
+      // ৪. Drive-এও updated backup রাখো
+      await performDriveBackup();
+
+      const doneTs = new Date().toISOString();
+      setLastMasterSync(doneTs);
+      setMasterSyncStatus("done");
+      setMasterSyncDetail("Master Sync সম্পন্ন! ✅");
+      setTimeout(() => { setMasterSyncStatus(null); setMasterSyncDetail(""); }, 4000);
+    } catch (e) {
+      setMasterSyncStatus("error");
+      setMasterSyncDetail("Sync ব্যর্থ: " + (e?.message || "অজানা error"));
+      setTimeout(() => { setMasterSyncStatus(null); setMasterSyncDetail(""); }, 5000);
+    }
+  }, [masterSyncStatus, googleDriveToken, customers, products, invoices, txns, smsLog,
+      paymentInvoices, purchaseOrders, stockMovements, cashLogs, suppliers,
+      setCustomers, setProducts, setInvoices, setTxns, setSmsLog,
+      setPaymentInvoices, setPurchaseOrders, setStockMovements, setCashLogs, setSuppliers,
+      setLastMasterSync, performDriveBackup]);
+
   const performDriveBackup = useCallback(async () => {
     setDriveStatus("uploading");
     const now = new Date();
@@ -7714,6 +7820,27 @@ function SmartBusinessMgmt() {
       setTimeout(() => setDriveStatus(null), 4000);
     }
   }, [buildBackupData, showToast]);
+
+  // ── Hourly Auto Master Sync (Admin ফোনে, toggle on থাকলে) ──
+  const _autoMasterSyncRunning = useRef(false);
+  useEffect(() => {
+    if (!loaded || !firebaseEnabled || !fssReady) return;
+    if (currentUser?.role === "staff") return; // শুধু admin
+    if (!autoMasterSyncEnabled) return;
+    const ONE_HOUR = 60 * 60 * 1000;
+    const run = async () => {
+      if (_autoMasterSyncRunning.current) return;
+      const last = lastMasterSync ? new Date(lastMasterSync).getTime() : 0;
+      if (Date.now() - last < ONE_HOUR) return; // এখনও ১ ঘণ্টা হয়নি
+      _autoMasterSyncRunning.current = true;
+      try { await performMasterSync(); }
+      finally { _autoMasterSyncRunning.current = false; }
+    };
+    run(); // প্রথমবার চেক
+    const iv = setInterval(run, 15 * 60 * 1000); // প্রতি ১৫ মিনিটে recheck
+    return () => clearInterval(iv);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, firebaseEnabled, fssReady, autoMasterSyncEnabled, lastMasterSync]);
 
   // ── ধাপ ৪+৫: প্রতি ৫ মিনিটে নিঃশব্দ background auto-backup (admin + staff, সব ফোনে) ──
   // UI ছাড়া চলে, কোনো screen/toggle নির্ভর নয়। ব্যবসায়িক ডেটা এমনিতেই Firestore-এ
@@ -8461,6 +8588,9 @@ function SmartBusinessMgmt() {
               driveStatus={driveStatus} performDriveBackup={performDriveBackup}
               backupNeeded={backupNeeded}
               buildBackupData={buildBackupData} setBackupNeeded={setBackupNeeded}
+              performMasterSync={performMasterSync} masterSyncStatus={masterSyncStatus} masterSyncDetail={masterSyncDetail}
+              lastMasterSync={lastMasterSync} autoMasterSyncEnabled={autoMasterSyncEnabled} setAutoMasterSyncEnabled={setAutoMasterSyncEnabled}
+              googleDriveToken={googleDriveToken}
               anthropicKey={anthropicKey} setAnthropicKey={setAnthropicKey}
               smsTemplates={smsTemplates} setSmsTemplates={setSmsTemplates}
               autoBackupEnabled={autoBackupEnabled} setAutoBackupEnabled={setAutoBackupEnabled}
@@ -16895,7 +17025,7 @@ function StaffCustomTimePicker({ T, staffName, onGrant }) {
 }
 
 function Settings_({ T, S, shopName,
- setShopName, users, setUsers, currentUser, setCurrentUser, showToast, customers, setCustomers, products, setProducts, invoices, setInvoices, txns, setTxns, smsLog, setSmsLog, sendSMS, darkMode, setDarkMode, activeTheme, setActiveTheme, fontSize, setFontSize, deletedCustomers, setDeletedCustomers, deletedProducts = [], setDeletedProducts, smsGateway, setSmsGateway, btConnected, btDevice, onConnectBluetooth, onDisconnectBluetooth, paymentInvoices, setPaymentInvoices, purchaseOrders = [], setPurchaseOrders, stockMovements = [], setStockMovements, lastAutoBackup, driveStatus, backupNeeded, performDriveBackup, buildBackupData, setBackupNeeded, anthropicKey, setAnthropicKey, smsTemplates, setSmsTemplates, autoBackupEnabled, setAutoBackupEnabled, firebaseConfig, setFirebaseConfig, firebaseEnabled, setFirebaseEnabled, setAuthSession, devContact, setDevContact, masterResetHash, setMasterResetHash, activeDevices = [], setActiveDevices, recoveryPhone, setRecoveryPhone, recoveryPinHash, setRecoveryPinHash, cashLogs = [], setCashLogs, suppliers = [], setSuppliers, hasPerm, fssReady = false }) {
+ setShopName, users, setUsers, currentUser, setCurrentUser, showToast, customers, setCustomers, products, setProducts, invoices, setInvoices, txns, setTxns, smsLog, setSmsLog, sendSMS, darkMode, setDarkMode, activeTheme, setActiveTheme, fontSize, setFontSize, deletedCustomers, setDeletedCustomers, deletedProducts = [], setDeletedProducts, smsGateway, setSmsGateway, btConnected, btDevice, onConnectBluetooth, onDisconnectBluetooth, paymentInvoices, setPaymentInvoices, purchaseOrders = [], setPurchaseOrders, stockMovements = [], setStockMovements, lastAutoBackup, driveStatus, backupNeeded, performDriveBackup, buildBackupData, setBackupNeeded, performMasterSync, masterSyncStatus, masterSyncDetail, lastMasterSync, autoMasterSyncEnabled, setAutoMasterSyncEnabled, googleDriveToken, anthropicKey, setAnthropicKey, smsTemplates, setSmsTemplates, autoBackupEnabled, setAutoBackupEnabled, firebaseConfig, setFirebaseConfig, firebaseEnabled, setFirebaseEnabled, setAuthSession, devContact, setDevContact, masterResetHash, setMasterResetHash, activeDevices = [], setActiveDevices, recoveryPhone, setRecoveryPhone, recoveryPinHash, setRecoveryPinHash, cashLogs = [], setCashLogs, suppliers = [], setSuppliers, hasPerm, fssReady = false }) {
   const [editName,    setEditName]    = useState(false);
   const [nameInput,   setNameInput]   = useState(shopName);
   const [showNewUser, setShowNewUser] = useState(false);
@@ -17521,22 +17651,154 @@ function Settings_({ T, S, shopName,
                 {showFbSetup ? "Close" : firebaseEnabled ? "Edit" : "Setup"}
               </button>
 
-              {/* এখনই Sync করুন — তাৎক্ষণিক push, ৮ সেকেন্ড অপেক্ষা না করে */}
-              {isActive && (
-                <button
-                  disabled={driveStatus === "uploading"}
-                  onClick={performDriveBackup}
-                  style={{
-                    width:"100%", marginTop:7, padding:"8px 0", borderRadius:10, border:`1px solid ${COLOR}66`,
-                    background: driveStatus === "uploading" ? `${COLOR}10` : `${COLOR}30`,
-                    color: COLOR, fontSize:11, fontWeight:900, cursor: driveStatus === "uploading" ? "default" : "pointer",
-                    fontFamily:"inherit", opacity: driveStatus === "uploading" ? 0.6 : 1,
-                    display:"flex", alignItems:"center", justifyContent:"center", gap:5,
+            </div>
+          );
+        })()}
+
+
+        {/* ── CARD: Master Sync & Backup ── */}
+        {(() => {
+          const MS_COLOR = "#a855f7";
+          const fsConnected = !!(firebaseEnabled && fssReady);
+          const gdConnected = !!(googleDriveToken?.token && (Date.now() - (googleDriveToken?.savedAt||0)) < 58*60*1000);
+          const isAdmin = currentUser?.role !== "staff";
+
+          // শেষ sync কতক্ষণ আগে
+          const getTimeAgo = (isoStr) => {
+            if (!isoStr) return "কখনো না";
+            const diff = Date.now() - new Date(isoStr).getTime();
+            const mins = Math.floor(diff / 60000);
+            if (mins < 1) return "এইমাত্র";
+            if (mins < 60) return `${mins} মিনিট আগে`;
+            const hrs = Math.floor(mins / 60);
+            if (hrs < 24) return `${hrs} ঘণ্টা আগে`;
+            return `${Math.floor(hrs/24)} দিন আগে`;
+          };
+
+          const syncBtnColor = masterSyncStatus === "done" ? "#22c55e"
+                             : masterSyncStatus === "error" ? "#ef4444"
+                             : MS_COLOR;
+          const syncBtnBg   = masterSyncStatus === "done" ? "#22c55e22"
+                             : masterSyncStatus === "error" ? "#ef444422"
+                             : masterSyncStatus === "running" ? `${MS_COLOR}10`
+                             : `${MS_COLOR}25`;
+
+          return (
+            <div className="integ-card" style={{
+              background: "linear-gradient(145deg,#1a0a2e 0%,#0f172a 100%)",
+              borderRadius:18, border:`1.5px solid ${MS_COLOR}44`,
+              overflow:"hidden", padding:"14px 14px 12px", position:"relative",
+            }}>
+              <div style={{ position:"absolute", top:0, left:"10%", right:"10%", height:1, background:`linear-gradient(to right,transparent,${MS_COLOR}88,transparent)` }} />
+
+              {/* Header */}
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <div style={{
+                    width:36, height:36, borderRadius:10,
+                    background:`linear-gradient(135deg,${MS_COLOR}22,${MS_COLOR}44)`,
+                    border:`1.5px solid ${MS_COLOR}44`,
+                    display:"flex", alignItems:"center", justifyContent:"center",
                   }}>
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
-                  {driveStatus === "uploading" ? "Sync হচ্ছে..." : "এখনই Sync করুন"}
-                </button>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={MS_COLOR} strokeWidth="2.5" strokeLinecap="round">
+                      <path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+                      <path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <div style={{ color:"#f1f5f9", fontWeight:900, fontSize:12 }}>Master Sync & Backup</div>
+                    <div style={{ color:"#64748b", fontSize:9, marginTop:1 }}>শেষ sync: {getTimeAgo(lastMasterSync)}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Status row */}
+              <div style={{ display:"flex", gap:6, marginBottom:10 }}>
+                <div style={{
+                  flex:1, padding:"5px 8px", borderRadius:8,
+                  background: fsConnected ? "#22c55e12" : "#ef444412",
+                  border:`1px solid ${fsConnected ? "#22c55e33" : "#ef444433"}`,
+                  display:"flex", alignItems:"center", gap:5,
+                }}>
+                  <div style={{ width:6, height:6, borderRadius:"50%", background: fsConnected ? "#22c55e" : "#ef4444" }} />
+                  <span style={{ fontSize:9, fontWeight:700, color: fsConnected ? "#22c55e" : "#ef4444" }}>Firestore</span>
+                </div>
+                <div style={{
+                  flex:1, padding:"5px 8px", borderRadius:8,
+                  background: gdConnected ? "#22c55e12" : "#94a3b812",
+                  border:`1px solid ${gdConnected ? "#22c55e33" : "#94a3b833"}`,
+                  display:"flex", alignItems:"center", gap:5,
+                }}>
+                  <div style={{ width:6, height:6, borderRadius:"50%", background: gdConnected ? "#22c55e" : "#94a3b8" }} />
+                  <span style={{ fontSize:9, fontWeight:700, color: gdConnected ? "#22c55e" : "#94a3b8" }}>Google Drive</span>
+                </div>
+              </div>
+
+              {/* Auto sync toggle — Admin only */}
+              {isAdmin && (
+                <div style={{
+                  display:"flex", alignItems:"center", justifyContent:"space-between",
+                  padding:"7px 10px", borderRadius:9,
+                  background:`${MS_COLOR}10`, border:`1px solid ${MS_COLOR}22`, marginBottom:10,
+                }}>
+                  <div>
+                    <div style={{ color:"#e2e8f0", fontSize:10, fontWeight:700 }}>প্রতি ঘণ্টায় Auto Sync</div>
+                    <div style={{ color:"#64748b", fontSize:9 }}>Admin ফোনে স্বয়ংক্রিয় Sync</div>
+                  </div>
+                  <div
+                    onClick={() => setAutoMasterSyncEnabled(v => !v)}
+                    style={{
+                      width:36, height:20, borderRadius:10, cursor:"pointer",
+                      background: autoMasterSyncEnabled ? MS_COLOR : "#334155",
+                      position:"relative", transition:"background 0.2s",
+                      border:`1.5px solid ${autoMasterSyncEnabled ? MS_COLOR : "#475569"}`,
+                    }}>
+                    <div style={{
+                      position:"absolute", top:2,
+                      left: autoMasterSyncEnabled ? 17 : 2,
+                      width:12, height:12, borderRadius:"50%",
+                      background:"#fff", transition:"left 0.2s",
+                    }} />
+                  </div>
+                </div>
               )}
+
+              {/* Master Sync বাটন */}
+              <button
+                disabled={masterSyncStatus === "running"}
+                onClick={performMasterSync}
+                style={{
+                  width:"100%", padding:"10px 0", borderRadius:11,
+                  border:`1.5px solid ${syncBtnColor}66`,
+                  background: syncBtnBg,
+                  color: syncBtnColor,
+                  fontSize:12, fontWeight:900, cursor: masterSyncStatus === "running" ? "default" : "pointer",
+                  fontFamily:"inherit", opacity: masterSyncStatus === "running" ? 0.7 : 1,
+                  display:"flex", alignItems:"center", justifyContent:"center", gap:6, flexDirection:"column",
+                  transition:"all 0.2s",
+                }}>
+                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                  {masterSyncStatus === "running" ? (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" style={{ animation:"spin 1s linear infinite" }}>
+                      <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                    </svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                      <path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+                      <path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                    </svg>
+                  )}
+                  {masterSyncStatus === "running" ? "Sync চলছে..."
+                 : masterSyncStatus === "done" ? "✅ Sync সম্পন্ন!"
+                 : masterSyncStatus === "error" ? "❌ আবার চেষ্টা করুন"
+                 : "🔄 Master Sync & Backup"}
+                </div>
+                {masterSyncDetail ? (
+                  <div style={{ fontSize:9, opacity:0.8, fontWeight:600 }}>{masterSyncDetail}</div>
+                ) : (
+                  <div style={{ fontSize:9, opacity:0.55, fontWeight:600 }}>Firestore + Drive merge → নতুন data জেতে</div>
+                )}
+              </button>
             </div>
           );
         })()}
