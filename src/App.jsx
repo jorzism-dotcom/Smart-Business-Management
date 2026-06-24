@@ -7705,6 +7705,34 @@ function SmartBusinessMgmt() {
     };
   }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers]);
 
+  const performDriveBackup = useCallback(async () => {
+    setDriveStatus("uploading");
+    const now = new Date();
+    const filename = `dukan-backup-${now.toISOString().split("T")[0]}.json`;
+    const data = buildBackupData();
+    try {
+      // 1️⃣ Save file locally (Downloads on APK, browser download on web)
+      await FS.saveBackup(data, filename);
+      const ts = now.toISOString();
+      setLastAutoBackup(ts);
+      await save(SK.lastAutoBackup, ts);
+      // 2️⃣ Save snapshot for local multi-device (use IndexedDB SnapshotDB, not raw save)
+      await SnapshotDB.save({ ...data, _savedAt: ts });
+      // ব্যবসায়িক ডেটা ইতিমধ্যে Firestore-এ রিয়েল-টাইম record-level sync হয়ে
+      // যাচ্ছে (useFSSCollection হুকগুলো দিয়ে) — এখানে আলাদা করে push করার
+      // দরকার নেই। Google Drive ও Local File auto-backup আলাদা টাইমারে চলে।
+      showToast("💾 লোকাল ব্যাকআপ সম্পন্ন");
+
+      setBackupNeeded(false);
+      setDriveStatus("success");
+      setTimeout(() => setDriveStatus(null), 4000);
+    } catch (e) {
+      setDriveStatus("error");
+      showToast("ব্যাকআপ ব্যর্থ হয়েছে", "#ef4444");
+      setTimeout(() => setDriveStatus(null), 4000);
+    }
+  }, [buildBackupData, showToast]);
+
   // ── Master Sync Engine: Firestore + Drive backup merge (_updatedAt দেখে নতুনটা জেতে) ──
   // Option B: merge করে, তারপর Drive-এও updated backup রাখে
   const [masterSyncStatus, setMasterSyncStatus] = React.useState(null); // null | "running" | "done" | "error"
@@ -7792,34 +7820,6 @@ function SmartBusinessMgmt() {
       setCustomers, setProducts, setInvoices, setTxns, setSmsLog,
       setPaymentInvoices, setPurchaseOrders, setStockMovements, setCashLogs, setSuppliers,
       setLastMasterSync, performDriveBackup]);
-
-  const performDriveBackup = useCallback(async () => {
-    setDriveStatus("uploading");
-    const now = new Date();
-    const filename = `dukan-backup-${now.toISOString().split("T")[0]}.json`;
-    const data = buildBackupData();
-    try {
-      // 1️⃣ Save file locally (Downloads on APK, browser download on web)
-      await FS.saveBackup(data, filename);
-      const ts = now.toISOString();
-      setLastAutoBackup(ts);
-      await save(SK.lastAutoBackup, ts);
-      // 2️⃣ Save snapshot for local multi-device (use IndexedDB SnapshotDB, not raw save)
-      await SnapshotDB.save({ ...data, _savedAt: ts });
-      // ব্যবসায়িক ডেটা ইতিমধ্যে Firestore-এ রিয়েল-টাইম record-level sync হয়ে
-      // যাচ্ছে (useFSSCollection হুকগুলো দিয়ে) — এখানে আলাদা করে push করার
-      // দরকার নেই। Google Drive ও Local File auto-backup আলাদা টাইমারে চলে।
-      showToast("💾 লোকাল ব্যাকআপ সম্পন্ন");
-
-      setBackupNeeded(false);
-      setDriveStatus("success");
-      setTimeout(() => setDriveStatus(null), 4000);
-    } catch (e) {
-      setDriveStatus("error");
-      showToast("ব্যাকআপ ব্যর্থ হয়েছে", "#ef4444");
-      setTimeout(() => setDriveStatus(null), 4000);
-    }
-  }, [buildBackupData, showToast]);
 
   // ── Hourly Auto Master Sync (Admin ফোনে, toggle on থাকলে) ──
   const _autoMasterSyncRunning = useRef(false);
