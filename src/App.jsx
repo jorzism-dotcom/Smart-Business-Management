@@ -3399,7 +3399,7 @@ const DEV_CONTACT = {
 const DEV_MASTER_HASH = "d640f2be304872c2aaba9fbf2a113f8333911366ac2e9857bffac8da17142ba4";
 
 // SBM Backup project — Google OAuth Web Client ID (Drive auto-backup)
-const GOOGLE_WEB_CLIENT_ID = "822824220691-tk3bhouplkmuur7o4l1jhlqabdtkqs57.apps.googleusercontent.com";
+const GOOGLE_WEB_CLIENT_ID = "359825185312-6gif6u0j4ogj38hv5312auq4oh41r0gs.apps.googleusercontent.com";
 
 // ─── Storage Keys ─────────────────────────────────────────────────────────────
 const SK = {
