@@ -17260,10 +17260,13 @@ function Settings_({ T, S, shopName,
       if (typeof setCashLogs === "function") setCashLogs([]);
 
       // 2️⃣ Firestore — লাইভ রিয়েল-টাইম ডেটা (সব collection + settings) মুছো
+      //    (googleDriveToken বাঁচিয়ে রাখি — এটা Drive connection, ব্যবসার ডেটা না,
+      //     রিসেটের পরও multi-device backup token সংযুক্ত থাকা উচিত)
       if (firebaseEnabled && firebaseConfig) {
         try {
           FSS.init(firebaseConfig);
           await FSS.clearAllData();
+          if (googleDriveToken) { try { await FSS.setSettings({ googleDriveToken }); } catch {} }
         } catch {}
       }
 
@@ -17783,7 +17786,7 @@ function Settings_({ T, S, shopName,
         {(() => {
           const MS_COLOR = "#a855f7";
           const fsConnected = !!(firebaseEnabled && fssReady);
-          const gdConnected = !!(googleDriveToken?.token && (Date.now() - (googleDriveToken?.savedAt||0)) < 58*60*1000);
+          const gdConnected = !!(localStorage.getItem("sbm_gd_token")) && !GDrive.isTokenExpired();
           const isAdmin = currentUser?.role !== "staff";
 
           // শেষ sync কতক্ষণ আগে
@@ -17929,7 +17932,7 @@ function Settings_({ T, S, shopName,
         {/* ── CARD 2: Google Drive ── */}
         {(() => {
           const COLOR = "#4285F4";
-          const gdConnected = !!(localStorage.getItem("sbm_gd_token"));
+          const gdConnected = !!(localStorage.getItem("sbm_gd_token")) && !GDrive.isTokenExpired();
           return (
             <div className="integ-card" style={{
               background: gdConnected
