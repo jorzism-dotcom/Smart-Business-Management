@@ -5126,13 +5126,20 @@ const _itemCostPrice = (item, prodMap) =>
 const calcInvoiceProfit = (inv, prodMap) => {
   const items = inv.items || [];
   const subtotal = items.reduce((s, it) => s + (it.price || 0) * (it.qty || 1), 0);
-  const discountRatio = subtotal > 0 ? (inv.total || 0) / subtotal : 1;
-  return items.reduce((s, it) => {
+  // Fix 5: discountRatio শুধু discount-এর জন্য — extraCharge আলাদা যোগ হবে
+  // total = subtotal - discount + extraCharge
+  // তাই revenue = (subtotal - discount) + extraCharge = items revenue + extraCharge
+  const discount = inv.discount || 0;
+  const extraCharge = inv.extraCharge || 0;
+  const discountRatio = subtotal > 0 ? (subtotal - discount) / subtotal : 1;
+  const itemsProfit = items.reduce((s, it) => {
     const qty = it.qty || 1;
     const revenue = (it.price || 0) * qty * discountRatio; // discount-adjusted
     const cost = _itemCostPrice(it, prodMap) * qty;
     return s + revenue - cost;
   }, 0);
+  // extraCharge পুরোটাই লাভ (কোনো cost নেই)
+  return itemsProfit + extraCharge;
 };
 
 const calcProfitTotal = (invList, prodMap) =>
@@ -7653,7 +7660,7 @@ function SmartBusinessMgmt() {
         }, 0);
         const _voidedIds1   = new Set((invoices||[]).filter(i=>i.status==="voided").map(i=>i.id));
         const bakiToday     = (txns || []).filter(t => t.dateKey === todayKey && t.type === "baki" && t.invoiceId && !_voidedIds1.has(t.invoiceId)).reduce((s, t) => s + t.amount, 0);
-        const jomaToday     = (txns || []).filter(t => t.dateKey === todayKey && t.type === "joma" && t.source !== "partial-sale" && t.source !== "void-reversal").reduce((s, t) => s + t.amount, 0);
+        const jomaToday     = (txns || []).filter(t => t.dateKey === todayKey && t.type === "joma" && t.source !== "partial-sale" && t.source !== "void-reversal" && t.source !== "overpay").reduce((s, t) => s + t.amount, 0);
         const totalBakiNow  = (customers || []).reduce((s, c) => s + (c.balance || 0), 0);
         // invoice-level আলাদা করে লাভ/লস — buildSummary()-এর সাথে মিল থাকবে
         const _prodMap    = new Map((products || []).map(p => [p.id, p]));
@@ -8078,7 +8085,7 @@ function SmartBusinessMgmt() {
     const txnBaki = txns.filter(t => t.dateKey === key && t.type === "baki" && t.invoiceId && !voidedInvIds.has(t.invoiceId)).reduce((s, t) => s + t.amount, 0);
     return txnBaki;
   }, [txns, invoices]);
-  const todayJoma  = useMemo(() => { const key = todayEn(); return txns.filter(t => t.dateKey === key && t.type === "joma" && t.source !== "partial-sale" && t.source !== "void-reversal").reduce((s, t) => s + t.amount, 0); }, [txns]);
+  const todayJoma  = useMemo(() => { const key = todayEn(); return txns.filter(t => t.dateKey === key && t.type === "joma" && t.source !== "partial-sale" && t.source !== "void-reversal" && t.source !== "overpay").reduce((s, t) => s + t.amount, 0); }, [txns]);
   const todayInvs  = useMemo(() => { const key = todayEn(); return invoices.filter(i => i.dateKey === key && !i.isSelfUse && i.status !== "voided"); }, [invoices]);
   const todayTotal = useMemo(() => todayInvs.reduce((s, i) => s + (i.total || 0), 0), [todayInvs]);
   const totalBaki  = useMemo(() => customers.reduce((s, c) => s + (c.balance || 0), 0), [customers]);
@@ -10216,12 +10223,16 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
       // partial payment: নগদ অংশ joma txn
       if (effectivePayType === "partial" && paidAmt > 0) {
         const cashPortion = Math.min(paidAmt, total); // শুধু invoice পর্যন্ত নগদ
-        addTxn(selCust.id, "joma", cashPortion, Math.max(0, newBal), inv.id, `আংশিক নগদ — ইনভয়েস #${inv.id.slice(-6).toUpperCase()}`, null, "partial-sale");
-        createPaymentInvoice({ ...selCust, balance: Math.max(0, newBal) }, cashPortion, `আংশিক জমা — ইনভয়েস #${inv.id.slice(-6).toUpperCase()}`, "partial-sale");
+        // Fix 3: joma txn-এর balanceAfter = newBal (বাকি যোগের পর যা আছে)
+        // baki txn আগে হয় তাই balanceAfter একই — history-তে ঠিকমতো দেখাবে
+        const balAfterJoma = Math.max(0, newBal);
+        addTxn(selCust.id, "joma", cashPortion, balAfterJoma, inv.id, `আংশিক নগদ — ইনভয়েস #${inv.id.slice(-6).toUpperCase()}`, null, "partial-sale");
+        createPaymentInvoice({ ...selCust, balance: balAfterJoma }, cashPortion, `আংশিক জমা — ইনভয়েস #${inv.id.slice(-6).toUpperCase()}`, "partial-sale");
         // Overpayment অংশ আগের বাকি আদায় হিসেবে joma
         if (_overpayAmt > 0) {
-          addTxn(selCust.id, "joma", _overpayAmt, Math.max(0, newBal), inv.id, `অতিরিক্ত জমা (আগের বাকি আদায়) — ইনভয়েস #${inv.id.slice(-6).toUpperCase()}`, null, "overpay");
-          createPaymentInvoice({ ...selCust, balance: Math.max(0, newBal) }, _overpayAmt, `বাকি আদায় — ইনভয়েস #${inv.id.slice(-6).toUpperCase()}`, "overpay");
+          const balAfterOverpay = Math.max(0, newBal);
+          addTxn(selCust.id, "joma", _overpayAmt, balAfterOverpay, inv.id, `অতিরিক্ত জমা (আগের বাকি আদায়) — ইনভয়েস #${inv.id.slice(-6).toUpperCase()}`, null, "overpay");
+          createPaymentInvoice({ ...selCust, balance: balAfterOverpay }, _overpayAmt, `বাকি আদায় — ইনভয়েস #${inv.id.slice(-6).toUpperCase()}`, "overpay");
         }
       }
       await Haptic.heavy();
@@ -16577,7 +16588,7 @@ function PasswordChange({ T, S, currentUser, setUsers, showToast }) {
 const NOTIF_ID_BASE = 1001;
 const NOTIF_MAX_TIMES = 8; // সর্বোচ্চ কতগুলো সময়ে নোটিফিকেশন দেওয়া যাবে (একদিনে)
 
-function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoices = [], txns = [], cashLogs = [], products = [] }) {
+function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoices = [], txns = [], cashLogs = [], products = [], purchaseOrders = [] }) {
   // light theme detection — dark background এড়াতে
   const isLight = T.bg && (T.bg.startsWith("#f") || T.bg.startsWith("#e") || T.bg.startsWith("rgb(2") || T.bg === "#ffffff");
   const cardBg   = isLight ? "linear-gradient(135deg,#ede9fe,#f5f3ff,#ede9fe)" : "linear-gradient(135deg,#1a0b30,#2d1a52,#160a2a)";
@@ -16630,7 +16641,8 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
   // 📊 আজকের সারসংক্ষেপ হিসাব — বিক্রয়, লাভ/লস, বাকি, ক্যাশ ড্রয়ার ইত্যাদি
   const buildSummary = () => {
     const todayKey = todayEn();
-    const todayInvList  = (invoices || []).filter(i => i.dateKey === todayKey);
+    // Fix 1: voided ও isSelfUse বাদ — না হলে notification-এ ভুল revenue/profit দেখায়
+    const todayInvList  = (invoices || []).filter(i => i.dateKey === todayKey && !i.isSelfUse && i.status !== "voided");
     const revenue       = todayInvList.reduce((s, i) => s + (i.total || 0), 0);
     const cashSale      = todayInvList.reduce((s, i) => {
       if (i.payType === "cash") return s + (i.total || 0);
@@ -16639,7 +16651,7 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
     }, 0);
     const _voidedIds2   = new Set((invoices||[]).filter(i=>i.status==="voided").map(i=>i.id));
     const bakiToday     = (txns || []).filter(t => t.dateKey === todayKey && t.type === "baki" && t.invoiceId && !_voidedIds2.has(t.invoiceId)).reduce((s, t) => s + t.amount, 0);
-    const jomaToday     = (txns || []).filter(t => t.dateKey === todayKey && t.type === "joma" && t.source !== "partial-sale" && t.source !== "void-reversal").reduce((s, t) => s + t.amount, 0);
+    const jomaToday     = (txns || []).filter(t => t.dateKey === todayKey && t.type === "joma" && t.source !== "partial-sale" && t.source !== "void-reversal" && t.source !== "overpay").reduce((s, t) => s + t.amount, 0);
     const totalBakiNow  = (customers || []).reduce((s, c) => s + (c.balance || 0), 0);
     // 🟢 আজকের লাভ ও 🔴 আজকের লস — invoice-level আলাদা করে হিসাব (একই পণ্যের ভিন্ন ইনভয়েস cancel হবে না)
     const prodMap   = new Map((products || []).map(p => [p.id, p]));
@@ -16655,9 +16667,13 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
     const cashLogsAll  = cashLogs || [];
     const openingCash  = cashLogsAll.filter(c => c.type === "opening" && c.dateKey === todayKey).reduce((s, c) => s + (c.amount || 0), 0);
     const cashOutToday = cashLogsAll.filter(c => c.type === "withdrawal" && c.dateKey === todayKey).reduce((s, c) => s + (c.amount || 0), 0);
-    // ক্যাশড্রয়ারে বর্তমান ক্যাশ = ওপেনিং ক্যাশ + নগদ বিক্রয় + বাকি আদায় - বের হওয়া টাকা
-    const currentCashDrawer = openingCash + cashSale + jomaToday - cashOutToday;
-    return { revenue, cashSale, bakiToday, jomaToday, totalBakiNow, totalProfit, totalLoss, openingCash, cashOutToday, currentCashDrawer };
+    // Fix 6: আজকের ক্রয় খরচ ক্যাশ ড্রয়ার থেকে বাদ যাবে
+    const todayPurchaseCost = (purchaseOrders || [])
+      .filter(p => p._type === "pe" && (p.dateKey === todayKey || (p.createdAt && p.createdAt.startsWith(todayKey))))
+      .reduce((s, p) => s + (p.totalCost || 0), 0);
+    // ক্যাশড্রয়ারে বর্তমান ক্যাশ = ওপেনিং + নগদ বিক্রয় + বাকি আদায় - উইথড্রয়াল - ক্রয় খরচ
+    const currentCashDrawer = openingCash + cashSale + jomaToday - cashOutToday - todayPurchaseCost;
+    return { revenue, cashSale, bakiToday, jomaToday, totalBakiNow, totalProfit, totalLoss, openingCash, cashOutToday, currentCashDrawer, todayPurchaseCost };
   };
 
   // 📝 নোটিফিকেশনের body / largeBody তৈরি
@@ -16678,6 +16694,7 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
         `🏦 ক্যাশড্রয়ারে বর্তমান ক্যাশ: ৳${f(sum.currentCashDrawer)}\n` +
         `🔴 মোট বাকি: ৳${f(sum.totalBakiNow)}\n` +
         `📥 আজকের বাকি আদায়: ৳${f(sum.jomaToday)}` +
+        (sum.todayPurchaseCost > 0 ? `\n🛒 আজকের ক্রয় খরচ: ৳${f(sum.todayPurchaseCost)}` : "") +
         extra,
     };
   };
@@ -17635,7 +17652,7 @@ function Settings_({ T, S, shopName,
             </div>
             {showDailyCard && (
               <div style={{ marginTop: 14 }}>
-                <DailyNotifCard S={S} T={T} shopName={shopName} showToast={showToast} customers={customers} invoices={invoices} txns={txns} cashLogs={cashLogs} products={products} />
+                <DailyNotifCard S={S} T={T} shopName={shopName} showToast={showToast} customers={customers} invoices={invoices} txns={txns} cashLogs={cashLogs} products={products} purchaseOrders={purchaseOrders} />
               </div>
             )}
           </div>
