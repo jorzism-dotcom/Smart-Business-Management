@@ -3399,7 +3399,9 @@ const DEV_CONTACT = {
 const DEV_MASTER_HASH = "d640f2be304872c2aaba9fbf2a113f8333911366ac2e9857bffac8da17142ba4";
 
 // SBM Backup project — Google OAuth Web Client ID (Drive auto-backup)
-const GOOGLE_WEB_CLIENT_ID = "359825185312-6gif6u0j4ogj38hv5312auq4oh41r0gs.apps.googleusercontent.com";
+// ⚠️ নতুন Client ID — authorization_code flow + refresh_token সাপোর্ট করে
+const GOOGLE_WEB_CLIENT_ID = "359825185312-7ka6g11l93vb4l6r4cafs8kl9850tt54.apps.googleusercontent.com";
+const GDRIVE_REFRESH_ENDPOINT = "https://melodious-axolotl-00b2e7.netlify.app/.netlify/functions/refresh-token";
 
 // ─── Storage Keys ─────────────────────────────────────────────────────────────
 const SK = {
@@ -20578,10 +20580,12 @@ const GDrive = {
     return localStorage.getItem("sbm_gd_token") || null;
   },
 
-  async saveToken(token) {
+  async saveToken(token, expiryMs = null) {
     localStorage.setItem("sbm_gd_token", token);
-    localStorage.setItem("sbm_gd_token_at", Date.now().toString());
-    // Google account email বের করে রাখো — পরের silent re-auth-এ login_hint হিসেবে ব্যবহার হবে
+    // expiryMs থাকলে সেটা ব্যবহার করো, না থাকলে ৬০ মিনিট default
+    const expiry = expiryMs || (Date.now() + 60 * 60 * 1000);
+    localStorage.setItem("sbm_gd_token_expiry", expiry.toString());
+    localStorage.setItem("sbm_gd_token_at", Date.now().toString()); // backward compat
     try {
       const res = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
         headers: { Authorization: "Bearer " + token }
@@ -20594,8 +20598,11 @@ const GDrive = {
   },
 
   isTokenExpired() {
+    const expiry = parseInt(localStorage.getItem("sbm_gd_token_expiry") || "0");
+    if (expiry) return Date.now() > expiry - 5 * 60 * 1000; // ৫ মিনিট আগে expired ধরা
+    // fallback: পুরনো token_at based check
     const at = parseInt(localStorage.getItem("sbm_gd_token_at") || "0");
-    return Date.now() - at > 65 * 60 * 1000;
+    return Date.now() - at > 55 * 60 * 1000;
   },
 
 
@@ -20627,8 +20634,9 @@ const GDrive = {
     "https://www.googleapis.com/auth/drive.file",
   ].join(" "),
 
-  _buildAuthUrl(clientId, state, silent = false) {
-    // Netlify-তে hosted oauth.html → token parse করে app-এ deep link পাঠায়
+  _buildAuthUrl(clientId, state) {
+    // Netlify-তে hosted oauth.html → authorization_code parse করে Netlify Function-এ পাঠায়
+    // Function client_secret দিয়ে code → access_token + refresh_token exchange করে
     const OAUTH_REDIRECT = "https://melodious-axolotl-00b2e7.netlify.app/oauth.html";
     const redirectUri = window.Capacitor?.isNativePlatform?.()
       ? OAUTH_REDIRECT
@@ -20636,40 +20644,25 @@ const GDrive = {
     const params = new URLSearchParams({
       client_id: clientId,
       redirect_uri: redirectUri,
-      response_type: "token",
+      response_type: "code",           // authorization_code flow — refresh_token পাওয়া যাবে
       scope: this._SCOPES,
       state,
+      access_type: "offline",          // refresh_token পেতে offline access দরকার
+      prompt: "consent",               // প্রথমবার consent নেওয়া — refresh_token guarantee করে
       include_granted_scopes: "true",
     });
-    // silent re-auth: ব্রাউজারে আগে থেকে Google সেশন/অনুমতি থাকলে কোনো UI
-    // ছাড়াই token ফিরে আসে; না থাকলে দ্রুত error-এ ফিরে আসে (UI দেখায় না)
-    if (silent) {
-      params.set("prompt", "none");
-      // login_hint দিলে Google সঠিক account বেছে নেয় — silent auth success rate বাড়ে
-      const hint = localStorage.getItem("sbm_gd_email");
-      if (hint) params.set("login_hint", hint);
-    }
     return "https://accounts.google.com/o/oauth2/v2/auth?" + params.toString();
   },
 
-  async interactiveAuth(clientId, { silent = false, background = false } = {}) {
+  async interactiveAuth(clientId) {
     return new Promise((resolve, reject) => {
       const state = Math.random().toString(36).slice(2);
       localStorage.setItem("sbm_gd_oauth_state", state);
-      const url = GDrive._buildAuthUrl(clientId, state, silent);
-      // silent → ১৫ সেক, background (consent cached) → ৩০ সেক, interactive → ৩ মিনিট
-      const authTimeout = silent ? 15000 : background ? 30000 : 180000;
+      const url = GDrive._buildAuthUrl(clientId, state);
+      const authTimeout = 180000; // ৩ মিনিট
 
       // APK: Chrome Custom Tab + appUrlOpen deep link
       if (window.Capacitor?.isNativePlatform?.()) {
-        // ⚠️ APK-তে prompt=none redirect flow কাজ করে না —
-        // Google interaction_required error দেয় এবং Netlify oauth.html দোকানদারকে দেখায়।
-        // তাই silent=true হলে সাথে সাথে reject — কোনো Browser Tab খোলা যাবে না।
-        if (silent) {
-          reject(new Error("APK silent auth not supported"));
-          return;
-        }
-
         const Browser = window.Capacitor?.Plugins?.Browser;
         const App = window.Capacitor?.Plugins?.App;
 
@@ -20687,7 +20680,8 @@ const GDrive = {
           if (timerHandle) { clearTimeout(timerHandle); timerHandle = null; }
         };
 
-        // deep link listener — com.protik.sbm://oauth2redirect#access_token=...
+        // deep link listener — oauth.html Netlify Function-এ code exchange করে
+        // তারপর access_token + refresh_token deep link-এ পাঠায়
         appListener = App.addListener("appUrlOpen", (event) => {
           const deepLink = event.url || "";
           if (!deepLink.startsWith("com.protik.sbm:")) return;
@@ -20700,12 +20694,17 @@ const GDrive = {
           else if (qIdx !== -1) paramStr = deepLink.slice(qIdx + 1);
           const params = new URLSearchParams(paramStr);
           const token = params.get("access_token");
+          const refreshToken = params.get("refresh_token");
+          const expiresIn = params.get("expires_in");
           if (!token) { reject(new Error("Token পাওয়া যায়নি")); return; }
-          GDrive.saveToken(token);
+          // refresh_token সংরক্ষণ — ভবিষ্যতে background refresh-এ কাজে লাগবে
+          if (refreshToken) {
+            localStorage.setItem("sbm_gd_refresh_token", refreshToken);
+          }
+          GDrive.saveToken(token, expiresIn ? Date.now() + parseInt(expiresIn) * 1000 : null);
           resolve(token);
         });
 
-        // tab বন্ধ হলে — appUrlOpen এর জন্য যথেষ্ট সময় দাও
         browserListener = Browser.addListener?.("browserFinished", () => {
           timerHandle = setTimeout(() => {
             cleanup();
@@ -20725,19 +20724,11 @@ const GDrive = {
       // Browser (web): popup
       const popup = window.open(url, "oauth", "width=500,height=600");
       if (!popup) { reject(new Error("Popup blocked")); return; }
+      // Web-এ oauth.html redirect হবে, message listener দিয়ে ধরো
       const timer = setInterval(() => {
         try {
-          const hash = popup.location.hash;
-          if (hash && hash.includes("access_token")) {
-            clearInterval(timer);
-            popup.close();
-            const params = new URLSearchParams(hash.slice(1));
-            const token = params.get("access_token");
-            GDrive.saveToken(token);
-            resolve(token);
-          }
+          if (popup.closed) { clearInterval(timer); reject(new Error("Popup বন্ধ হয়েছে")); }
         } catch {}
-        if (popup.closed) { clearInterval(timer); reject(new Error("Popup বন্ধ হয়েছে")); }
       }, 500);
     });
   },
@@ -20746,19 +20737,28 @@ const GDrive = {
     return this.interactiveAuth(clientId);
   },
 
-  // 🔇 Background timer থেকে কল হয় — UI ছাড়া token refresh চেষ্টা।
-  // APK-তে prompt=none redirect কাজ করে না (interaction_required error) —
-  // তাই APK-তে এই function সরাসরি null দেয়, caller banner দেখাবে।
-  // Web/PWA-তে popup দিয়ে silent auth চেষ্টা করে।
+  // 🔄 Background silent refresh — Netlify Function দিয়ে refresh_token → নতুন access_token
+  // Browser Tab খোলে না, user interaction লাগে না।
+  // refresh_token না থাকলে null দেয় → banner দেখাবে।
   async silentReauth(clientId) {
-    // APK-তে কোনো Browser Tab খোলা যাবে না — সরাসরি null
-    if (window.Capacitor?.isNativePlatform?.()) return null;
-    // Web: prompt=none popup চেষ্টা
+    const refreshToken = localStorage.getItem("sbm_gd_refresh_token");
+    if (!refreshToken) return null; // প্রথমবার login করেননি বা পুরনো token — banner দেখাও
+
     try {
-      const t = await this.interactiveAuth(clientId, { silent: true });
-      if (t) return t;
-    } catch {}
-    return null;
+      const resp = await fetch(GDRIVE_REFRESH_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.access_token) return null;
+      // নতুন token সংরক্ষণ
+      const expiryMs = data.expires_in ? Date.now() + data.expires_in * 1000 : null;
+      GDrive.saveToken(data.access_token, expiryMs);
+      return data.access_token;
+    } catch {
+      return null;
+    }
   },
 
   // ── Gzip compression helper (CompressionStream API — Chrome 80+, Android WebView 94+)
