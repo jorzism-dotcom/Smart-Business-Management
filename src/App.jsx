@@ -3,7 +3,7 @@ import ReactDOM from "react-dom";
 import { initializeApp, getApps, deleteApp } from "firebase/app";
 import {
   getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  doc, getDoc, updateDoc, setDoc, deleteDoc,
+  doc, getDoc, updateDoc, setDoc, deleteDoc, writeBatch,
   collection, onSnapshot, getDocs,
   query, where, orderBy, limit, startAfter, increment,
 } from "firebase/firestore";
@@ -3585,6 +3585,30 @@ const FSS = {
     }
   },
 
+  // একসাথে অনেক রেকর্ড লেখো/মুছো — Firestore writeBatch (limit ৪০০/ব্যাচ, bulk entry-র জন্য)
+  async commitBatch(coll, sets, deletes) {
+    if (!this._db) return { ok: false, msg: "Firestore সংযুক্ত নেই" };
+    try {
+      const CHUNK = 400;
+      const ops = [
+        ...sets.map(([id, data]) => ({ type: "set", id, data })),
+        ...deletes.map((id) => ({ type: "delete", id })),
+      ];
+      for (let i = 0; i < ops.length; i += CHUNK) {
+        const batch = writeBatch(this._db);
+        ops.slice(i, i + CHUNK).forEach((op) => {
+          const ref = doc(this._db, coll, String(op.id));
+          if (op.type === "set") batch.set(ref, op.data);
+          else batch.delete(ref);
+        });
+        await batch.commit();
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, msg: e.message || "Firestore batch write ব্যর্থ" };
+    }
+  },
+
   // রেকর্ড মুছে ফেলো (write পরিবর্তন: deleteDoc = delete)
   async deleteRecord(coll, id) {
     if (!this._db || id === undefined || id === null || id === "") return { ok: false, msg: "Firestore সংযুক্ত নেই" };
@@ -3735,27 +3759,56 @@ function useFSSCollection(name, value, setValue, ready, opts = {}) {
   }, [ready]);
 
   // local → remote (diff by id, push শুধু বদলানো/নতুন/মুছা রেকর্ড)
+  // ⚡ পারফরমেন্স ফিক্স (bulk data-entry): বেশিরভাগ সময় (নতুন কাস্টমার/প্রোডাক্ট অ্যাড)
+  // array-এর শেষে শুধু নতুন রেকর্ড(গুলো) যোগ হয় — আগের সব রেকর্ড অপরিবর্তিত থাকে।
+  // এই "append-only" case ধরতে পারলে পুরো array আবার JSON.stringify diff করার
+  // দরকার নেই (যা ৩০০০ এন্ট্রির শেষদিকে প্রতি-অ্যাডে ভারী হয়ে যায়, O(n²))।
+  // শুধু নতুন/বদলানো অংশ diff হবে, এবং সব write একসাথে writeBatch দিয়ে যাবে।
   useEffect(() => {
     if (!ready || !firstRemote.current) return;
     const prevArr = lastSynced.current || [];
-    const prevMap = new Map(prevArr.map(r => [String(r.id), r]));
-    const nextMap = new Map((value || []).map(r => [String(r.id), r]));
+    const nextArr = value || [];
     const run = () => {
-      nextMap.forEach((rec, id) => {
-        const old = prevMap.get(id);
-        if (!old || JSON.stringify(old) !== JSON.stringify(rec)) {
-          // _updatedAt inject করো (নতুন বা পরিবর্তিত record-এ) — Master Sync merge-এর জন্য
+      const sets = [];
+      const deletes = [];
+
+      // ফাস্ট পাথ: prevArr ঠিক nextArr-এর শুরুর অংশ কিনা (id ধরে) — মানে শুধু
+      // শেষে নতুন রেকর্ড যোগ হয়েছে, পুরোনো কোনোটা বদলায়নি/মুছে যায়নি।
+      const isSimpleAppend =
+        nextArr.length >= prevArr.length &&
+        prevArr.every((r, i) => String(r?.id) === String(nextArr[i]?.id));
+
+      if (isSimpleAppend) {
+        for (let i = prevArr.length; i < nextArr.length; i++) {
+          const rec = nextArr[i];
+          if (rec?.id == null) continue;
           const recWithTs = rec._updatedAt ? rec : withTs(rec);
-          FSS.setRecord(name, id, recWithTs);
+          sets.push([rec.id, recWithTs]);
         }
-      });
-      // ⚠️ Bug Fix: শুধু prevMap-এ ছিল কিন্তু nextMap-এ নেই এমন record delete করো।
-      // prevMap = lastSynced = Firestore থেকে আসা data। যদি কোনো id prevMap-এ থাকে
-      // কিন্তু nextMap-এ না থাকে মানে user এই ডিভাইসে সেটা delete করেছে — তখনই delete।
-      // অন্য ডিভাইসের pending record (যা এখনো Firestore-এ পৌঁছায়নি) কখনো prevMap-এ
-      // আসবে না, তাই সেটা ভুলে delete হবে না।
-      prevMap.forEach((rec, id) => { if (!nextMap.has(id)) FSS.deleteRecord(name, id); });
-      lastSynced.current = value;
+      } else {
+        // সাধারণ পাথ (edit/delete/reorder) — পুরো diff, আগের মতোই নিরাপদ
+        const prevMap = new Map(prevArr.map(r => [String(r.id), r]));
+        const nextMap = new Map(nextArr.map(r => [String(r.id), r]));
+        nextMap.forEach((rec, id) => {
+          const old = prevMap.get(id);
+          if (!old || JSON.stringify(old) !== JSON.stringify(rec)) {
+            const recWithTs = rec._updatedAt ? rec : withTs(rec);
+            sets.push([id, recWithTs]);
+          }
+        });
+        prevMap.forEach((rec, id) => { if (!nextMap.has(id)) deletes.push(id); });
+      }
+
+      if (sets.length || deletes.length) {
+        if (sets.length + deletes.length === 1) {
+          // একটা মাত্র পরিবর্তন — ছোট/দ্রুত হওয়ায় সরাসরি setRecord/deleteRecord ই যথেষ্ট
+          sets.forEach(([id, data]) => FSS.setRecord(name, id, data));
+          deletes.forEach((id) => FSS.deleteRecord(name, id));
+        } else {
+          FSS.commitBatch(name, sets, deletes);
+        }
+      }
+      lastSynced.current = nextArr;
     };
     if (instant) { run(); return; }
     const t = setTimeout(run, 300);
