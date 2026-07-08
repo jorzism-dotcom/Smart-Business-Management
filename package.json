@@ -27,7 +27,7 @@
     "@e-is/capacitor-bluetooth-serial": "^6.0.3",
     "@capacitor/browser": "^6.0.0",
     "@codetrix-studio/capacitor-google-auth": "3.3.6",
-    "@capacitor-mlkit/barcode-scanning": "^6.3.0"
+    "@capacitor-mlkit/barcode-scanning": "^6.2.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
