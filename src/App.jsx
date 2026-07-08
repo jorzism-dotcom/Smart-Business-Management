@@ -16775,6 +16775,18 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
   }, [productsWithSerialAll, deferredSearch]);
 
   const [activeTab,    setActiveTab]    = useState(initialTab || "retail"); // "retail" | "purchase"
+
+  // ── ক্রয় এন্ট্রি (Purchase Entry) ট্যাবের state — এই useState ব্লক আগে ভুলবশত মুছে গিয়েছিল ──
+  const EMPTY_PE = { productId: "", productSearch: "", qty: "", unitCost: "", unitSell: "", expiryDate: "", supplier: "", note: "", isFreeStock: false };
+  const [peForm,          setPeForm]          = useState(EMPTY_PE);
+  const [peShowForm,      setPeShowForm]      = useState(false);
+  const [peSearchOpen,    setPeSearchOpen]    = useState(false);
+  const [peNewProduct,    setPeNewProduct]    = useState(null);
+  const [peCompanyCustom, setPeCompanyCustom] = useState(false);
+  const [peFilter,        setPeFilter]        = useState("today"); // "today" | "date" | "all"
+  const [peHistDate,      setPeHistDate]      = useState("");
+  const [peSearch,        setPeSearch]        = useState("");
+
   const [quickStockId, setQuickStockId]= useState(null); // product being quick-edited
   const [quickStockVal,setQuickStockVal]= useState("");
   const [companyCustom, setCompanyCustom] = useState(false); // "অন্য কোম্পানি লিখুন" মোড চালু আছে কিনা
@@ -16784,6 +16796,9 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
   }); // null = use PRESET_UNITS defaults
   const [showUnitMgr, setShowUnitMgr] = useState(false);
   const [newUnitInput, setNewUnitInput] = useState("");
+  // ── Mandatory field validation — নতুন পণ্য/সার্ভিস ফর্ম ও ক্রয় এন্ট্রি ফর্মের জন্য ──
+  const [formErrors, setFormErrors] = useState({}); // { name, price }
+  const [peFormErrors, setPeFormErrors] = useState({}); // { productId, qty }
   const activeUnits = customUnits !== null ? customUnits : PRESET_UNITS.filter(u => u !== "__custom__" && u !== "");
   const saveCustomUnits = (units) => {
     setCustomUnits(units);
@@ -16794,7 +16809,19 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
   const outOfStock = products.filter(p => (p.stock || 0) === 0);
 
   const saveProduct = () => {
-    if (!form.name.trim() || !form.price) { showToast("নাম ও দাম দিতে হবে", "#ef4444"); return; }
+    const errs = {};
+    if (!form.name.trim()) errs.name = true;
+    if (!form.price || parseFloat(form.price) <= 0) errs.price = true;
+    setFormErrors(errs);
+    if (errs.name || errs.price) {
+      showToast(
+        form.productType === "service"
+          ? "নাম ও সার্ভিস চার্জ দিতে হবে"
+          : "নাম ও বিক্রয়মূল্য দিতে হবে",
+        "#ef4444"
+      );
+      return;
+    }
     if (editId && currentUser?.role === "staff") { showToast("পণ্য এডিট করার অনুমতি নেই", "#ef4444"); return; }
     if (!editId && currentUser?.role === "staff" && !currentUser?.canAddProduct) { showToast("নতুন পণ্য যোগ করার অনুমতি নেই", "#ef4444"); return; }
     const now = new Date().toISOString();
@@ -16921,6 +16948,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
       showToast("নতুন পণ্য যোগ হয়েছে");
     }
     setForm({ name: "", price: "", stock: "", minStockAlert: "", category: "অন্যান্য", company: "", productType: form.productType || "product", costPrice: "", expiryDate: "", barcode: "", unit: "", isFreeStock: false });
+    setFormErrors({});
     setShowAdd(false);
   };
   
@@ -16989,8 +17017,14 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
         })();
 
         const savePE = () => {
-          if (!peForm.productId) { showToast("পণ্য নির্বাচন করুন", "#ef4444"); return; }
-          if (!peForm.qty || parseFloat(peForm.qty) <= 0) { showToast("পরিমাণ দিন", "#ef4444"); return; }
+          const errs = {};
+          if (!peForm.productId) errs.productId = true;
+          if (!peForm.qty || parseFloat(peForm.qty) <= 0) errs.qty = true;
+          setPeFormErrors(errs);
+          if (errs.productId || errs.qty) {
+            showToast(errs.productId ? "পণ্য নির্বাচন করুন" : "সঠিক পরিমাণ দিন", "#ef4444");
+            return;
+          }
           const prod = products.find(p => p.id === peForm.productId);
           if (!prod) return;
           const qty      = parseFloat(peForm.qty);
@@ -17051,6 +17085,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
           }, ...prev]);
           setPurchaseOrders(prev => [entry, ...prev]);
           setPeForm(f => ({ ...EMPTY_PE, supplier: f.supplier }));
+          setPeFormErrors({});
           showToast(`✅ ${prod.name} — ${qty} ${prod.unit||"পিস"} স্টকে যোগ হয়েছে`, "#a78bfa");
         };
 
@@ -17073,6 +17108,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                 setPeNewProduct(null);
                 setPeCompanyCustom(false);
                 setPeSearchOpen(false);
+                setPeFormErrors({});
                 setActiveTab("retail");
               }}
               style={{ display:"flex", alignItems:"center", gap:6, background:"none", border:"none", color:"#a78bfa", fontWeight:800, fontSize:13, cursor:"pointer", fontFamily:"inherit", padding:0, marginBottom:12 }}>
@@ -17090,6 +17126,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                   setPeCompanyCustom(false);
                   setPeSearchOpen(false);
                 }
+                setPeFormErrors({});
                 return next;
               })}
               style={{
@@ -17134,9 +17171,9 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                   ? products.filter(p => p.name.toLowerCase().includes(peForm.productSearch.toLowerCase()) || (p.unit||"").includes(peForm.productSearch))
                   : products;
                 return (
-                  <div style={{ position:"relative", marginBottom: selProd ? 4 : 12 }}>
+                  <div style={{ position:"relative", marginBottom: selProd ? 4 : (peFormErrors.productId ? 2 : 12) }}>
                     <input
-                      style={{ ...S.input, marginBottom:0, paddingRight:36 }}
+                      style={{ ...S.input, marginBottom:0, paddingRight:36, border: peFormErrors.productId ? "1.5px solid #ef4444" : S.input.border }}
                       placeholder=""
                       value={selProd ? `${selProd.name}${selProd.unit ? ` (${selProd.unit})` : ""}` : peForm.productSearch}
                       onFocus={() => { if (selProd) setPeForm(f => ({ ...f, productId:"", productSearch:"" })); setPeSearchOpen(true); }}
@@ -17165,6 +17202,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                             }));
                             setPeSearchOpen(false);
                             setPeNewProduct(null);
+                            setPeFormErrors(er => ({ ...er, productId: false }));
                           }}
                             style={{ padding:"10px 14px", cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"center", borderBottom:`1px solid ${T.border}` }}>
                             <div>
@@ -17341,9 +17379,10 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                 <div>
                   <label style={S.label}>📊 পরিমাণ *</label>
-                  <input style={S.input} type="number" placeholder="" inputMode="numeric"
+                  <input style={{ ...S.input, border: peFormErrors.qty ? "1.5px solid #ef4444" : S.input.border }} type="number" placeholder="" inputMode="numeric"
                     value={peForm.qty}
-                    onChange={e => setPeForm(f => ({ ...f, qty: e.target.value }))} />
+                    onChange={e => { setPeForm(f => ({ ...f, qty: e.target.value })); if (parseFloat(e.target.value) > 0) setPeFormErrors(er=>({...er,qty:false})); }} />
+                  {peFormErrors.qty && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginTop:4 }}>⚠️ সঠিক পরিমাণ দিন</div>}
                 </div>
                 <div>
                   <label style={S.label}>💵 নতুন একক ক্রয়মূল্য (৳)</label>
@@ -17736,7 +17775,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
         {(currentUser?.role !== "staff" || currentUser?.canAddProduct) && <button style={{ flex: 1, ...S.addBtn, marginBottom: 0, height: 44, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: `linear-gradient(135deg,#16a34a,#22c55e)`, boxShadow: "0 4px 16px #22c55e44" }}
-          onClick={() => { setShowAdd(v => !v); setEditId(null); setCompanyCustom(false); setForm({ name: "", price: "", stock: "", category: "অন্যান্য", company: "", productType: "product", costPrice: "", expiryDate: "", barcode: "", unit: "", isFreeStock: false }); }}>
+          onClick={() => { setShowAdd(v => !v); setEditId(null); setCompanyCustom(false); setFormErrors({}); setForm({ name: "", price: "", stock: "", category: "অন্যান্য", company: "", productType: "product", costPrice: "", expiryDate: "", barcode: "", unit: "", isFreeStock: false }); }}>
           <IcPlus /> <span style={{ fontSize: 12, fontWeight: 800 }}>নতুন পণ্য</span>
         </button>}
         <SearchBar
@@ -17786,11 +17825,12 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
             ))}
           </div>
           <label style={S.label}>🏷️ {form.productType === "service" ? "সার্ভিসের নাম" : "পণ্যের নাম"} *</label>
-          <div style={{ display:"flex", gap:6, alignItems:"center", marginBottom: 4 }}>
-            <input style={{ ...S.input, flex:1, marginBottom:0 }} placeholder="" defaultValue={form.name} ref={el => { if (el && !el._b) { el._b=true; el.addEventListener("compositionend", (e) => { {setForm(f=>({...f,name:el.value}));}; }, {passive:true}); el.addEventListener("blur", (e) => { {setForm(f=>({...f,name:el.value}));}; }, {passive:true}); el.addEventListener("input", (e) => { if(!e.isComposing){ {setForm(f=>({...f,name:el.value}));}; } }, {passive:true}); } }} onChange={()=>{}}
+          <div style={{ display:"flex", gap:6, alignItems:"center", marginBottom: formErrors.name ? 2 : 4 }}>
+            <input style={{ ...S.input, flex:1, marginBottom:0, border: formErrors.name ? "1.5px solid #ef4444" : S.input.border }} placeholder="" defaultValue={form.name} ref={el => { if (el && !el._b) { el._b=true; el.addEventListener("compositionend", (e) => { {setForm(f=>({...f,name:el.value})); if (el.value.trim()) setFormErrors(er=>({...er,name:false}));}; }, {passive:true}); el.addEventListener("blur", (e) => { {setForm(f=>({...f,name:el.value})); if (el.value.trim()) setFormErrors(er=>({...er,name:false}));}; }, {passive:true}); el.addEventListener("input", (e) => { if(!e.isComposing){ {setForm(f=>({...f,name:el.value})); if (el.value.trim()) setFormErrors(er=>({...er,name:false}));}; } }, {passive:true}); } }} onChange={()=>{}}
               autoCorrect="off" autoCapitalize="off" spellCheck="false" autoComplete="off"
               inputMode="text" enterKeyHint="next" />
           </div>
+          {formErrors.name && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginBottom:6, marginTop:-2 }}>⚠️ নাম আবশ্যক</div>}
           {/* ── বারকোড — ক্যামেরা স্ক্যান সাপোর্ট ── */}
           {form.productType !== "service" && (<>
           <label style={S.label}>📷 বারকোড (ঐচ্ছিক)</label>
@@ -17847,7 +17887,8 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
           {/* সার্ভিস: শুধু চার্জ | পণ্য: ক্রয়মূল্য + বিক্রয়মূল্য + স্টক + অ্যালার্ট */}
           {form.productType === "service" ? (<>
             <label style={S.label}>💰 সার্ভিস চার্জ (৳) *</label>
-            <input style={S.input} placeholder="" type="number" value={form.price} onChange={e => setForm({ ...form, price: e.target.value })} inputMode="numeric" pattern="[0-9]*" />
+            <input style={{ ...S.input, border: formErrors.price ? "1.5px solid #ef4444" : S.input.border }} placeholder="" type="number" value={form.price} onChange={e => { setForm({ ...form, price: e.target.value }); if (parseFloat(e.target.value) > 0) setFormErrors(er=>({...er,price:false})); }} inputMode="numeric" pattern="[0-9]*" />
+            {formErrors.price && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginTop:4 }}>⚠️ সার্ভিস চার্জ আবশ্যক</div>}
           </>) : (<>
           <label style={S.label}>💵 ক্রয়মূল্য (৳)</label>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
@@ -17856,7 +17897,8 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
             </div>
             <div>
               <label style={{ ...S.label, fontSize:11, marginBottom:3 }}>💰 বিক্রয়মূল্য (৳) *</label>
-              <input style={{ ...S.input, marginBottom:0 }} placeholder="" type="number" value={form.price} onChange={e => setForm({ ...form, price: e.target.value })} inputMode="numeric" pattern="[0-9]*" />
+              <input style={{ ...S.input, marginBottom:0, border: formErrors.price ? "1.5px solid #ef4444" : S.input.border }} placeholder="" type="number" value={form.price} onChange={e => { setForm({ ...form, price: e.target.value }); if (parseFloat(e.target.value) > 0) setFormErrors(er=>({...er,price:false})); }} inputMode="numeric" pattern="[0-9]*" />
+              {formErrors.price && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginTop:4 }}>⚠️ বিক্রয়মূল্য আবশ্যক</div>}
             </div>
             <div>
               <label style={{ ...S.label, fontSize:11, marginBottom:3 }}>📦 প্রাথমিক স্টক</label>
