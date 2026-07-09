@@ -3832,6 +3832,25 @@ const FSS = {
     }));
     try { await deleteDoc(doc(this._db, "settings", "main")); } catch {}
 
+    // 🔴 ফিক্স: "stats" (dateKey/monthKey-ভিত্তিক Dashboard aggregation ডকুমেন্ট,
+    // updateStats()-এ লেখা হয়) FSS_COLLECTIONS-এ নেই — এটা id-ভিত্তিক ব্যবসায়িক
+    // রেকর্ড না, Master Sync merge/backup রেজিস্ট্রিতে থাকা ঠিক হতো না, তাই
+    // আলাদাভাবে এখানে সরাসরি মোছা হচ্ছে। এটা এখনো Dashboard UI-তে সরাসরি
+    // ব্যবহৃত হয় না (আপাতত শুধু connection warm রাখতে subscribe করা), কিন্তু
+    // "ফুল রিসেট" দাবি করলে সব Firestore কালেকশনই খালি হওয়া উচিত, বাদ না।
+    try {
+      const statsSnap = await getDocs(collection(this._db, "stats"));
+      const statsDocs = statsSnap.docs;
+      for (let i = 0; i < statsDocs.length; i += 500) {
+        const chunk = statsDocs.slice(i, i + 500);
+        const batch = writeBatch(this._db);
+        chunk.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+      }
+    } catch (e) {
+      errors.push(`stats: ${e?.message || "ব্যর্থ"}`);
+    }
+
     // 🔴 ফিক্স: আগে এখানে কোনো ভেরিফিকেশন ছিল না — মুছার চেষ্টা ব্যর্থ/আংশিক হলেও
     // caller-কে সবসময় "সফল" ধরে নিতে হতো। এখন সত্যিই সব collection খালি হয়েছে
     // কিনা নিশ্চিত করে তবেই ok:true রিটার্ন করা হয়।
@@ -3840,6 +3859,8 @@ const FSS = {
         const snap = await getDocs(collection(this._db, coll));
         return { coll, left: snap.size };
       }));
+      const statsCheck = await getDocs(collection(this._db, "stats"));
+      checks.push({ coll: "stats", left: statsCheck.size });
       const leftover = checks.filter(c => c.left > 0);
       if (leftover.length) {
         errors.push(...leftover.map(c => `${c.coll}: ${c.left}টি রেকর্ড এখনো আছে`));
@@ -3935,7 +3956,15 @@ function useFSSCollection(name, value, setValue, ready, opts = {}) {
       const incoming = filterIncoming ? filterIncoming(arr) : arr;
       if (!firstRemote.current) {
         firstRemote.current = true;
-        if (arr.length === 0 && valueRef.current?.length) {
+        // 🔴 ফিক্স: Master Reset-এর পরের ২ মিনিটে seed-on-empty বন্ধ — নাহলে
+        // stale local ডেটা (কোনো রেসের কারণে flush না হলে) ভুলবশত আবার
+        // Firestore-এ push হয়ে "রিসেট করলাম তবু ডেটা ফিরে এলো" বাগ তৈরি করত।
+        let justReset = false;
+        try {
+          const t = localStorage.getItem("sbm_just_reset");
+          justReset = t && (Date.now() - Number(t) < 120000);
+        } catch {}
+        if (arr.length === 0 && valueRef.current?.length && !justReset) {
           // নতুন/খালি collection — এই ডিভাইসের বর্তমান data দিয়ে seed করি
           lastSynced.current = valueRef.current;
           valueRef.current.forEach(rec => { if (rec?.id != null) FSS.setRecord(name, rec.id, rec); });
@@ -4427,7 +4456,15 @@ const storage = (() => {
         } catch { return null; }
       },
       async set(key, val) {
-        try { await _idb.set(key, val); } catch {
+        try {
+          await _idb.set(key, val);
+          // 🔴 ফিক্স: সফল IndexedDB write-এর পরও পুরনো (migration-পূর্ব)
+          // localStorage এন্ট্রি থেকে যেতে পারত — get()-এর migrate-on-read
+          // লজিক শুধু IndexedDB খালি পেলে localStorage থেকে পড়ে, কিন্তু write
+          // পাথে কখনো clean করা হতো না। Master Reset-এর মতো ক্ষেত্রে এটা স্টেল
+          // ডেটা থেকে যাওয়ার একটা সম্ভাব্য উৎস ছিল।
+          try { localStorage.removeItem(key); } catch {}
+        } catch {
           // fallback to localStorage
           try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
         }
@@ -20950,6 +20987,15 @@ function Settings_({ T, S, shopName,
     setDelBkMsg("শুরু হচ্ছে...");
     let firestoreOk = true;
     let firestoreErr = "";
+    // 🔴 ফিক্স: "seed-on-empty" প্রোটেকশন (useFSSCollection-এ, নতুন ডিভাইস/খালি
+    // Firestore পেলে local ডেটা দিয়ে সিড করে) Master Reset-এর ঠিক পরে উল্টো
+    // বিপজ্জনক — যদি local persist flush আর অ্যাপ বন্ধ করার মাঝে কোনো রেসে
+    // local স্টেট stale (পুরনো) থেকে যায়, তাহলে reopen-এ Firestore-কে "খালি"
+    // দেখে সেই stale local ডেটাই আবার Firestore-এ push হয়ে যেত — অর্থাৎ
+    // "রিসেট করলাম, বন্ধ করে খুললাম, ডেটা আবার ফিরে এলো"। এই flag রিসেটের
+    // পরের ২ মিনিট seed-on-empty বন্ধ রাখে (নিচে useFSSCollection-এ চেক হয়),
+    // অ্যাপ পুনরায় খোলা হলেও যাতে ভুলবশত পুরনো ডেটা ফিরে না আসে।
+    try { localStorage.setItem("sbm_just_reset", String(Date.now())); } catch {}
     try {
       // 1️⃣ লাইভ ডেটা — এই ডিভাইসে সাথে সাথে খালি করো
       setProducts([]); setCustomers([]); setInvoices([]); setTxns([]);
