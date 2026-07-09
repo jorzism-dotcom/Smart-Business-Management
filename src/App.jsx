@@ -6,6 +6,7 @@ import {
   getFirestore, doc, getDoc, updateDoc, setDoc, deleteDoc,
   collection, onSnapshot, getDocs, enableIndexedDbPersistence,
   query, where, orderBy, limit, startAfter, increment, runTransaction,
+  writeBatch,
 } from "firebase/firestore";
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
@@ -2757,6 +2758,7 @@ function SubscriptionGate({ children }) {
             customersD, productsD, invoicesD, txnsD, smsLogD,
             paymentInvoicesD, purchaseOrdersD, stockMovementsD,
             cashLogsD, suppliersD, usersD, settingsD,
+            expensesD, returnsD, auditLogsD, quotationsD, supplierPaymentsD,
           ] = await Promise.all([
             withTimeout(FSS.getCollectionOnce("customers"), T, []),
             withTimeout(FSS.getCollectionOnce("products"), T, []),
@@ -2770,6 +2772,11 @@ function SubscriptionGate({ children }) {
             withTimeout(FSS.getCollectionOnce("suppliers"), T, []),
             withTimeout(FSS.getCollectionOnce("users"), T, []),
             withTimeout(FSS.getSettingsOnce(), T, null),
+            withTimeout(FSS.getCollectionOnce("expenses"), T, []),
+            withTimeout(FSS.getCollectionOnce("returns"), T, []),
+            withTimeout(FSS.getCollectionOnce("auditLogs"), T, []),
+            withTimeout(FSS.getCollectionOnce("quotations"), T, []),
+            withTimeout(FSS.getCollectionOnce("supplierPayments"), T, []),
           ]);
           if (customersD.length)       await save(SK.customers, customersD);
           if (productsD.length)        await save(SK.products, productsD);
@@ -2785,6 +2792,11 @@ function SubscriptionGate({ children }) {
           if (settingsD?.shopName)     await save(SK.shopName, settingsD.shopName);
           if (settingsD?.smsTemplates) await save(SK.smsTemplates, settingsD.smsTemplates);
           if (settingsD?.smsGateway)   await save(SK.smsGateway, settingsD.smsGateway);
+          if (expensesD.length)        await save(SK.expenses, expensesD);
+          if (returnsD.length)         await save(SK.returns, returnsD);
+          if (auditLogsD.length)       await save(SK.auditLogs, auditLogsD);
+          if (quotationsD.length)      await save(SK.quotations, quotationsD);
+          if (supplierPaymentsD.length) await save(SK.supplierPayments, supplierPaymentsD);
         } catch { /* silent — রিলোডের পর রিয়েল-টাইম listener এমনিতেই চেষ্টা করবে */ }
       }
 
@@ -3540,6 +3552,71 @@ const FSS_COLLECTIONS = [
   "expenses", "returns", "auditLogs", "quotations", "supplierPayments",
   "deletedProducts", "deletedCustomers",
 ];
+// ── কেন্দ্রীয় ব্যাকআপ ফিল্ড-রেজিস্ট্রি (v6) ─────────────────────────────────
+// FSS_COLLECTIONS-এর থেকে আলাদা রাখা হয়েছে ইচ্ছাকৃতভাবে: FSS_COLLECTIONS ব্যবহৃত
+// হয় Firestore-লেভেল অপারেশনে (clearAllData/Master Reset সহ) যেখানে "users"
+// অন্তর্ভুক্ত করলে Master Reset স্টাফ/অ্যাডমিন লগইন ডেটাও মুছে দিত — যা অপ্রত্যাশিত
+// আচরণ পরিবর্তন হতো। BACKUP_FIELDS শুধু backup/restore payload বানানোর জন্য —
+// buildBackupData, validateBackup ইত্যাদি সব জায়গায় এই একটা লিস্ট থেকেই পড়া হয়,
+// যাতে নতুন কোনো collection যোগ হলে একটাই জায়গায় পরিবর্তন লাগে।
+const BACKUP_FIELDS = [...FSS_COLLECTIONS, "users"];
+// শুধু BACKUP_FIELDS-এ থাকা কী-গুলো data থেকে বেছে নেয় (backup payload বানাতে)
+function pickBackupFields(data) {
+  const out = {};
+  BACKUP_FIELDS.forEach(f => { if (data && data[f] !== undefined) out[f] = data[f]; });
+  return out;
+}
+// রিস্টোরের সময় d[f] পাওয়া গেলে সংশ্লিষ্ট setF() setter কল করে — GoogleDriveSection/
+// LocalStorageSection-এর সব restore পাথ (handleRestore, handleRestoreSnapshot,
+// applyRestoredData) এটাই ব্যবহার করে, প্রতিটাতে আলাদা করে ১৮ লাইন if-চেইন নেই।
+function applyBackupFields(d, setters) {
+  if (!d || !setters) return;
+  BACKUP_FIELDS.forEach(f => {
+    if (d[f]) {
+      const setterName = "set" + f[0].toUpperCase() + f.slice(1);
+      setters[setterName]?.(d[f]);
+    }
+  });
+}
+
+// ── #২ প্রতি-রেকর্ড content-hash — শুধু "কয়টা রেকর্ড আছে" (count) না, "কনটেন্ট
+// বদলেছে কিনা" সেটাও ধরে। FNV-1a ব্যবহার করা হয়েছে (দ্রুত, dependency-free,
+// crypto module লাগে না — corruption-detection-এর জন্য যথেষ্ট, security-grade
+// দরকার নেই)। প্রতিটা রেকর্ডের হ্যাশ XOR দিয়ে collection-level এক হ্যাশে
+// কম্বাইন করা হয় — XOR commutative, তাই sync/merge-এর কারণে array-এর ক্রম
+// বদলে গেলেও (একই রেকর্ড সেট হলে) হ্যাশ অপরিবর্তিত থাকে; কিন্তু কোনো রেকর্ডের
+// content বদলালে, বা কোনো রেকর্ড হারিয়ে/যোগ হলে হ্যাশ বদলে যাবে।
+function hashString(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+function hashRecord(rec) {
+  if (!rec || typeof rec !== "object") return 0;
+  try {
+    // top-level কী গুলো sort করে stringify — key-insertion-order বদলালেও
+    // (যেমন merge-এর সময় নতুন object তৈরি হলে) একই content-এ একই হ্যাশ আসে
+    const keys = Object.keys(rec).sort();
+    let stable = "";
+    for (const k of keys) stable += k + ":" + JSON.stringify(rec[k]) + "|";
+    return hashString(stable);
+  } catch { return 0; }
+}
+function hashCollection(arr) {
+  if (!Array.isArray(arr) || !arr.length) return 0;
+  let h = 0;
+  for (const rec of arr) h ^= hashRecord(rec);
+  return (h >>> 0).toString(36); // কমপ্যাক্ট string ফর্মে (backup ফাইলের সাইজ কম রাখতে)
+}
+// পুরো BACKUP_FIELDS-এর জন্য { fieldName: contentHash } অবজেক্ট বানায়
+function buildContentHashes(payload) {
+  const out = {};
+  BACKUP_FIELDS.forEach(f => { out[f] = hashCollection(payload[f]); });
+  return out;
+}
 
 const FSS = {
   _app: null,
@@ -3726,18 +3803,53 @@ const FSS = {
   },
 
   // 🗑️ Firestore-এর সব ব্যবসায়িক ডেটা (সব collection + settings) মুছে শূন্য থেকে শুরু
-  async clearAllData() {
+  async clearAllData(onProgress) {
     if (!this._db) return { ok: false, msg: "Firestore সংযুক্ত নেই" };
-    try {
-      for (const coll of FSS_COLLECTIONS) {
+    const total = FSS_COLLECTIONS.length;
+    let done = 0;
+    const errors = [];
+    // 🔴 ফিক্স: আগে কালেকশনগুলো একটার পর একটা (sequential for-loop) মোছা হতো —
+    // স্লো নেটওয়ার্কে অনেক সময় লাগত (১৭টা কালেকশন × রাউন্ড-ট্রিপ)। এখন সবগুলো
+    // একসাথে (parallel, Promise.all) প্রসেস হয়, আর প্রতি কালেকশনে individual
+    // deleteDoc()-এর বদলে writeBatch (৫০০/ব্যাচ) ব্যবহার হয় — নেটওয়ার্ক রাউন্ড-ট্রিপ
+    // অনেক কমে যায়, এবং কোনো কালেকশন ব্যর্থ হলে বাকিগুলো তবুও চলতে থাকে।
+    await Promise.all(FSS_COLLECTIONS.map(async (coll) => {
+      try {
         const snap = await getDocs(collection(this._db, coll));
-        await Promise.all(snap.docs.map(d => deleteDoc(d.ref)));
+        const docs = snap.docs;
+        for (let i = 0; i < docs.length; i += 500) {
+          const chunk = docs.slice(i, i + 500);
+          const batch = writeBatch(this._db);
+          chunk.forEach(d => batch.delete(d.ref));
+          await batch.commit();
+        }
+      } catch (e) {
+        errors.push(`${coll}: ${e?.message || "ব্যর্থ"}`);
+      } finally {
+        done++;
+        try { onProgress?.(done, total); } catch {}
       }
-      try { await deleteDoc(doc(this._db, "settings", "main")); } catch {}
-      return { ok: true };
+    }));
+    try { await deleteDoc(doc(this._db, "settings", "main")); } catch {}
+
+    // 🔴 ফিক্স: আগে এখানে কোনো ভেরিফিকেশন ছিল না — মুছার চেষ্টা ব্যর্থ/আংশিক হলেও
+    // caller-কে সবসময় "সফল" ধরে নিতে হতো। এখন সত্যিই সব collection খালি হয়েছে
+    // কিনা নিশ্চিত করে তবেই ok:true রিটার্ন করা হয়।
+    try {
+      const checks = await Promise.all(FSS_COLLECTIONS.map(async (coll) => {
+        const snap = await getDocs(collection(this._db, coll));
+        return { coll, left: snap.size };
+      }));
+      const leftover = checks.filter(c => c.left > 0);
+      if (leftover.length) {
+        errors.push(...leftover.map(c => `${c.coll}: ${c.left}টি রেকর্ড এখনো আছে`));
+      }
     } catch (e) {
-      return { ok: false, msg: e.message || "Firestore clear ব্যর্থ" };
+      errors.push("যাচাই ব্যর্থ: " + (e?.message || ""));
     }
+
+    if (errors.length) return { ok: false, msg: errors.join("; ") };
+    return { ok: true };
   },
 
   // 📊 Phase 1.3: Stats/Aggregation — invoice save/void-এ running total update
@@ -7865,6 +7977,8 @@ function SmartBusinessMgmt() {
         fbCfg,            fbOn,              savedUser,         devContactVal,
         masterHashVal,    rawSuppliers,      rawPOs,            rawStockMov,
         rawCashLogs,      recoveryPhoneVal,  recoveryPinHashVal,
+        rawExpenses,      rawReturns,        rawAuditLogs,
+        rawQuotations,    rawSupplierPayments,
       ] = await Promise.all([
         load(SK.customers),         load(SK.products),
         load(SK.invoices),          load(SK.txns),
@@ -7882,6 +7996,9 @@ function SmartBusinessMgmt() {
         load(SK.purchaseOrders),    load(SK.stockMovements),
         load(SK.cashLogs),          load(SK.recoveryPhone),
         load(SK.recoveryPinHash),
+        load(SK.expenses),          load(SK.returns),
+        load(SK.auditLogs),
+        load(SK.quotations),        load(SK.supplierPayments),
       ]);
 
       // ── Batch-1 Migration: পুরনো products এ batches[] নেই → Batch-1 তৈরি করো ─
@@ -7939,6 +8056,11 @@ function SmartBusinessMgmt() {
         purchaseOrders:        rawPOs              || [],
         stockMovements:        rawStockMov         || [],
         cashLogs:              rawCashLogs         || [],
+        expenses:              rawExpenses         || [],
+        returns:               rawReturns          || [],
+        auditLogs:             rawAuditLogs        || [],
+        quotations:            rawQuotations       || [],
+        supplierPayments:      rawSupplierPayments || [],
         authChecked:           true,
         loaded:                true,
       });
@@ -8223,6 +8345,16 @@ function SmartBusinessMgmt() {
   useEffect(() => { if (loaded) debouncedSave(SK.purchaseOrders, purchaseOrders, 1500); }, [purchaseOrders, loaded]);
   useEffect(() => { if (loaded) debouncedSave(SK.stockMovements, stockMovements, 1500); }, [stockMovements, loaded]);
   useEffect(() => { if (loaded) debouncedSave(SK.cashLogs,       cashLogs,       1500); }, [cashLogs,       loaded]);
+  // 🔴 ফিক্স: এই ৫টা কালেকশনের আগে কোনো লোকাল পার্সিস্টেন্স ছিল না — Firebase বন্ধ
+  // থাকা (local-only) দোকানে প্রতি রিলোডে এই ডেটা হারিয়ে যেত।
+  useEffect(() => { if (loaded) debouncedSave(SK.expenses,         expenses,         1500); }, [expenses,         loaded]);
+  useEffect(() => { if (loaded) debouncedSave(SK.returns,          returns,          1500); }, [returns,          loaded]);
+  useEffect(() => { if (loaded) debouncedSave(SK.auditLogs,        auditLogs,        2000); }, [auditLogs,        loaded]);
+  useEffect(() => { if (loaded) debouncedSave(SK.quotations,       quotations,       1500); }, [quotations,       loaded]);
+  useEffect(() => { if (loaded) debouncedSave(SK.supplierPayments, supplierPayments, 1500); }, [supplierPayments, loaded]);
+  // 🔴 ফিক্স: "ব্যাকআপ প্রয়োজন" ব্যাজ আগে শুধু customers/products/invoices/txns
+  // বদলালে জ্বলত — বাকি ব্যাকআপযোগ্য ফিল্ডগুলো বদলালে জ্বলত না।
+  useEffect(() => { if (loaded) setBackupNeeded(true); }, [suppliers, purchaseOrders, stockMovements, cashLogs, expenses, returns, auditLogs, quotations, supplierPayments, paymentInvoices, loaded]);
 
   // 🖥️ Fix black screen on app resume/minimize (Capacitor WebView repaint bug)
   useEffect(() => {
@@ -8402,29 +8534,58 @@ function SmartBusinessMgmt() {
       }
     }
     const invoicesForBackup = (fullInvoices && fullInvoices.length >= invoices.length) ? fullInvoices : invoices;
-    const payload = { customers, products, invoices: invoicesForBackup, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs };
-    // Simple checksum: total record count hash (v4: expenses + returns সহ — auditLogs checksum-এ নেই, optional field)
-    const checksum = [customers.length, products.length, invoicesForBackup.length, txns.length, smsLog.length, paymentInvoices.length, purchaseOrders.length, stockMovements.length, (users||[]).length, (cashLogs||[]).length, (suppliers||[]).length, (expenses||[]).length, (returns||[]).length].join("-");
+    // ── কেন্দ্রীয় রেজিস্ট্রি (BACKUP_FIELDS) থেকে লুপ করে payload/checksum/counts
+    // বানানো হয় — নতুন কোনো collection ভবিষ্যতে যোগ হলে শুধু ওই একটা array-তে
+    // নাম যোগ করলেই এই তিনটাই (payload, checksum, counts) নিজে থেকে কভার করবে,
+    // এখানে আলাদা করে টাচ করা লাগবে না।
+    const stateMap = { customers, products, invoices: invoicesForBackup, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers };
+    const payload = {};
+    const counts = {};
+    BACKUP_FIELDS.forEach(f => {
+      const arr = stateMap[f] || [];
+      payload[f] = arr;
+      counts[f] = arr.length;
+    });
+    // v6 checksum: BACKUP_FIELDS-এর সবগুলো (১৮টা) collection-এর length, রেজিস্ট্রির
+    // ক্রম অনুযায়ী — validateBackup-এ একই ক্রমে recompute করে মেলানো হয়।
+    const checksum = BACKUP_FIELDS.map(f => counts[f]).join("-");
+    // v7: contentHash — শুধু count না, প্রতিটা রেকর্ডের actual content বদলেছে
+    // কিনা সেটাও ধরে (#২)। checksum (count) পুরোনো ব্যাকআপের সাথে backward-
+    // compatible রাখতে অপরিবর্তিত রাখা হলো, contentHash একদম নতুন আলাদা ফিল্ড।
+    const contentHash = buildContentHashes(payload);
     return {
       ...payload,
       _meta: {
-        version: 4,
+        version: 7,
         appVersion: "v14",
         createdAt: Date.now(),
         exportedAt: new Date().toISOString(),
         deviceId: localStorage.getItem("hg_device_id") || "unknown",
         checksum,
-        counts: {
-          customers: customers.length, products: products.length,
-          invoices: invoicesForBackup.length, txns: txns.length,
-          smsLog: smsLog.length, paymentInvoices: paymentInvoices.length,
-          purchaseOrders: purchaseOrders.length, stockMovements: stockMovements.length,
-          users: (users||[]).length, cashLogs: (cashLogs||[]).length, suppliers: (suppliers||[]).length,
-          expenses: (expenses||[]).length, returns: (returns||[]).length, auditLogs: (auditLogs||[]).length,
-        },
+        contentHash,
+        counts,
       },
     };
-  }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, firebaseEnabled]);
+  }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers, firebaseEnabled]);
+
+  // ── GoogleDriveSection/LocalStorageSection (ম্যানুয়াল Settings প্যানেল)-এ
+  // `data`/`setters` prop হিসেবে যা যায় — আগে এই দুই জায়গাতেই আলাদা করে ১৮টা
+  // ফিল্ডের নাম হার্ডকোড ছিল (buildBackupData-এর থেকেও আলাদা লিস্ট)। এখন একই
+  // BACKUP_FIELDS রেজিস্ট্রি থেকে বানানো হয় — নতুন কোনো collection যোগ হলে এই
+  // ম্যানুয়াল প্যানেল দুটোও নিজে থেকেই কভার হয়ে যাবে।
+  const buildManualBackupData = useCallback(() => {
+    const stateMap = { customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers };
+    const out = {};
+    BACKUP_FIELDS.forEach(f => { out[f] = stateMap[f]; });
+    return out;
+  }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers]);
+  const manualBackupSetters = useMemo(() => {
+    const setterMap = { customers: setCustomers, products: setProducts, invoices: setInvoices, txns: setTxns, smsLog: setSmsLog, paymentInvoices: setPaymentInvoices, purchaseOrders: setPurchaseOrders, stockMovements: setStockMovements, users: setUsers, cashLogs: setCashLogs, suppliers: setSuppliers, expenses: setExpenses, returns: setReturns, auditLogs: setAuditLogs, quotations: setQuotations, supplierPayments: setSupplierPayments, deletedProducts: setDeletedProducts, deletedCustomers: setDeletedCustomers };
+    const out = {};
+    BACKUP_FIELDS.forEach(f => { out["set" + f[0].toUpperCase() + f.slice(1)] = setterMap[f]; });
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const performDriveBackup = useCallback(async () => {
     setDriveStatus("uploading");
@@ -8476,26 +8637,32 @@ function SmartBusinessMgmt() {
       }
 
       // ২. Firestore collections — ইতিমধ্যে local state-এ আছে (onSnapshot দিয়ে sync)
-      const COLLECTIONS = [
-        ["customers", customers, setCustomers],
-        ["products", products, setProducts],
-        ["invoices", invoices, setInvoices],
-        ["txns", txns, setTxns],
-        ["smsLog", smsLog, setSmsLog],
-        ["paymentInvoices", paymentInvoices, setPaymentInvoices],
-        ["purchaseOrders", purchaseOrders, setPurchaseOrders],
-        ["stockMovements", stockMovements, setStockMovements],
-        ["cashLogs", cashLogs, setCashLogs],
-        ["suppliers", suppliers, setSuppliers],
-      ];
+      // ── merge-যোগ্য ফিল্ডের state+setter ম্যাপ। users/deletedProducts/
+      // deletedCustomers ইচ্ছাকৃতভাবে এখানে নেই (আগের মতোই merge হয় না, সরাসরি
+      // local state ব্যবহার হয়) — কিন্তু নামের লিস্ট এখন BACKUP_FIELDS থেকেই
+      // filter হয়ে আসে, তাই দুই জায়গার নাম আলাদা হয়ে ড্রিফট করার সুযোগ নেই।
+      const mergeStateSetters = {
+        customers: [customers, setCustomers], products: [products, setProducts],
+        invoices: [invoices, setInvoices], txns: [txns, setTxns],
+        smsLog: [smsLog, setSmsLog], paymentInvoices: [paymentInvoices, setPaymentInvoices],
+        purchaseOrders: [purchaseOrders, setPurchaseOrders], stockMovements: [stockMovements, setStockMovements],
+        cashLogs: [cashLogs, setCashLogs], suppliers: [suppliers, setSuppliers],
+        expenses: [expenses, setExpenses], returns: [returns, setReturns],
+        auditLogs: [auditLogs, setAuditLogs], quotations: [quotations, setQuotations],
+        supplierPayments: [supplierPayments, setSupplierPayments],
+      };
+      const COLLECTIONS = BACKUP_FIELDS
+        .filter(f => mergeStateSetters[f])
+        .map(f => [f, mergeStateSetters[f][0], mergeStateSetters[f][1]]);
 
+      const mergedData = {}; // colName -> merge-এর পর ফ্রেশ array (বা অপরিবর্তিত হলে local array)
       if (driveData) {
         setMasterSyncDetail("Merge করা হচ্ছে...");
         // ৩. প্রতিটা collection merge করো — _updatedAt দেখে নতুনটা জেতে
         let anyChange = false;
         COLLECTIONS.forEach(([colName, localArr, setter]) => {
           const driveArr = driveData[colName] || [];
-          if (!driveArr.length) return;
+          if (!driveArr.length) { mergedData[colName] = localArr; return; }
 
           const merged = new Map();
           // প্রথমে local state রাখো
@@ -8512,6 +8679,7 @@ function SmartBusinessMgmt() {
           });
 
           const mergedArr = Array.from(merged.values());
+          mergedData[colName] = mergedArr;
           if (mergedArr.length !== (localArr || []).length || anyChange) {
             setter(mergedArr);
             // Firestore-এও push করো (merged records)
@@ -8520,11 +8688,44 @@ function SmartBusinessMgmt() {
             });
           }
         });
+      } else {
+        COLLECTIONS.forEach(([colName, localArr]) => { mergedData[colName] = localArr; });
       }
 
       setMasterSyncDetail("Drive backup আপডেট করা হচ্ছে...");
-      // ৪. Drive-এও updated backup রাখো
-      await performDriveBackup();
+      // ৪. Drive-এও updated backup রাখো — 🔴 ফিক্স: আগে এখানে performDriveBackup()
+      // কল হতো, যেটা buildBackupData()-এর React state closure পড়ত — সেই closure
+      // এই sync রানের merge-এর ফলাফল তখনো দেখতে পেত না (setState async), ফলে
+      // merge হওয়া রেকর্ড এই রানের Drive backup-এ যেত না, পরের sync পর্যন্ত বাদ থাকত।
+      // এখন merge থেকে সরাসরি পাওয়া ফ্রেশ ডেটা দিয়েই backup বানানো হচ্ছে।
+      // ── এখানেও BACKUP_FIELDS থেকে লুপ — merge-যোগ্য ফিল্ড mergedData থেকে,
+      // বাকি ৩টা (users/deletedProducts/deletedCustomers) সরাসরি local state
+      // থেকে (আগের মতোই)। checksum/counts যোগ হলো — আগে এখানে ছিলই না।
+      const directFields = { users, deletedProducts, deletedCustomers };
+      const freshPayload = {};
+      const freshCounts = {};
+      BACKUP_FIELDS.forEach(f => {
+        const arr = (mergedData[f] !== undefined ? mergedData[f] : directFields[f]) || [];
+        freshPayload[f] = arr;
+        freshCounts[f] = arr.length;
+      });
+      freshPayload._meta = {
+        version: 7, appVersion: "v14", createdAt: Date.now(),
+        exportedAt: new Date().toISOString(),
+        deviceId: localStorage.getItem("hg_device_id") || "unknown",
+        checksum: BACKUP_FIELDS.map(f => freshCounts[f]).join("-"),
+        contentHash: buildContentHashes(freshPayload),
+        counts: freshCounts,
+      };
+      const now = new Date();
+      try {
+        await FS.saveBackup(freshPayload, `dukan-backup-${now.toISOString().split("T")[0]}.json`);
+        const ts = now.toISOString();
+        setLastAutoBackup(ts);
+        await save(SK.lastAutoBackup, ts);
+        await SnapshotDB.save({ ...freshPayload, _savedAt: ts });
+        setBackupNeeded(false);
+      } catch {}
 
       const doneTs = new Date().toISOString();
       setLastMasterSync(doneTs);
@@ -8538,9 +8739,12 @@ function SmartBusinessMgmt() {
     }
   }, [masterSyncStatus, googleDriveToken, customers, products, invoices, txns, smsLog,
       paymentInvoices, purchaseOrders, stockMovements, cashLogs, suppliers,
+      expenses, returns, auditLogs, quotations, supplierPayments,
+      users, deletedProducts, deletedCustomers, setLastAutoBackup,
       setCustomers, setProducts, setInvoices, setTxns, setSmsLog,
       setPaymentInvoices, setPurchaseOrders, setStockMovements, setCashLogs, setSuppliers,
-      setLastMasterSync, performDriveBackup]);
+      setExpenses, setReturns, setAuditLogs, setQuotations, setSupplierPayments,
+      setLastMasterSync]);
 
   // ── Hourly Auto Master Sync (Admin ফোনে, toggle on থাকলে) ──
   const _autoMasterSyncRunning = useRef(false);
@@ -9517,7 +9721,7 @@ function SmartBusinessMgmt() {
               paymentInvoices={paymentInvoices} setPaymentInvoices={setPaymentInvoices}
               purchaseOrders={purchaseOrders} setPurchaseOrders={setPurchaseOrders}
               stockMovements={stockMovements} setStockMovements={setStockMovements}
-              lastAutoBackup={lastAutoBackup}
+              lastAutoBackup={lastAutoBackup} lastLocalBackup={lastLocalBackup}
               driveStatus={driveStatus} performDriveBackup={performDriveBackup}
               backupNeeded={backupNeeded}
               buildBackupData={buildBackupData} setBackupNeeded={setBackupNeeded}
@@ -9543,7 +9747,7 @@ function SmartBusinessMgmt() {
               quotations={quotations} setQuotations={setQuotations}
               supplierPayments={supplierPayments} setSupplierPayments={setSupplierPayments}
               sessionTimeoutMin={sessionTimeoutMin} setSessionTimeoutMin={setSessionTimeoutMin}
-              auditLogs={auditLogs}
+              auditLogs={auditLogs} setAuditLogs={setAuditLogs}
               hasPerm={hasPerm} fssReady={fssReady}
             />
             </React.Suspense>
@@ -9596,7 +9800,7 @@ function SmartBusinessMgmt() {
                 transition: "all 0.2s",
                 letterSpacing: isActive ? 0.3 : 0,
               }}>{n.label}</span>
-              {n.id === "settings" && backupNeeded && false && (
+              {n.id === "settings" && backupNeeded && (
                 <span style={{
                   width: 7, height: 7,
                   background: "#f59e0b",
@@ -20638,7 +20842,7 @@ function StaffCustomTimePicker({ T, staffName, onGrant }) {
 }
 
 function Settings_({ T, S, shopName,
- setShopName, users, setUsers, currentUser, setCurrentUser, showToast, customers, setCustomers, products, setProducts, invoices, setInvoices, txns, setTxns, smsLog, setSmsLog, sendSMS, darkMode, setDarkMode, activeTheme, setActiveTheme, fontSize, setFontSize, deletedCustomers, setDeletedCustomers, deletedProducts = [], setDeletedProducts, smsGateway, setSmsGateway, btConnected, btDevice, onConnectBluetooth, onDisconnectBluetooth, paymentInvoices, setPaymentInvoices, purchaseOrders = [], setPurchaseOrders, stockMovements = [], setStockMovements, lastAutoBackup, driveStatus, backupNeeded, performDriveBackup, buildBackupData, setBackupNeeded, performMasterSync, masterSyncStatus, masterSyncDetail, lastMasterSync, autoMasterSyncEnabled, setAutoMasterSyncEnabled, googleDriveToken, anthropicKey, setAnthropicKey, smsTemplates, setSmsTemplates, autoBackupEnabled, setAutoBackupEnabled, firebaseConfig, setFirebaseConfig, firebaseEnabled, setFirebaseEnabled, setAuthSession, devContact, setDevContact, masterResetHash, setMasterResetHash, activeDevices = [], setActiveDevices, recoveryPhone, setRecoveryPhone, recoveryPinHash, setRecoveryPinHash, cashLogs = [], setCashLogs, suppliers = [], setSuppliers, expenses = [], setExpenses, returns = [], setReturns, quotations = [], setQuotations, supplierPayments = [], setSupplierPayments, sessionTimeoutMin, setSessionTimeoutMin, auditLogs = [], hasPerm, fssReady = false }) {
+ setShopName, users, setUsers, currentUser, setCurrentUser, showToast, customers, setCustomers, products, setProducts, invoices, setInvoices, txns, setTxns, smsLog, setSmsLog, sendSMS, darkMode, setDarkMode, activeTheme, setActiveTheme, fontSize, setFontSize, deletedCustomers, setDeletedCustomers, deletedProducts = [], setDeletedProducts, smsGateway, setSmsGateway, btConnected, btDevice, onConnectBluetooth, onDisconnectBluetooth, paymentInvoices, setPaymentInvoices, purchaseOrders = [], setPurchaseOrders, stockMovements = [], setStockMovements, lastAutoBackup, lastLocalBackup, driveStatus, backupNeeded, performDriveBackup, buildBackupData, setBackupNeeded, performMasterSync, masterSyncStatus, masterSyncDetail, lastMasterSync, autoMasterSyncEnabled, setAutoMasterSyncEnabled, googleDriveToken, anthropicKey, setAnthropicKey, smsTemplates, setSmsTemplates, autoBackupEnabled, setAutoBackupEnabled, firebaseConfig, setFirebaseConfig, firebaseEnabled, setFirebaseEnabled, setAuthSession, devContact, setDevContact, masterResetHash, setMasterResetHash, activeDevices = [], setActiveDevices, recoveryPhone, setRecoveryPhone, recoveryPinHash, setRecoveryPinHash, cashLogs = [], setCashLogs, suppliers = [], setSuppliers, expenses = [], setExpenses, returns = [], setReturns, quotations = [], setQuotations, supplierPayments = [], setSupplierPayments, sessionTimeoutMin, setSessionTimeoutMin, auditLogs = [], setAuditLogs, hasPerm, fssReady = false }) {
   const [editName,    setEditName]    = useState(false);
   const [nameInput,   setNameInput]   = useState(shopName);
   const [showNewUser, setShowNewUser] = useState(false);
@@ -20712,6 +20916,7 @@ function Settings_({ T, S, shopName,
   const [delBkStep,      setDelBkStep]      = useState(0); // 0=বন্ধ, 1=সতর্কতা, 2=টাইপ-নিশ্চিতকরণ, 3=শেষ নিশ্চিতকরণ
   const [delBkConfirmTxt,setDelBkConfirmTxt]= useState("");
   const [delBkRunning,   setDelBkRunning]   = useState(false);
+  const [delBkMsg,       setDelBkMsg]       = useState(""); // প্রগ্রেস মেসেজ (স্লো নেটওয়ার্কে ইউজারকে জানানোর জন্য)
   const DEL_BK_PHRASE = "DELETE ALL BACKUPS";
 
   const verifyMasterKey = async () => {
@@ -20742,6 +20947,9 @@ function Settings_({ T, S, shopName,
   // App সেটিং (Firebase config, থিম, ফন্ট, SMS গেটওয়ে, ইউজার লিস্ট, মাস্টার কী) অপরিবর্তিত থাকে।
   const runDeleteAllBackups = async () => {
     setDelBkRunning(true);
+    setDelBkMsg("শুরু হচ্ছে...");
+    let firestoreOk = true;
+    let firestoreErr = "";
     try {
       // 1️⃣ লাইভ ডেটা — এই ডিভাইসে সাথে সাথে খালি করো
       setProducts([]); setCustomers([]); setInvoices([]); setTxns([]);
@@ -20753,6 +20961,28 @@ function Settings_({ T, S, shopName,
       if (typeof setReturns === "function") setReturns([]);
       if (typeof setQuotations === "function") setQuotations([]);
       if (typeof setSupplierPayments === "function") setSupplierPayments([]);
+      if (typeof setAuditLogs === "function") setAuditLogs([]); // 🔴 ফিক্স: আগে এটা বাদ ছিল
+
+      // 🔴 ফিক্স: React state clear করলেই লোকাল স্টোরেজে সাথে সাথে লেখা হয় না —
+      // এই ফিল্ডগুলোর persist effect debounced (1.5-2s delay)। রিসেট শেষ হয়ে
+      // "✅ সফল" দেখানোর পরপরই যদি ইউজার অ্যাপ বন্ধ/রিলোড করে, debounce টাইমার
+      // ফায়ার হওয়ার আগেই বন্ধ হয়ে যেত, ফলে পরের বুটে পুরনো ডেটা localStorage/
+      // IndexedDB থেকে আবার লোড হয়ে যেত। এখানে সরাসরি await দিয়ে সব key
+      // এখনই flush করে দেওয়া হচ্ছে, ডিবাউন্সের উপর নির্ভর না করে।
+      setDelBkMsg("লোকাল স্টোরেজ ফাঁকা করা হচ্ছে...");
+      try {
+        await Promise.all([
+          save(SK.customers, []),        save(SK.products, []),
+          save(SK.invoices, []),         save(SK.txns, []),
+          save(SK.smsLog, []),           save(SK.paymentInvoices, []),
+          save(SK.purchaseOrders, []),   save(SK.stockMovements, []),
+          save(SK.deletedProducts, []),  save(SK.deletedCustomers, []),
+          save(SK.cashLogs, []),         save(SK.suppliers, []),
+          save(SK.expenses, []),         save(SK.returns, []),
+          save(SK.auditLogs, []),        save(SK.quotations, []),
+          save(SK.supplierPayments, []),
+        ]);
+      } catch {}
 
       // 2️⃣ Firestore — লাইভ রিয়েল-টাইম ডেটা (সব collection + settings) মুছো
       //    Google Drive সেটিং বাঁচিয়ে রাখা হয় — রিসেটের পরও Drive connection অক্ষুণ্ণ থাকবে
@@ -20765,10 +20995,20 @@ function Settings_({ T, S, shopName,
 
       if (firebaseEnabled && firebaseConfig) {
         try {
+          setDelBkMsg("Firestore থেকে সব ডেটা মোছা হচ্ছে... (নেট স্লো হলে সময় লাগতে পারে, অ্যাপ বন্ধ করবেন না)");
           FSS.init(firebaseConfig);
-          await FSS.clearAllData();
+          // 🔴 ফিক্স: আগে এই কল করা হতো কিন্তু রিটার্ন ভ্যালু কখনো চেক হতো না —
+          // ব্যর্থ/আংশিক হলেও নিঃশব্দে ধরে নেওয়া হতো সফল হয়েছে, তাই পুরনো ডেটা
+          // Firestore-এ রয়ে যেত আর live listener সেটা আবার ফিরিয়ে আনত।
+          const res = await FSS.clearAllData((done, total) => {
+            setDelBkMsg(`Firestore মোছা হচ্ছে... (${done}/${total} কালেকশন সম্পন্ন)`);
+          });
+          if (!res?.ok) { firestoreOk = false; firestoreErr = res?.msg || "অজানা কারণ"; }
           if (googleDriveToken) { try { await FSS.setSettings({ googleDriveToken }); } catch {} }
-        } catch {}
+        } catch (e) {
+          firestoreOk = false;
+          firestoreErr = e?.message || "অজানা কারণ";
+        }
       }
 
       // Google Drive localStorage keys পুনরুদ্ধার করো (FSS.clearAllData localStorage স্পর্শ করে না,
@@ -20783,19 +21023,28 @@ function Settings_({ T, S, shopName,
       } catch {}
 
       // 3️⃣ Google Drive ব্যাকআপ ফাইল
+      setDelBkMsg("Google Drive ব্যাকআপ ফাইল মোছা হচ্ছে...");
       try {
         const token = localStorage.getItem("sbm_gd_token");
         if (token) await GDrive.deleteBackup(token);
       } catch {}
 
       // 4️⃣ Local (IndexedDB + localStorage) ব্যাকআপ
+      setDelBkMsg("লোকাল ব্যাকআপ (IndexedDB) মোছা হচ্ছে...");
       try { await LocalBackup.deleteAll(); } catch {}
 
-      showToast("✅ সব ব্যাকআপ + লাইভ ডেটা মুছে দেওয়া হয়েছে — অ্যাপ সম্পূর্ণ ফ্রেশ", "#ef4444");
+      if (firestoreOk) {
+        showToast("✅ সব ব্যাকআপ + লাইভ ডেটা মুছে দেওয়া হয়েছে — অ্যাপ সম্পূর্ণ ফ্রেশ", "#ef4444");
+      } else {
+        // 🔴 ফিক্স: আসল ব্যর্থতা এখন লুকানো হয় না — ইউজারকে জানানো হচ্ছে যে
+        // Firestore-এর কিছু ডেটা হয়তো এখনো রয়ে গেছে, আবার চেষ্টা করতে বলা হচ্ছে
+        showToast(`⚠️ লোকাল ডেটা মুছে গেছে, কিন্তু Firestore সম্পূর্ণ মুছতে সমস্যা হয়েছে (${firestoreErr}) — নেট চেক করে আবার "মাস্টার ফুল রিসেট" চালান`, "#f59e0b");
+      }
     } finally {
       setDelBkRunning(false);
       setDelBkStep(0);
       setDelBkConfirmTxt("");
+      setDelBkMsg("");
     }
   };
 
@@ -20824,14 +21073,8 @@ function Settings_({ T, S, shopName,
     reader.onload = (ev) => {
       try {
         const data = JSON.parse(ev.target.result);
-        if (data.customers)       setCustomers(data.customers);
-        if (data.products)        setProducts(data.products);
-        if (data.invoices)        setInvoices(data.invoices);
-        if (data.txns)            setTxns(data.txns);
-        if (data.smsLog)          setSmsLog(data.smsLog);
-        if (data.paymentInvoices) setPaymentInvoices(data.paymentInvoices);
-        if (data.purchaseOrders)  setPurchaseOrders(data.purchaseOrders);
-        if (data.stockMovements)  setStockMovements(data.stockMovements);
+        const setters = { setCustomers, setProducts, setInvoices, setTxns, setSmsLog, setPaymentInvoices, setPurchaseOrders, setStockMovements, setUsers, setCashLogs, setSuppliers, setExpenses, setReturns, setAuditLogs, setQuotations, setSupplierPayments, setDeletedProducts, setDeletedCustomers };
+        applyBackupFields(data, setters);
         showToast("ডেটা ইম্পোর্ট সফল হয়েছে");
       } catch { showToast("ফাইল পড়তে সমস্যা হয়েছে", "#ef4444"); }
     };
@@ -21349,6 +21592,45 @@ function Settings_({ T, S, shopName,
                   </div>
                 </div>
               </div>
+
+              {/* ── #৩ Backup Health — Drive/Local/Master Sync তিনটার "কতক্ষণ আগে"
+                  একসাথে, স্ট্যালনেস অনুযায়ী রঙ বদলায় (২৪ ঘণ্টার কম=সবুজ,
+                  ২৪-৭২ ঘণ্টা=হলুদ, তার বেশি বা কখনো না=লাল) — অন্ধভাবে অনুমান
+                  করার বদলে এক নজরে দেখা যায় কোনটা ঝুঁকিতে আছে। */}
+              {(() => {
+                const staleColor = (iso) => {
+                  if (!iso) return "#ef4444";
+                  const hrs = (Date.now() - new Date(iso).getTime()) / 3600000;
+                  if (hrs < 24) return "#22c55e";
+                  if (hrs < 72) return "#f59e0b";
+                  return "#ef4444";
+                };
+                let driveLastSync = null;
+                try { driveLastSync = localStorage.getItem("sbm_gd_last_sync"); } catch {}
+                const localLastSync = [lastAutoBackup, lastLocalBackup]
+                  .filter(Boolean).sort((a, b) => new Date(b) - new Date(a))[0] || null;
+                const rows = [
+                  { label: "Google Drive", ts: driveLastSync },
+                  { label: "Local ব্যাকআপ", ts: localLastSync },
+                  { label: "Master Sync", ts: lastMasterSync },
+                ];
+                return (
+                  <div style={{ marginBottom:10, borderRadius:9, border:`1px solid ${MS_COLOR}22`, background:`${MS_COLOR}08`, padding:"8px 10px", display:"flex", flexDirection:"column", gap:5 }}>
+                    {rows.map(({ label, ts }) => {
+                      const c = staleColor(ts);
+                      return (
+                        <div key={label} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", fontSize:9 }}>
+                          <span style={{ color:"#94a3b8", fontWeight:700 }}>{label}</span>
+                          <span style={{ color:c, fontWeight:800, display:"flex", alignItems:"center", gap:4 }}>
+                            {ts ? getTimeAgo(ts) : "কখনো না"}
+                            <span style={{ width:6, height:6, borderRadius:"50%", background:c, display:"inline-block" }} />
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
 
               {/* Status row */}
               <div style={{ display:"flex", gap:6, marginBottom:10 }}>
@@ -22063,8 +22345,8 @@ function Settings_({ T, S, shopName,
             <span style={{ color:"#a78bfa", fontSize:11, fontWeight:700 }}>Master Key Verified — Google Drive Configuration</span>
           </div>
           <GoogleDriveSection
-            data={{ customers, products, invoices, txns, paymentInvoices, smsLog, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs }}
-            setters={{ setCustomers, setProducts, setInvoices, setTxns, setPaymentInvoices, setSmsLog, setPurchaseOrders, setStockMovements, setUsers, setCashLogs, setSuppliers, setExpenses, setReturns, setAuditLogs }}
+            data={buildManualBackupData()}
+            setters={manualBackupSetters}
             showToast={showToast} T={T} S={S}
           />
           <button style={{ ...S.cancelBtn, width:"100%", marginTop:10, color:"#4285F4", border:"1px solid #4285F433" }}
@@ -22086,8 +22368,8 @@ function Settings_({ T, S, shopName,
             <span style={{ color:"#a78bfa", fontSize:11, fontWeight:700 }}>Master Key Verified — Local Storage Configuration</span>
           </div>
           <LocalStorageSection
-            data={{ customers, products, invoices, txns, paymentInvoices, smsLog, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs }}
-            setters={{ setCustomers, setProducts, setInvoices, setTxns, setPaymentInvoices, setSmsLog, setPurchaseOrders, setStockMovements, setUsers, setCashLogs, setSuppliers, setExpenses, setReturns, setAuditLogs }}
+            data={buildManualBackupData()}
+            setters={manualBackupSetters}
             showToast={showToast} T={T} S={S}
           />
           <button style={{ ...S.cancelBtn, width:"100%", marginTop:10, color:"#22c55e", border:"1px solid #22c55e33" }}
@@ -22431,6 +22713,11 @@ onChange={()=>{}} />
                   {delBkRunning ? "মুছা হচ্ছে..." : "হ্যাঁ, সব ডেটা ও ব্যাকআপ মুছে দিন"}
                 </button>
               </div>
+              {delBkRunning && delBkMsg && (
+                <div style={{ marginTop:12, textAlign:"center", fontSize:12.5, color:T.sub || T.text, lineHeight:1.6 }}>
+                  {delBkMsg}
+                </div>
+              )}
             </>)}
           </div>
         </div>
@@ -23056,12 +23343,8 @@ function GoogleDriveSection({ data, setters, showToast, T, S }) {
         }
       }
       await GDrive.uploadBackup(token, {
-        customers: data.customers, products: data.products,
-        invoices: data.invoices, txns: data.txns,
-        paymentInvoices: data.paymentInvoices, smsLog: data.smsLog,
-        purchaseOrders: data.purchaseOrders, stockMovements: data.stockMovements,
-        users: data.users, cashLogs: data.cashLogs, suppliers: data.suppliers,
-        _savedAt: new Date().toISOString(), _version: "3.0",
+        ...pickBackupFields(data),
+        _savedAt: new Date().toISOString(), _version: "5.0",
       });
       const now = new Date().toISOString();
       localStorage.setItem("sbm_gd_last_sync", now);
@@ -23091,18 +23374,8 @@ function GoogleDriveSection({ data, setters, showToast, T, S }) {
         setStatus("error"); setStatusMsg(`ব্যাকআপ যাচাই ব্যর্থ: ${valid.msg}`);
         setRestoring(false); return;
       }
-      if (d.customers) setters.setCustomers(d.customers);
-      if (d.products) setters.setProducts(d.products);
-      if (d.invoices) setters.setInvoices(d.invoices);
-      if (d.txns) setters.setTxns(d.txns);
-      if (d.paymentInvoices) setters.setPaymentInvoices(d.paymentInvoices);
-      if (d.smsLog) setters.setSmsLog(d.smsLog);
-      if (d.purchaseOrders) setters.setPurchaseOrders(d.purchaseOrders);
-      if (d.stockMovements) setters.setStockMovements(d.stockMovements);
-      if (d.users) setters.setUsers?.(d.users);
-      if (d.cashLogs) setters.setCashLogs?.(d.cashLogs);
-      if (d.suppliers) setters.setSuppliers?.(d.suppliers);
-      setStatus("success"); setStatusMsg(`ডেটা পুনরুদ্ধার সম্পন্ন ✓ (${valid.counts.customers} কাস্টমার, ${valid.counts.invoices} ইনভয়েস)`);
+      applyBackupFields(d, setters);
+      setStatus("success"); setStatusMsg(`ডেটা পুনরুদ্ধার সম্পন্ন ✓ (${valid.counts.customers} কাস্টমার, ${valid.counts.invoices} ইনভয়েস)${contentIssueSuffix(valid)}`);
       showToast("♻️ Google Drive থেকে রিস্টোর সম্পন্ন!");
     } catch (e) {
       setStatus("error"); setStatusMsg(`রিস্টোর ব্যর্থ: ${e.message}`);
@@ -23565,13 +23838,7 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
 
     const doSave = async () => {
       const d = _latestData.current; // always use latest data
-      const result = await LocalBackup.save({
-        customers: d.customers, products: d.products,
-        invoices: d.invoices,   txns: d.txns,
-        paymentInvoices: d.paymentInvoices, smsLog: d.smsLog,
-        purchaseOrders: d.purchaseOrders, stockMovements: d.stockMovements,
-        users: d.users, cashLogs: d.cashLogs, suppliers: d.suppliers,
-      });
+      const result = await LocalBackup.save(pickBackupFields(d));
       if (result.ok) setLastSync(new Date().toISOString());
     };
 
@@ -23585,13 +23852,7 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
 
   const handleSaveSnapshot = async () => {
     setSaving(true);
-    const result = await LocalBackup.save({
-      customers: data.customers, products: data.products,
-      invoices:  data.invoices,  txns: data.txns,
-      paymentInvoices: data.paymentInvoices, smsLog: data.smsLog,
-      purchaseOrders: data.purchaseOrders, stockMovements: data.stockMovements,
-      users: data.users, cashLogs: data.cashLogs, suppliers: data.suppliers,
-    });
+    const result = await LocalBackup.save(pickBackupFields(data));
     if (result.ok) {
       const now = new Date().toISOString();
       setLastSync(now);
@@ -23625,13 +23886,8 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
 
   const handleDownloadFile = async () => {
     const backupData = {
-      customers: data.customers, products: data.products,
-      invoices:  data.invoices,  txns: data.txns,
-      paymentInvoices: data.paymentInvoices, smsLog: data.smsLog,
-      purchaseOrders: data.purchaseOrders, stockMovements: data.stockMovements,
-      users: data.users, cashLogs: data.cashLogs, suppliers: data.suppliers,
-      expenses: data.expenses, returns: data.returns,
-      _exportedAt: new Date().toISOString(), _version: "4.0",
+      ...pickBackupFields(data),
+      _exportedAt: new Date().toISOString(), _version: "5.0",
     };
     if (encryptEnabled) {
       // PIN চাইতে হবে — modal খুলে রাখি, actual download confirmPinAndEncrypt-এ হবে
@@ -23674,21 +23930,8 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
     if (!snap) { setStatus("error"); setStatusMsg("কোনো স্ন্যাপশট পাওয়া যায়নি"); setConfirmRestore(false); return; }
     const valid = validateBackup(snap);
     if (!valid.ok) { setStatus("error"); setStatusMsg("স্ন্যাপশট যাচাই ব্যর্থ: " + valid.msg); setConfirmRestore(false); return; }
-    if (snap.customers) setters.setCustomers(snap.customers);
-    if (snap.products)  setters.setProducts(snap.products);
-    if (snap.invoices)  setters.setInvoices(snap.invoices);
-    if (snap.txns)      setters.setTxns(snap.txns);
-    if (snap.paymentInvoices) setters.setPaymentInvoices(snap.paymentInvoices);
-    if (snap.smsLog)    setters.setSmsLog(snap.smsLog);
-    if (snap.purchaseOrders) setters.setPurchaseOrders(snap.purchaseOrders);
-    if (snap.stockMovements) setters.setStockMovements(snap.stockMovements);
-    if (snap.users) setters.setUsers?.(snap.users);
-    if (snap.cashLogs) setters.setCashLogs?.(snap.cashLogs);
-    if (snap.suppliers) setters.setSuppliers?.(snap.suppliers);
-    if (snap.expenses) setters.setExpenses?.(snap.expenses);
-    if (snap.returns) setters.setReturns?.(snap.returns);
-    if (snap.auditLogs) setters.setAuditLogs?.(snap.auditLogs);
-    setStatus("success"); setStatusMsg(`স্ন্যাপশট রিস্টোর সম্পন্ন ✓ (${valid.counts.customers} কাস্টমার)`);
+    applyBackupFields(snap, setters);
+    setStatus("success"); setStatusMsg(`স্ন্যাপশট রিস্টোর সম্পন্ন ✓ (${valid.counts.customers} কাস্টমার)${contentIssueSuffix(valid)}`);
     setConfirmRestore(false);
     showToast("♻️ লোকাল স্ন্যাপশট রিস্টোর সম্পন্ন!");
     // Refresh snapshot info display after restore
@@ -23731,22 +23974,9 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
 
   // রিস্টোর করা data সব setter-এ বসানো — plain ও decrypted দুটোতেই reuse হয়
   const applyRestoredData = (d, valid) => {
-    if (d.customers) setters.setCustomers(d.customers);
-    if (d.products) setters.setProducts(d.products);
-    if (d.invoices) setters.setInvoices(d.invoices);
-    if (d.txns) setters.setTxns(d.txns);
-    if (d.paymentInvoices) setters.setPaymentInvoices(d.paymentInvoices);
-    if (d.smsLog) setters.setSmsLog(d.smsLog);
-    if (d.purchaseOrders) setters.setPurchaseOrders(d.purchaseOrders);
-    if (d.stockMovements) setters.setStockMovements(d.stockMovements);
-    if (d.users) setters.setUsers?.(d.users);
-    if (d.cashLogs) setters.setCashLogs?.(d.cashLogs);
-    if (d.suppliers) setters.setSuppliers?.(d.suppliers);
-    if (d.expenses) setters.setExpenses?.(d.expenses);
-    if (d.returns) setters.setReturns?.(d.returns);
-    if (d.auditLogs) setters.setAuditLogs?.(d.auditLogs);
+    applyBackupFields(d, setters);
     setStatus("success");
-    setStatusMsg(`ফাইল রিস্টোর সম্পন্ন ✓ (${valid?.counts?.customers ?? (d.customers||[]).length} কাস্টমার, ${valid?.counts?.invoices ?? (d.invoices||[]).length} ইনভয়েস)`);
+    setStatusMsg(`ফাইল রিস্টোর সম্পন্ন ✓ (${valid?.counts?.customers ?? (d.customers||[]).length} কাস্টমার, ${valid?.counts?.invoices ?? (d.invoices||[]).length} ইনভয়েস)${contentIssueSuffix(valid)}`);
   };
 
   // PIN দিয়ে decrypt করে restore সম্পন্ন করা
@@ -24244,6 +24474,11 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
 }
 
 // ─── Backup Validation Helper ────────────────────────────────────────────────
+// রিস্টোর success মেসেজে contentHash mismatch থাকলে সংক্ষিপ্ত সতর্কতা জোড়া —
+// GoogleDriveSection/LocalStorageSection-এর তিনটা restore পাথই এটা ব্যবহার করে
+function contentIssueSuffix(valid) {
+  return (valid?.contentIssues?.length) ? ` ⚠️ ${valid.contentIssues.length}টি ফিল্ডে কনটেন্ট-মিসম্যাচ সন্দেহ` : "";
+}
 function validateBackup(data) {
   if (!data || typeof data !== "object") return { ok: false, msg: "ব্যাকআপ ডেটা পাওয়া যায়নি" };
   // এনক্রিপ্টেড ফাইল হলে আলাদাভাবে জানাও — এটা PIN দিয়ে আগে decrypt করতে হবে
@@ -24264,6 +24499,10 @@ function validateBackup(data) {
   if (data.returns      && !Array.isArray(data.returns))      return { ok: false, msg: "returns ডেটা corrupt" };
   // Checksum verify (যদি থাকে)
   if (data._meta?.checksum) {
+    // v6 checksum: কেন্দ্রীয় BACKUP_FIELDS রেজিস্ট্রি (১৮টি collection) থেকে,
+    // buildBackupData-এর মতো একই ক্রমে recompute করা — নতুন ফিল্ড যোগ হলে
+    // এখানে আলাদা করে কিছু বদলাতে হবে না, রেজিস্ট্রিই একমাত্র সোর্স।
+    const expectedV6 = BACKUP_FIELDS.map(f => (data[f]?.length || 0)).join("-");
     // v4 checksum: expenses + returns সহ ১৩টি collection
     const expectedV4 = [
       (data.customers?.length || 0),     (data.products?.length || 0),
@@ -24289,14 +24528,31 @@ function validateBackup(data) {
       (data.invoices?.length || 0),  (data.txns?.length || 0),
       (data.smsLog?.length || 0),    (data.paymentInvoices?.length || 0),
     ].join("-");
-    const checksumOk = expectedV4 === data._meta.checksum || expectedV3 === data._meta.checksum || expectedV2 === data._meta.checksum;
+    const checksumOk = expectedV6 === data._meta.checksum || expectedV4 === data._meta.checksum || expectedV3 === data._meta.checksum || expectedV2 === data._meta.checksum;
     if (!checksumOk) {
       // Warning only — strict reject করব না, partial backup-ও কাজে লাগতে পারে
-      console.warn("[validateBackup] Checksum mismatch", { v4: expectedV4, v3: expectedV3, v2: expectedV2, got: data._meta.checksum });
+      console.warn("[validateBackup] Checksum mismatch", { v6: expectedV6, v4: expectedV4, v3: expectedV3, v2: expectedV2, got: data._meta.checksum });
+    }
+  }
+  // #২ per-record content-hash যাচাই (v7+ ব্যাকআপে থাকে) — count same থাকলেও
+  // কোনো রেকর্ডের ভেতরের ডেটা corrupt/বদলে গেছে কিনা এটা ধরে। শুধু warning —
+  // ব্যাকআপ ফাইল ম্যানুয়ালি এডিট হলে (যেমন কেউ jq দিয়ে fix করেছে) হ্যাশ মিলবে
+  // না এমনও হতে পারে, তাই strict reject না করে শুধু কোন কোন ফিল্ডে মিসম্যাচ
+  // সেটা রিটার্ন করা হয় — UI চাইলে এটা দিয়ে ইউজারকে সতর্ক করতে পারে।
+  let contentIssues = [];
+  if (data._meta?.contentHash) {
+    contentIssues = BACKUP_FIELDS.filter(f => {
+      const expected = data._meta.contentHash[f];
+      if (expected === undefined) return false; // পুরনো/আংশিক meta — স্কিপ
+      return hashCollection(data[f]) !== expected;
+    });
+    if (contentIssues.length) {
+      console.warn("[validateBackup] Content-hash mismatch in fields:", contentIssues);
     }
   }
   return {
     ok: true,
+    contentIssues,
     counts: {
       customers: data.customers?.length || 0, products: data.products?.length || 0,
       invoices: data.invoices?.length || 0,   txns: data.txns?.length || 0,
@@ -24541,7 +24797,7 @@ const GDrive = {
       name: compressed ? this.BACKUP_FILENAME + ".gz" : this.BACKUP_FILENAME,
       parents: [folderId],
       description: `SBM Backup — ${new Date().toLocaleString("en-US")} | ${compressed ? `gzip ${(compressedBytes/1024).toFixed(0)}KB←${(originalBytes/1024).toFixed(0)}KB` : `json ${(originalBytes/1024).toFixed(0)}KB`}`,
-      appProperties: { hg_compressed: compressed ? "gzip" : "none", hg_version: "4.1" },
+      appProperties: { hg_compressed: compressed ? "gzip" : "none", hg_version: "5.0" },
     });
 
     // Search for EITHER filename (gz or plain) so we update the right file
@@ -24724,6 +24980,8 @@ const SnapshotDB = {
   MAX:     3, // rotating: snapshot_1, snapshot_2, snapshot_3
 
   _db: null,
+  _saveQueue: Promise.resolve(), // 🔴 ফিক্স: concurrent save() কল একই slot বেছে নিয়ে
+                                  // ওভাররাইট করতে পারত (round-robin race) — এখন serialize করা হয়
 
   async open() {
     if (this._db) return this._db;
@@ -24741,6 +24999,13 @@ const SnapshotDB = {
   },
 
   async save(data) {
+    // একের পর এক (serialize) — দুটো save() একসাথে এলে যেন একই slot না বেছে নেয়
+    const run = this._saveQueue.then(() => this._saveInternal(data));
+    this._saveQueue = run.catch(() => {}); // চেইন ভাঙা এড়াতে
+    return run;
+  },
+
+  async _saveInternal(data) {
     try {
       const db = await this.open();
       // কোন slot-এ রাখব — পুরনোটা replace করব
@@ -24761,7 +25026,7 @@ const SnapshotDB = {
         slot: nextSlot,
         ...data,
         _savedAt: new Date().toISOString(),
-        _version: "4.0",
+        _version: "5.0",
         _slot: nextSlot + 1,
       };
       await new Promise((resolve, reject) => {
@@ -24775,7 +25040,7 @@ const SnapshotDB = {
     } catch (e) {
       // IndexedDB ব্যর্থ হলে localStorage fallback
       try {
-        localStorage.setItem("sbm_local_backup", JSON.stringify({ ...data, _savedAt: new Date().toISOString(), _version: "4.0-ls" }));
+        localStorage.setItem("sbm_local_backup", JSON.stringify({ ...data, _savedAt: new Date().toISOString(), _version: "5.0-ls" }));
         localStorage.setItem("sbm_snap_last", new Date().toISOString());
         return { ok: true, slot: 1, fallback: true };
       } catch (e2) {
@@ -24846,7 +25111,7 @@ const LocalBackup = {
 
   downloadAsFile(data) {
     const json = JSON.stringify(
-      { ...data, _exportedAt: new Date().toISOString(), _version: "4.0" },
+      { ...data, _exportedAt: new Date().toISOString(), _version: "5.0" },
       null, 2
     );
     const blob = new Blob([json], { type: "application/json" });
