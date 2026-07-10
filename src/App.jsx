@@ -3457,6 +3457,14 @@ const BT = {
 
 // buildEscPos removed — duplicate of buildEscPosBuffer (used below). Dead code cleaned.
 
+// তিনটে ব্যাকআপ ফাইল-প্যাটার্ন — retention/prune উভয় জায়গাতেই একই রেজিস্ট্রি
+// থেকে ব্যবহার হয়, যাতে নতুন প্যাটার্ন যোগ হলে একজায়গাতেই বদলাতে হয়।
+const BACKUP_FILE_PATTERNS = {
+  sbmAuto:     /^sbm-auto-(\d{4}-\d{2}-\d{2})\.json$/,
+  dukanBackup: /^dukan-backup-(\d{4}-\d{2}-\d{2})\.json$/,
+  sbmBackup:   /^sbm-backup-(\d{4}-\d{2}-\d{2})\.json$/,
+};
+
 const FS = {
   async saveBackup(data, filename) {
     try {
@@ -3515,7 +3523,12 @@ const FS = {
   },
   async readBackup() { return null; },
 
-  // ৭ দিনের বেশি পুরনো sbm-auto-{date}.json ফাইল মুছে দেয় — storage waste আটকাতে
+  // ৭ দিনের বেশি পুরনো ব্যাকআপ ফাইল মুছে দেয় — storage waste আটকাতে
+  // 🔴 ফিক্স: আগে শুধু sbm-auto-{date}.json প্যাটার্ন ম্যাচ হতো, dukan-backup-{date}.json
+  // ও sbm-backup-{date}.json (Master Sync/ম্যানুয়াল "Download" বাটনের ফাইল) কখনো মুছত না —
+  // ফলে SBM ফোল্ডারে পুরনো তিন ধরনের ফাইলই জমে যেত। এখন তিনটে প্যাটার্নই চেক হয়।
+  // (এখন এটা শুধু legacy/safety-net হিসেবে রাখা — মূল retention হয় pruneKeepLatest() দিয়ে,
+  // প্রতিটা নতুন ফাইল সেভের সাথে সাথেই।)
   async deleteOldBackups(maxAgeDays = 7) {
     try {
       if (typeof window === "undefined" || !window.Capacitor?.isNativePlatform?.()) return { ok: true, deleted: 0 };
@@ -3524,16 +3537,51 @@ const FS = {
       const files = await this.listBackups();
       const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
       let deleted = 0;
+      const PATTERNS = Object.values(BACKUP_FILE_PATTERNS);
       for (const name of files) {
-        const m = name.match(/sbm-auto-(\d{4}-\d{2}-\d{2})\.json$/);
-        if (!m) continue;
-        const fileTime = new Date(m[1] + "T00:00:00").getTime();
+        let dateStr = null;
+        for (const re of PATTERNS) {
+          const m = name.match(re);
+          if (m) { dateStr = m[1]; break; }
+        }
+        if (!dateStr) continue;
+        const fileTime = new Date(dateStr + "T00:00:00").getTime();
         if (!isNaN(fileTime) && fileTime < cutoff) {
           try {
             await Filesystem.deleteFile({ path: "Download/SBM/" + name, directory: "EXTERNAL_STORAGE" });
             deleted++;
           } catch {}
         }
+      }
+      return { ok: true, deleted };
+    } catch (e) { return { ok: false, msg: e.message, deleted: 0 }; }
+  },
+
+  // 🆕 প্রতিবার নতুন ব্যাকআপ ফাইল সফলভাবে সেভ হওয়ার সাথে সাথেই কল হয় — সময়ের
+  // (৭ দিন) জন্য অপেক্ষা না করে, একই প্যাটার্নের বাকি সব পুরনো ফাইল সাথে সাথেই
+  // মুছে ফেলে, শুধু সদ্য-লেখা (সবচেয়ে নতুন তারিখের) ফাইলটাই ফোল্ডারে রাখে।
+  // admin ও staff — উভয় ডিভাইসেই একইভাবে প্রযোজ্য, কারণ এটা role-নির্বিশেষে
+  // যেকোনো FS.saveBackup() কলের পরেই ব্যবহার করা যায়।
+  async pruneKeepLatest(pattern) {
+    try {
+      if (typeof window === "undefined" || !window.Capacitor?.isNativePlatform?.()) return { ok: true, deleted: 0 };
+      const Filesystem = window.Capacitor?.Plugins?.Filesystem;
+      if (!Filesystem) return { ok: true, deleted: 0 };
+      const files = await this.listBackups();
+      const matches = [];
+      for (const name of files) {
+        const m = name.match(pattern);
+        if (m) matches.push({ name, dateStr: m[1] });
+      }
+      if (matches.length <= 1) return { ok: true, deleted: 0 };
+      matches.sort((a, b) => b.dateStr.localeCompare(a.dateStr)); // নতুন তারিখ আগে
+      const toDelete = matches.slice(1); // সবচেয়ে নতুনটা বাদে বাকি সব
+      let deleted = 0;
+      for (const f of toDelete) {
+        try {
+          await Filesystem.deleteFile({ path: "Download/SBM/" + f.name, directory: "EXTERNAL_STORAGE" });
+          deleted++;
+        } catch {}
       }
       return { ok: true, deleted };
     } catch (e) { return { ok: false, msg: e.message, deleted: 0 }; }
@@ -5287,6 +5335,28 @@ const _idb = (() => {
           tx.onerror    = e => rej(e.target.error);
         });
       } catch {}
+    },
+    // 🔴 পারফরম্যান্স ফিক্স: বুট-টাইমে ৩০+টা key আলাদা get() কল করলে প্রতিটা
+    // নিজের transaction খোলে (৩০+ transaction ওভারহেড)। এই getMany() একটাই
+    // readonly transaction-এ সবগুলো key একসাথে পড়ে — cold start-এ কমে।
+    async getMany(keys) {
+      try {
+        const db = await open();
+        return new Promise((res) => {
+          const tx = db.transaction(STORE, "readonly");
+          const store = tx.objectStore(STORE);
+          const out = {};
+          let remaining = keys.length;
+          if (remaining === 0) return res(out);
+          keys.forEach(k => {
+            const req = store.get(k);
+            req.onsuccess = () => { out[k] = req.result ?? null; if (--remaining === 0) res(out); };
+            req.onerror   = () => { out[k] = null; if (--remaining === 0) res(out); };
+          });
+        });
+      } catch {
+        const out = {}; keys.forEach(k => out[k] = null); return out;
+      }
     }
   };
 })();
@@ -5336,6 +5406,30 @@ const storage = (() => {
           return null;
         } catch { return null; }
       },
+      // 🔴 পারফরম্যান্স ফিক্স: একসাথে অনেকগুলো key পড়ার জন্য — বুট-টাইমে
+      // ৩০+ আলাদা IndexedDB transaction-এর বদলে একটাই transaction ব্যবহার করে।
+      // যেসব key IndexedDB-তে পাওয়া যায়নি (null), সেগুলোর জন্যই শুধু আলাদাভাবে
+      // get() কল করা হয় — এতে localStorage মাইগ্রেশন লজিক অক্ষত থাকে, কিন্তু
+      // সাধারণ (already-migrated) কেসে সবটাই এক transaction-এ হয়ে যায়।
+      async getMany(keys) {
+        try {
+          const vals = await _idb.getMany(keys);
+          const out = {};
+          const misses = [];
+          for (const k of keys) {
+            if (vals[k] !== null && vals[k] !== undefined) out[k] = vals[k];
+            else misses.push(k);
+          }
+          if (misses.length) {
+            await Promise.all(misses.map(async k => { out[k] = await this.get(k); }));
+          }
+          return out;
+        } catch {
+          const out = {};
+          await Promise.all(keys.map(async k => { out[k] = await this.get(k); }));
+          return out;
+        }
+      },
       async set(key, val) {
         try {
           await _idb.set(key, val);
@@ -5372,6 +5466,21 @@ const storage = (() => {
 
 async function load(key) { try { return await storage.get(key); } catch { return null; } }
 async function save(key, val) { try { await storage.set(key, val); } catch {} }
+// একসাথে অনেকগুলো key পড়ে — IndexedDB backend-এ storage.getMany() থাকলে সেটাই
+// ব্যবহার হয় (এক transaction), না থাকলে (localStorage/AsyncStorage/মেমরি
+// fallback) সাধারণ Promise.all(load) — কোনো ব্যাকএন্ডেই ভাঙে না।
+async function loadMany(keys) {
+  try {
+    if (typeof storage.getMany === "function") return await storage.getMany(keys);
+    const out = {};
+    await Promise.all(keys.map(async k => { out[k] = await load(k); }));
+    return out;
+  } catch {
+    const out = {};
+    await Promise.all(keys.map(async k => { out[k] = await load(k); }));
+    return out;
+  }
+}
 
 // ── Debounced save: বড় ডেটা (customers, products, invoices) এর জন্য ──────────
 // NOTE: module-level fallback — SmartBusinessMgmt uses a useRef-based version
@@ -9025,41 +9134,46 @@ function SmartBusinessMgmt() {
     (async () => {
       await DeviceID.init(); // 🔥 ফিক্স: localStorage হারিয়ে গেলেও same device id বজায় রাখতে
 
-      // ── Phase 1.1: Parallel boot — সব IndexedDB read একসাথে ────────────────
-      // আগে ছিল ২৫+ sequential await (একটার পর একটা)।
-      // এখন Promise.all দিয়ে একসাথে — cold start ~৩০০-৫০০ms কম।
-      const [
-        rawCustomers,     rawProds,          rawInvoices,       rawTxns,
-        rawSmsLog,        rawUsers,          shopNameVal,       darkModeVal,
-        activeThemeVal,   fontSizeVal,       rawDelCust,        rawDelProd,
-        rawPayInv,        rawSmsGw,          lastBackupVal,     anthropicKeyVal,
-        rawSmsTpl,        autoBackupVal,     lastMasterSyncVal, autoMasterSyncVal,
-        fbCfg,            fbOn,              savedUser,         devContactVal,
-        masterHashVal,    rawSuppliers,      rawPOs,            rawStockMov,
-        rawCashLogs,      recoveryPhoneVal,  recoveryPinHashVal,
-        rawExpenses,      rawReturns,        rawAuditLogs,
-        rawQuotations,    rawSupplierPayments,
-      ] = await Promise.all([
-        load(SK.customers),         load(SK.products),
-        load(SK.invoices),          load(SK.txns),
-        load(SK.smsLog),            load(SK.users),
-        load(SK.shopName),          load(SK.darkMode),
-        load(SK.activeTheme),       load(SK.fontSize),
-        load(SK.deletedCustomers),  load(SK.deletedProducts),
-        load(SK.paymentInvoices),   load(SK.smsGateway),
-        load(SK.lastAutoBackup),    load(SK.anthropicKey),
-        load(SK.smsTemplates),      load(SK.autoBackupEnabled),
-        load(SK.lastMasterSync),    load(SK.autoMasterSyncEnabled),
-        load(SK.firebaseConfig),    load(SK.firebaseEnabled),
-        load(SK.authSession),       load(SK.devContact),
-        load(SK.masterResetHash),   load(SK.suppliers),
-        load(SK.purchaseOrders),    load(SK.stockMovements),
-        load(SK.cashLogs),          load(SK.recoveryPhone),
-        load(SK.recoveryPinHash),
-        load(SK.expenses),          load(SK.returns),
-        load(SK.auditLogs),
-        load(SK.quotations),        load(SK.supplierPayments),
-      ]);
+      // ── Phase 1.1 + পারফরম্যান্স ফিক্স: batched IndexedDB read + দুই-wave লোড ──
+      // আগে ৩৪টা key-ই Promise.all([load(k1), load(k2), ...]) দিয়ে একসাথে
+      // "শুরু" হতো কিন্তু IndexedDB ব্যাকএন্ডে প্রতিটা load() নিজের আলাদা
+      // transaction খুলত (৩৪টা transaction)। এখন loadMany() দিয়ে ক্রিটিক্যাল
+      // key-গুলো একটাই transaction-এ পড়া হয়। এছাড়া প্রথম পেইন্টের জন্য যা
+      // লাগবে না (auditLogs, cashLogs, stockMovements, ইত্যাদি বড়/সেটিংস-
+      // নির্ভর কালেকশন) সেগুলো আলাদা "wave 2"-তে সরানো হলো — ইনভয়েস
+      // ব্যাকফিলের মতোই একই প্যাটার্নে (setTimeout 0, প্রথম রেন্ডারের পর)।
+      const CRITICAL_KEYS = [
+        SK.customers, SK.products, SK.invoices, SK.txns, SK.users,
+        SK.shopName, SK.darkMode, SK.activeTheme, SK.fontSize,
+        SK.paymentInvoices, SK.firebaseConfig, SK.firebaseEnabled,
+        SK.authSession, SK.devContact, SK.masterResetHash,
+        SK.recoveryPhone, SK.recoveryPinHash,
+      ];
+      const DEFERRED_KEYS = [
+        SK.smsLog, SK.deletedCustomers, SK.deletedProducts, SK.smsGateway,
+        SK.lastAutoBackup, SK.anthropicKey, SK.smsTemplates, SK.autoBackupEnabled,
+        SK.lastMasterSync, SK.autoMasterSyncEnabled, SK.suppliers, SK.purchaseOrders,
+        SK.stockMovements, SK.cashLogs, SK.expenses, SK.returns, SK.auditLogs,
+        SK.quotations, SK.supplierPayments,
+      ];
+      const boot1 = await loadMany(CRITICAL_KEYS);
+      const rawCustomers    = boot1[SK.customers];
+      const rawProds        = boot1[SK.products];
+      const rawInvoices     = boot1[SK.invoices];
+      const rawTxns         = boot1[SK.txns];
+      const rawUsers        = boot1[SK.users];
+      const shopNameVal     = boot1[SK.shopName];
+      const darkModeVal     = boot1[SK.darkMode];
+      const activeThemeVal  = boot1[SK.activeTheme];
+      const fontSizeVal     = boot1[SK.fontSize];
+      const rawPayInv       = boot1[SK.paymentInvoices];
+      const fbCfg           = boot1[SK.firebaseConfig];
+      const fbOn            = boot1[SK.firebaseEnabled];
+      const savedUser       = boot1[SK.authSession];
+      const devContactVal   = boot1[SK.devContact];
+      const masterHashVal   = boot1[SK.masterResetHash];
+      const recoveryPhoneVal   = boot1[SK.recoveryPhone];
+      const recoveryPinHashVal = boot1[SK.recoveryPinHash];
 
       // ── #৭ স্কিমা মাইগ্রেশন — কেন্দ্রীয় SCHEMA_MIGRATIONS রেজিস্ট্রি থেকে ─────
       // আগে এখানে শুধু products-এর batches[] মাইগ্রেশন হার্ডকোড ছিল (Batch-1
@@ -9092,42 +9206,23 @@ function SmartBusinessMgmt() {
         ? allInvoicesForBoot.filter(i => !i.dateKey || i.dateKey >= invoiceCutoff90Key)
         : allInvoicesForBoot; // ছোট দোকানে (৫০০-এর কম ইনভয়েস) windowing-এর দরকারই নেই
 
-      // ── সব state একসাথে batch update — একটাই React re-render ────────────────
+      // ── সব state একসাথে batch update — একটাই React re-render (ক্রিটিক্যাল অংশ) ──
       _patch({
         customers:             rawCustomers        || SEED_CUSTOMERS,
         products:              migratedProds,
         invoices:              recentInvoicesForBoot,
         txns:                  rawTxns             || [],
-        smsLog:                rawSmsLog           || [],
         users:                 rawUsers            || SEED_USERS,
         shopName:              shopNameVal         || "SBM",
         darkMode:              darkModeVal         ?? true,
         activeTheme:           (activeThemeVal && activeThemeVal !== "dark") ? activeThemeVal : "forest",
         fontSize:              fontSizeVal         ?? 15,
-        deletedCustomers:      rawDelCust          || [],
-        deletedProducts:       rawDelProd          || [],
         paymentInvoices:       rawPayInv           || [],
-        smsGateway:            rawSmsGw            || null,
-        lastAutoBackup:        lastBackupVal       || null,
-        anthropicKey:          anthropicKeyVal     || "",
-        smsTemplates:          rawSmsTpl           || null,
-        autoBackupEnabled:     autoBackupVal       ?? false,
-        lastMasterSync:        lastMasterSyncVal   || null,
-        autoMasterSyncEnabled: autoMasterSyncVal   ?? false,
         firebaseConfig:        firebaseCfg,
         firebaseEnabled:       firebaseOn,
         currentUser:           savedUser?.id ? savedUser : null,
         devContact:            devContactVal       || DEV_CONTACT,
         masterResetHash:       masterHashVal       || DEV_MASTER_HASH,
-        suppliers:             rawSuppliers        || [],
-        purchaseOrders:        rawPOs              || [],
-        stockMovements:        rawStockMov         || [],
-        cashLogs:              rawCashLogs         || [],
-        expenses:              rawExpenses         || [],
-        returns:               rawReturns          || [],
-        auditLogs:             rawAuditLogs        || [],
-        quotations:            rawQuotations       || [],
-        supplierPayments:      rawSupplierPayments || [],
         authChecked:           true,
         loaded:                true,
         schemaMigrationStats:  schemaStats.totalMigrated > 0 ? schemaStats : null, // #৭ — কিছু মাইগ্রেট হলেই শুধু দেখায়
@@ -9148,6 +9243,37 @@ function SmartBusinessMgmt() {
       if (recentInvoicesForBoot !== allInvoicesForBoot) {
         setTimeout(() => { _patch({ invoices: allInvoicesForBoot }); }, 0);
       }
+
+      // ── Wave 2 — প্রথম পেইন্টের জন্য জরুরি নয় এমন কালেকশন, পেইন্টের পরে ──────
+      // (auditLogs/cashLogs/stockMovements/expenses/returns/quotations/
+      // supplierPayments/suppliers/purchaseOrders — এগুলো বড় হতে পারে এবং
+      // Dashboard-এর প্রথম রেন্ডারে সরাসরি লাগে না। smsLog/deletedCustomers/
+      // deletedProducts/smsGateway/Settings-সংক্রান্ত টগলও একই wave-এ।)
+      // ইনভয়েস ব্যাকফিলের মতোই একই প্যাটার্ন — setTimeout(0), boot ব্লক করে না।
+      setTimeout(async () => {
+        const boot2 = await loadMany(DEFERRED_KEYS);
+        _patch({
+          smsLog:                boot2[SK.smsLog]              || [],
+          deletedCustomers:      boot2[SK.deletedCustomers]     || [],
+          deletedProducts:       boot2[SK.deletedProducts]      || [],
+          smsGateway:            boot2[SK.smsGateway]           || null,
+          lastAutoBackup:        boot2[SK.lastAutoBackup]       || null,
+          anthropicKey:          boot2[SK.anthropicKey]         || "",
+          smsTemplates:          boot2[SK.smsTemplates]         || null,
+          autoBackupEnabled:     boot2[SK.autoBackupEnabled]    ?? false,
+          lastMasterSync:        boot2[SK.lastMasterSync]       || null,
+          autoMasterSyncEnabled: boot2[SK.autoMasterSyncEnabled]?? false,
+          suppliers:             boot2[SK.suppliers]            || [],
+          purchaseOrders:        boot2[SK.purchaseOrders]       || [],
+          stockMovements:        boot2[SK.stockMovements]       || [],
+          cashLogs:              boot2[SK.cashLogs]             || [],
+          expenses:              boot2[SK.expenses]             || [],
+          returns:               boot2[SK.returns]              || [],
+          auditLogs:             boot2[SK.auditLogs]            || [],
+          quotations:            boot2[SK.quotations]           || [],
+          supplierPayments:      boot2[SK.supplierPayments]     || [],
+        });
+      }, 0);
 
       // ── Notification permission ও FCM setup — deferred (UI block না করতে) ──
       setTimeout(async () => {
@@ -9649,6 +9775,8 @@ function SmartBusinessMgmt() {
       await withRetry(() => FS.saveBackup(data, filename), {
         retries: 3, onRetry: () => showToast("↻ নেটওয়ার্ক ধীর — আবার চেষ্টা করা হচ্ছে...", "#f59e0b"),
       });
+      // 🆕 এই প্যাটার্নের বাকি পুরনো ফাইল সাথে সাথেই মুছে ফেলা — ৭ দিন অপেক্ষা না করে
+      try { await FS.pruneKeepLatest(BACKUP_FILE_PATTERNS.dukanBackup); } catch {}
       const ts = now.toISOString();
       setLastAutoBackup(ts);
       await save(SK.lastAutoBackup, ts);
@@ -9811,6 +9939,7 @@ function SmartBusinessMgmt() {
       } else try {
         // #৫ রিট্রাই + ব্যাকঅফ — Master Sync-এর শেষ ধাপেও একই সুরক্ষা
         await withRetry(() => FS.saveBackup(freshPayload, `dukan-backup-${_dateKeyOf(now)}.json`), { retries: 3 });
+        try { await FS.pruneKeepLatest(BACKUP_FILE_PATTERNS.dukanBackup); } catch {}
         const ts = now.toISOString();
         setLastAutoBackup(ts);
         await save(SK.lastAutoBackup, ts);
@@ -9912,6 +10041,9 @@ function SmartBusinessMgmt() {
         if (!dateChanged && await DeltaSync.shouldSkip("autoLocalFile", newHashes)) return;
 
         await withRetry(() => FS.saveBackup(data, `sbm-auto-${dateStr}.json`), { retries: 2 }); // #৫
+        // 🆕 প্রতিবার নতুন sbm-auto ফাইল লেখা হলেই সাথে সাথে পুরনোগুলো মুছে ফেলা —
+        // ৭ দিন/random sampling-এর অপেক্ষায় না থেকে (admin + staff উভয় ডিভাইসেই প্রযোজ্য)
+        try { await FS.pruneKeepLatest(BACKUP_FILE_PATTERNS.sbmAuto); } catch {}
         localStorage.setItem("hg_last_auto_file_date", dateStr);
         const ts = new Date().toISOString();
         setLastLocalBackup(ts);
@@ -9925,7 +10057,6 @@ function SmartBusinessMgmt() {
         // বাটনে সবসময় অন্তত একটা সাম্প্রতিক কপি পাওয়া যায়।
         try { await SnapshotDB.save({ ...data, _savedAt: ts }); } catch {}
 
-        if (Math.random() < 0.1) FS.deleteOldBackups(7); // মাঝেমধ্যে পুরনো (>৭দিন) ফাইল পরিষ্কার
         if (Math.random() < 0.1) FieldChangeLog.prune(); // #১৫ — একই ফ্রিকোয়েন্সিতে চেঞ্জ-লগও সীমার মধ্যে রাখা
       } catch (e) {
         // 🔴 ডিবাগ ফিক্স: আগে এই ব্লকে এরর সম্পূর্ণ silent-এ গিলে ফেলা হতো —
@@ -9973,6 +10104,26 @@ function SmartBusinessMgmt() {
       runLocalBackup();
       runDriveBackup();
     };
+
+    // 🆕 ফোল্ডার-মিসিং সেলফ-হিল চেক — আগে অন্তত একবার ব্যাকআপ ফোল্ডারে ফাইল
+    // দেখা গিয়েছিল কিন্তু এখন ফোল্ডার খালি/নেই (কেউ ভুল করে Download/SBM মুছে
+    // দিয়েছে) — তখন পরবর্তী নিয়মিত সাইকেলের (৩০ সেকেন্ড/১ মিনিট) জন্য অপেক্ষা
+    // না করে সাথে সাথেই একটা ব্যাকআপ চালিয়ে ফোল্ডার+ফাইল আবার তৈরি করে দেয়।
+    // (আসল ডেটা এমনিতেও হারায় না — Google Drive, Firestore, IndexedDB
+    // স্ন্যাপশট, Central Recovery সবই আলাদা লেয়ারে থাকে; এটা শুধু লোকাল
+    // ফোল্ডার-হিস্ট্রি দ্রুত পুনরুদ্ধার করে। admin+staff উভয় ডিভাইসেই প্রযোজ্য।)
+    if (typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.()) {
+      const SEEN_KEY = "hg_backup_folder_seen";
+      FS.listBackups().then(files => {
+        if (files.length > 0) {
+          localStorage.setItem(SEEN_KEY, "1");
+        } else if (localStorage.getItem(SEEN_KEY) === "1") {
+          try { showToast("⚠️ ব্যাকআপ ফোল্ডার খুঁজে পাওয়া যায়নি — নতুন ব্যাকআপ নেওয়া হচ্ছে", "#f59e0b"); } catch {}
+          cycle();
+        }
+      }).catch(() => {});
+    }
+
     // Admin token ৬০ মিনিটে expire — প্রতি ৪৫ মিনিটে refresh করলে staff সবসময় fresh token পাবে
     const tokenRefreshInterval = !isStaffDevice ? 45 * 60 * 1000 : 5 * 60 * 1000;
     const timer = setInterval(cycle, tokenRefreshInterval);
@@ -11050,6 +11201,31 @@ function SmartBusinessMgmt() {
                 </button>
               );
             })}
+            {/* ── এক্সিট বাটন — সেটিং-এর নিচে ── */}
+            <button
+              onClick={() => {
+                setShowMoreMenu(false);
+                if (!window.confirm("অ্যাপ থেকে বের হতে চান?")) return;
+                const CapApp = window.Capacitor?.Plugins?.App;
+                if (CapApp?.exitApp) { CapApp.exitApp(); return; }
+                // ওয়েব/ব্রাউজারে প্রোগ্রাম্যাটিক্যালি ট্যাব বন্ধ করা যায় না —
+                // তাই সেক্ষেত্রে চেষ্টা করে, না পারলে কিছু হবে না।
+                window.close();
+              }}
+              style={{
+                display:"flex", alignItems:"center", gap:12,
+                background:"transparent",
+                border:"1px solid #ef444444",
+                borderRadius: 12, padding:"11px 12px",
+                color:"#ef4444",
+                cursor:"pointer", fontFamily:"inherit", width:"100%", textAlign:"left",
+                marginTop: 8,
+              }}>
+              <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink:0 }}>
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+              <span style={{ fontSize:13.5, fontWeight:700 }}>এক্সিট</span>
+            </button>
           </div>
         </div>
       )}
@@ -12399,10 +12575,17 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
     setItems(prev => prev.map(i => i.productId === pid ? { ...i, price: parseFloat(price) || 0 } : i));
   };
 
-  const subtotal  = items.reduce((s, i) => s + i.qty * i.price, 0);
-  const discAmt   = Math.min(parseFloat(discount) || 0, subtotal);
-  const extraAmt  = Math.max(parseFloat(extraCharge) || 0, 0);
-  const total     = subtotal - discAmt + extraAmt;
+  // 🆕 প্রতিটি পণ্যে পৃথক ডিসকাউন্ট — বিদ্যমান সামগ্রিক ডিসকাউন্টের পাশাপাশি
+  const setItemDiscount = (pid, val) => {
+    setItems(prev => prev.map(i => i.productId === pid ? { ...i, itemDiscount: Math.max(0, parseFloat(val) || 0) } : i));
+  };
+
+  const subtotal      = items.reduce((s, i) => s + i.qty * i.price, 0);
+  // প্রতিটি পণ্যের নিজস্ব ডিসকাউন্ট — লাইনের সাব-টোটাল ছাড়িয়ে যেতে পারবে না
+  const itemDiscTotal = items.reduce((s, i) => s + Math.min(Math.max(parseFloat(i.itemDiscount) || 0, 0), i.qty * i.price), 0);
+  const discAmt        = Math.min(parseFloat(discount) || 0, Math.max(0, subtotal - itemDiscTotal));
+  const extraAmt       = Math.max(parseFloat(extraCharge) || 0, 0);
+  const total           = subtotal - itemDiscTotal - discAmt + extraAmt;
   const paidAmt = payType === "partial" ? (parseFloat(partialAmt) || 0) : (payType === "cash" ? total : 0);
   const bakiAmt = Math.max(0, total - paidAmt);
   // Overpayment split: পরিশোধ > আজকের invoice → অতিরিক্ত অংশ কাস্টমারের জমা হবে
@@ -12513,7 +12696,7 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
       id: invId, customerId: isSelfUse ? null : isWalkIn ? walkInCustId : selCust.id,
       customerName: isWalkIn ? (walkInName.trim() || "Walk-in Customer") : selCust.name,
       customerMobile: isWalkIn ? walkInMobile.trim() : selCust.mobile,
-      items, total: isSelfUse ? selfUseCost : total, subtotal: isSelfUse ? selfUseCost : subtotal, discount: discAmt, extraCharge: isSelfUse ? 0 : extraAmt,
+      items, total: isSelfUse ? selfUseCost : total, subtotal: isSelfUse ? selfUseCost : subtotal, discount: discAmt, itemDiscount: isSelfUse ? 0 : itemDiscTotal, extraCharge: isSelfUse ? 0 : extraAmt,
       payType: effectivePayType, note,
       paidAmount: isSelfUse ? 0 : isWalkIn ? walkInPaidAmt : paidAmt,
       bakiAmount: isSelfUse ? 0 : isWalkIn ? walkInBakiAmt : bakiAmt,
@@ -13455,11 +13638,17 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
                 return (
                   <>
                     <div style={{ maxHeight: showAllSummaryItems ? 260 : "none", overflowY: showAllSummaryItems ? "auto" : "visible" }}>
-                      {visibleItems.map(item => {
+                      {visibleItems.map((item, _idx) => {
                         const batch = productBatchMap[item.productId];
                         const batchLabel = batch?.batch ? String(batch.batch).replace(/^ব্যাচ-/i, "") : "";
+                        const lineSubtotal = item.price * item.qty;
+                        const lineDisc = Math.min(Math.max(parseFloat(item.itemDiscount) || 0, 0), lineSubtotal);
                         return (
-                          <div key={item.productId} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, paddingBottom: 6 }}>
+                          <div key={item.productId} style={{
+                            display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8,
+                            padding: "8px 0",
+                            borderBottom: _idx < visibleItems.length - 1 ? `1px solid ${T.border}` : "none",
+                          }}>
                             <div style={{ minWidth: 0, flex: 1 }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                                 <span style={{ color: T.text, fontSize: 12, fontWeight: 600 }}>{item.name}</span>
@@ -13475,10 +13664,23 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
                                   )}
                                 </div>
                               )}
+                              {/* 🆕 এই পণ্যের নিজস্ব ডিসকাউন্ট */}
+                              <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }} onClick={e => e.stopPropagation()}>
+                                <span style={{ color: "#22c55e", fontSize: 9.5, fontWeight: 700 }}>এই পণ্যে ছাড়:</span>
+                                <span style={{ color: "#22c55e", fontSize: 10 }}>৳</span>
+                                <input
+                                  type="number" inputMode="numeric" placeholder="0"
+                                  value={item.itemDiscount || ""}
+                                  onChange={e => setItemDiscount(item.productId, e.target.value)}
+                                  style={{ width: 54, background: T.card, border: `1px solid #22c55e44`, borderRadius: 6, padding: "2px 5px", fontSize: 10.5, color: "#22c55e", fontFamily: "inherit" }} />
+                              </div>
                             </div>
                             <div style={{ textAlign: "right", flexShrink: 0 }}>
-                              <div style={{ color: T.text, fontSize: 12, fontWeight: 700 }}>৳{fmt(item.price * item.qty)}</div>
+                              <div style={{ color: T.text, fontSize: 12, fontWeight: 700 }}>৳{fmt(lineSubtotal)}</div>
                               <div style={{ color: T.sub, fontSize: 9.5 }}>@৳{fmt(item.price)}</div>
+                              {lineDisc > 0 && (
+                                <div style={{ color: "#22c55e", fontSize: 9.5, fontWeight: 700 }}>− ৳{fmt(lineDisc)}</div>
+                              )}
                             </div>
                           </div>
                         );
@@ -13499,11 +13701,16 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
                   </>
                 );
               })()}
-              {(discAmt > 0 || extraAmt > 0) && (
+              {(discAmt > 0 || extraAmt > 0 || itemDiscTotal > 0) && (
                 <>
                   <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 6, paddingTop: 6, display:"flex", justifyContent:"space-between", fontSize:12, color: T.sub }}>
                     <span>সর্বমোট</span><span>৳{fmt(subtotal)}</span>
                   </div>
+                  {itemDiscTotal > 0 && (
+                  <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:"#22c55e" }}>
+                    <span>পণ্যভিত্তিক ডিসকাউন্ট</span><span>– ৳{fmt(itemDiscTotal)}</span>
+                  </div>
+                  )}
                   {discAmt > 0 && (
                   <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:"#22c55e" }}>
                     <span>ডিসকাউন্ট</span><span>– ৳{fmt(discAmt)}</span>
@@ -16910,33 +17117,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
           })}
         </div>
 
-        {/* ══ আজকের খরচ সারসংক্ষেপ ══ */}
-        {(() => {
-          const todayK = new Date().toISOString().split("T")[0];
-          const todayExpenses = expenses.filter(e => e.date === todayK);
-          const todayExpTotal = todayExpenses.reduce((s, e) => s + (e.amount || 0), 0);
-          if (todayExpenses.length === 0) return null;
-          return (
-            <div style={{ marginBottom: 12, background: "#ef444410", border: "1px solid #ef444430", borderRadius: 14, padding: "12px 14px" }}
-              onClick={() => setTab("expense")} >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ width: 4, height: 20, borderRadius: 2, background: "linear-gradient(180deg,#f59e0b,#ef4444)", flexShrink: 0 }} />
-                  <span style={{ color: "#fca5a5", fontWeight: 900, fontSize: 13 }}>💸 আজকের খরচ</span>
-                </div>
-                <span style={{ color: "#ef4444", fontWeight: 900, fontSize: 16 }}>৳{Number(todayExpTotal).toLocaleString("en-US")}</span>
-              </div>
-              <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {todayExpenses.slice(0, 3).map(e => (
-                  <span key={e.id} style={{ background: "#ef444415", border: "1px solid #ef444425", borderRadius: 8, padding: "3px 8px", color: "#fca5a5", fontSize: 11, fontWeight: 700 }}>
-                    {e.category}: ৳{Number(e.amount).toLocaleString("en-US")}
-                  </span>
-                ))}
-                {todayExpenses.length > 3 && <span style={{ color: "#ef4444", fontSize: 11, fontWeight: 700 }}>+{todayExpenses.length - 3}টি আরও</span>}
-              </div>
-            </div>
-          );
-        })()}
+        {/* ══ আজকের খরচ সারসংক্ষেপ — ড্যাশবোর্ড থেকে সরানো হয়েছে (ব্যবহারকারীর অনুরোধে) ══ */}
 
         {/* ══ Cash Flow Forecast (৭ দিন) ══ */}
         {cashFlow && (() => {
@@ -25260,6 +25441,7 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
     const filename = `sbm-backup-${_dateKeyOf(new Date())}.json`;
     const result = await FS.saveBackup(backupData, filename);
     if (result?.ok) {
+      try { await FS.pruneKeepLatest(BACKUP_FILE_PATTERNS.sbmBackup); } catch {}
       showToast(result.msg || "💾 ব্যাকআপ ফাইল সেভ হয়েছে");
     } else {
       showToast("❌ সেভ ব্যর্থ: " + (result?.msg || "অজানা সমস্যা"));
@@ -25274,6 +25456,7 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
       const encrypted = await encryptBackupData(pendingRestoreData, pinInput);
       const result = await FS.saveBackup(encrypted, pendingRestoreFilename);
       if (result?.ok) {
+        try { await FS.pruneKeepLatest(BACKUP_FILE_PATTERNS.sbmBackup); } catch {}
         showToast("🔐 এনক্রিপ্টেড ব্যাকআপ সেভ হয়েছে — PIN মনে রাখুন!");
       } else {
         showToast("❌ সেভ ব্যর্থ: " + (result?.msg || "অজানা সমস্যা"), "#ef4444");
