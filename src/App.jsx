@@ -9741,6 +9741,15 @@ function SmartBusinessMgmt() {
     const timer = setInterval(cycle, tokenRefreshInterval);
     const firstRun = setTimeout(cycle, 30000); // অ্যাপ ওপেন হওয়ার ৩০ সেকেন্ড পর প্রথমবার
 
+    // 🔴 ফিক্স (প্রতি মিনিটে লোকাল JSON ব্যাকআপ): আগে লোকাল ফাইল ব্যাকআপ Drive
+    // token-refresh সাইকেলের (৪৫ মিনিট/৫ মিনিট) সাথে বাঁধা ছিল — ইউজারের কাছে
+    // মনে হচ্ছিল ফাইলে সবসময় "আগের" (পুরনো) ডেটা থেকে যাচ্ছে, কারণ মাঝের সময়ে
+    // করা পরিবর্তন পরের সাইকেলের আগে ফাইলে প্রতিফলিত হতো না। এখন লোকাল ফাইল
+    // ব্যাকআপ আলাদা, নিজস্ব ১-মিনিট টাইমারে চলে (DeltaSync এখনো ভেতরে আছে,
+    // তাই ডেটা না বদলালে বৃথা রিরাইট হবে না — শুধু চেক প্রতি মিনিটে হবে)।
+    // Drive backup + token refresh আগের মতোই কম ঘন ঘন চলে (API rate-limit/ব্যাটারি বাঁচাতে)।
+    const localOnlyTimer = setInterval(runLocalBackup, 60 * 1000);
+
     // 🔴 Event-driven trigger — Android Doze/App Standby-তে background setInterval
     // suspend হয়ে যেতে পারে, তাই শুধু interval-এর উপর ভরসা না করে অ্যাপ
     // foreground-এ ফিরলেও (visibilitychange/resume) backup cycle চালানো হয়,
@@ -9774,6 +9783,7 @@ function SmartBusinessMgmt() {
 
     return () => {
       clearInterval(timer);
+      clearInterval(localOnlyTimer);
       clearTimeout(firstRun);
       if (autoReconnectTimer) clearInterval(autoReconnectTimer);
       document.removeEventListener("visibilitychange", onVisible);
@@ -18013,6 +18023,14 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
   const [editId,       setEditId]       = useState(null);
   const [form,         setForm]         = useState({ name: "", price: "", stock: "", minStockAlert: "5", category: "অন্যান্য", company: "", productType: "product", costPrice: "", expiryDate: "", barcode: "", unit: "", isFreeStock: false });
   const [search,       setSearch]       = useState("");
+  // 🔴 ফিক্স (React error #310 — Rendered fewer/more hooks than during previous render):
+  // এই দুটো useState আগে abcData.length>0 / deadStock.length>0 শর্তাধীন IIFE-এর
+  // ভেতরে ছিল। শর্ত সত্য/মিথ্যা হওয়ার ওপর ভিত্তি করে hook কল সংখ্যা রেন্ডার থেকে
+  // রেন্ডারে বদলে যেত (Rules of Hooks ভঙ্গ) — যেমন প্রথম পণ্য যোগ করার পর
+  // abcData/deadStock খালি থেকে নন-খালি হলে হঠাৎ ২টা নতুন hook যোগ হতো, আর React
+  // পুরো পেজ ক্র্যাশ করে দিত। এখন এই state কম্পোনেন্টের টপ-লেভেলে, শর্তহীনভাবে আছে।
+  const [showAbc,  setShowAbc]  = useState(false);
+  const [showDead, setShowDead] = useState(false);
   // React 18 useDeferredValue — type করলে UI block হবে না
   const deferredSearch = useDeferredValue(search);
 
@@ -18938,7 +18956,6 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
         const aCount = abcData.filter(p => p.category === "A").length;
         const bCount = abcData.filter(p => p.category === "B").length;
         const cCount = abcData.filter(p => p.category === "C").length;
-        const [showAbc, setShowAbc] = React.useState(false);
         return (
           <div className="qc-gradient-card" style={{ ...S.card, marginBottom:10, padding:"12px 14px", border:"1.5px solid #6366f133" }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: showAbc?10:0 }}
@@ -18983,7 +19000,6 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
       {/* ══ Dead Stock Alert ══ */}
       {deadStock.length > 0 && (() => {
         const totalValue = deadStock.reduce((s,p) => s+(p.stockValue||0), 0);
-        const [showDead, setShowDead] = React.useState(false);
         return (
           <div className="qc-gradient-card" style={{ ...S.card, marginBottom:10, padding:"12px 14px", border:"1.5px solid #f59e0b33" }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: showDead?10:0 }}
@@ -24591,6 +24607,7 @@ function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken }
         setConfirmRestore(true);
       } catch (e) {
         setStatus("error"); setStatusMsg(`প্রিভিউ আনতে ব্যর্থ: ${StorageQuota.friendlyMessage(e)}`);
+        if (/সেশনের মেয়াদ শেষ|401/.test(e?.message || "")) setNeedAuth(true);
       }
       setPreviewLoading(false);
       return;
@@ -26503,12 +26520,21 @@ const GDrive = {
       `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    if (r.ok) {
-      const data = await r.json();
-      if (data.files?.[0]?.id) {
-        localStorage.setItem("sbm_gd_folder_id", data.files[0].id);
-        return data.files[0].id;
-      }
+    // 🔴 ফিক্স: আগে সার্চ রিকোয়েস্ট ব্যর্থ হলে (যেমন token expire/401) কোনো
+    // এরর না দেখিয়ে চুপচাপ create-এ চলে যেত — create-ও একই invalid token দিয়ে
+    // ব্যর্থ হতো এবং ইউজার শুধু অস্পষ্ট "folder তৈরি করা যায়নি" দেখতেন, আসল
+    // কারণ (token expired/permission/network) কখনো বোঝা যেত না। এখন সার্চ
+    // 401/403 দিলে সাথে সাথেই আসল কারণসহ থামে।
+    if (!r.ok) {
+      let reason = `HTTP ${r.status}`;
+      try { const errBody = await r.json(); reason = errBody?.error?.message || reason; } catch {}
+      if (r.status === 401) throw new Error("Google Drive সেশনের মেয়াদ শেষ — আবার লগইন করুন");
+      throw new Error(`Drive ফোল্ডার খুঁজতে ব্যর্থ: ${reason}`);
+    }
+    const data = await r.json();
+    if (data.files?.[0]?.id) {
+      localStorage.setItem("sbm_gd_folder_id", data.files[0].id);
+      return data.files[0].id;
     }
 
     // না থাকলে তৈরি করো
@@ -26525,7 +26551,12 @@ const GDrive = {
       localStorage.setItem("sbm_gd_folder_id", folder.id);
       return folder.id;
     }
-    throw new Error("SBM Backups folder তৈরি করা যায়নি");
+    // 🔴 ফিক্স: create ব্যর্থ হলে Google-এর আসল error message দেখানো হচ্ছে
+    // (যেমন "Invalid Credentials", "insufficient permission" ইত্যাদি) — যাতে
+    // token/scope/quota কোনটার সমস্যা তা সাথে সাথে বোঝা যায়।
+    const reason = folder?.error?.message || `HTTP ${cr.status}`;
+    if (cr.status === 401) throw new Error("Google Drive সেশনের মেয়াদ শেষ — আবার লগইন করুন");
+    throw new Error(`SBM Backups folder তৈরি করা যায়নি: ${reason}`);
   },
 
   async findBackupFile(token) {
