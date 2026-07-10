@@ -2644,7 +2644,31 @@ function SubscriptionGate({ children }) {
           // Sync copy রাখো timeout handler-এর জন্য
           try { localStorage.setItem("sbm_phone_sync", saved); } catch {}
           setMyPhone(saved);
-          checkSubscription(saved, () => mounted);
+
+          // 🔴 পারফরম্যান্স ফিক্স: আগে প্রতিবার অ্যাপ খোলার সময় splash হাইড হওয়ার
+          // আগেই কেন্দ্রীয় Firestore-এ subscriptions/{phone} ডকুমেন্টের network
+          // round-trip (৬s টাইমআউট রেসসহ) কমপ্লিট হওয়া বাধ্যতামূলক ছিল — লোকাল
+          // ডেটা-লোড যতই অপ্টিমাইজ করা হোক, এই নেটওয়ার্ক-নির্ভর ধাপটাই মূল
+          // "লোডিং বেশি" সমস্যার আসল কারণ (বিশেষত দুর্বল/মোবাইল নেটওয়ার্কে)।
+          // এখন: বৈধ cached status (active/trial, মেয়াদ বাকি) থাকলে সাথে সাথেই
+          // সেটা দেখিয়ে splash হাইড করে দেওয়া হয় (optimistic), আর checkSubscription
+          // ব্যাকগ্রাউন্ডে "silent" মোডে চলে — status আসলেই বদলালে (blocked/expired
+          // ইত্যাদি) তখনই আপডেট হয়। নিরাপত্তা অপরিবর্তিত: নেটওয়ার্ক চেক এখনও
+          // হচ্ছে, শুধু UI আর সেটার জন্য অপেক্ষা করছে না।
+          let optimistic = false;
+          try {
+            const cached = localStorage.getItem("sbm_sub_cache");
+            if (cached) {
+              const { status: cs, expiry, phone: cp } = JSON.parse(cached);
+              if (cp === saved && new Date(expiry) > new Date() && (cs === "active" || cs === "trial")) {
+                setStatus(cs);
+                if (typeof window.__hideSplash === "function") window.__hideSplash();
+                optimistic = true;
+              }
+            }
+          } catch {}
+
+          checkSubscription(saved, () => mounted, { silent: optimistic });
         } else {
           setStatus("unregistered");
           if (typeof window.__hideSplash === "function") window.__hideSplash();
@@ -2673,9 +2697,11 @@ function SubscriptionGate({ children }) {
     return () => { mounted = false; clearTimeout(timeout); };
   }, []);
 
-  const checkSubscription = async (phone, isMounted = () => true) => {
+  const checkSubscription = async (phone, isMounted = () => true, opts = {}) => {
     if (!isMounted()) return;
-    setStatus("loading");
+    // silent: true হলে (optimistic cache আগে থেকেই দেখানো আছে) — status "loading"-এ
+    // ফেরত নেওয়া হয় না, তাতে UI ফ্ল্যাশ করে আবার স্পিনারে চলে যেত।
+    if (!opts.silent) setStatus("loading");
     try {
       const snap = await Promise.race([
         getDoc(doc(_db, "subscriptions", phone)),
@@ -2727,6 +2753,11 @@ function SubscriptionGate({ children }) {
 
     } catch {
       if (!isMounted()) return;
+      // silent ব্যাকগ্রাউন্ড রিভ্যালিডেশন ব্যর্থ হলে (নেটওয়ার্ক blip) — যেহেতু
+      // ইউজার ইতিমধ্যে বৈধ cached status দিয়ে অ্যাপ ব্যবহার করছে, এখানে হুট করে
+      // lock/downgrade করা হয় না। পরের ওপেন/পরের ৪৫ মিনিট Master Sync সাইকেলে
+      // ফের চেষ্টা হবে। শুধু foreground (non-silent) চেকেই lock প্রযোজ্য।
+      if (opts.silent) return;
       // ── Network/timeout error → cache দেখো, না থাকলে lock ────────────────
       // "active" দেওয়া যাবে না — bypass-এর সুযোগ তৈরি হয়
       try {
@@ -3577,14 +3608,31 @@ const FS = {
       matches.sort((a, b) => b.dateStr.localeCompare(a.dateStr)); // নতুন তারিখ আগে
       const toDelete = matches.slice(1); // সবচেয়ে নতুনটা বাদে বাকি সব
       let deleted = 0;
+      const errors = [];
       for (const f of toDelete) {
         try {
           await Filesystem.deleteFile({ path: "Download/SBM/" + f.name, directory: "EXTERNAL_STORAGE" });
           deleted++;
-        } catch {}
+        } catch (delErr) {
+          // 🔴 ডিবাগ ফিক্স: আগে এখানে এরর সম্পূর্ণ silent-এ গিলে ফেলা হতো —
+          // deleteFile ব্যর্থ হলে (permission/scoped-storage/lock ইত্যাদি
+          // যেকোনো কারণে) পুরনো ফাইল থেকেই যেত কিন্তু কোথাও কোনো চিহ্ন
+          // থাকত না। এখন প্রতিটা ব্যর্থ delete SyncLog + console.error-এ
+          // লেখা হয়, যাতে Settings-এর "চেঞ্জ লগ" থেকে আসল কারণ ধরা যায়।
+          const msg = `prune ব্যর্থ: ${f.name} — ${delErr?.message || delErr}`;
+          errors.push(msg);
+          console.error("[pruneKeepLatest]", msg);
+        }
       }
-      return { ok: true, deleted };
-    } catch (e) { return { ok: false, msg: e.message, deleted: 0 }; }
+      if (errors.length) {
+        try { SyncLog.add("error", `Retention prune আংশিক ব্যর্থ (${errors.length}টা ফাইল মুছতে পারেনি): ${errors[0]}`); } catch {}
+      }
+      return { ok: true, deleted, failed: errors.length };
+    } catch (e) {
+      console.error("[pruneKeepLatest] সম্পূর্ণ ব্যর্থ:", e);
+      try { SyncLog.add("error", "Retention prune সম্পূর্ণ ব্যর্থ: " + (e?.message || String(e))); } catch {}
+      return { ok: false, msg: e.message, deleted: 0 };
+    }
   },
 };
 
