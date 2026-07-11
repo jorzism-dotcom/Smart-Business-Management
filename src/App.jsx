@@ -4900,6 +4900,14 @@ const FSS = {
 // ── withTs: record-এ _updatedAt timestamp যোগ করে (Master Sync merge-এর জন্য) ──
 const withTs = (rec) => ({ ...rec, _updatedAt: Date.now() });
 
+// ── stockMovements এখন windowed real-time sync (invoices-এর মতো) — তাই
+// useFSSCollection আর local→remote push করে না। প্রতিটা নতুন movement তৈরির
+// সময় এই হেল্পার দিয়ে সরাসরি Firestore-এ push করতে হয় (fire-and-forget)।
+const pushStockMovement = (entry) => {
+  if (FSS.isReady()) FSS.setRecord("stockMovements", entry.id, withTs(entry));
+  return entry;
+};
+
 function useFSSCollection(name, value, setValue, ready, opts = {}) {
   const { instant = false, filterIncoming = null, onSync = null } = opts;
   const lastSynced  = useRef(null);
@@ -9493,7 +9501,29 @@ function SmartBusinessMgmt() {
   useFSSCollection("smsLog", smsLog, setSmsLog, fssReady, { onSync: setSyncToast });
   useFSSCollection("suppliers", suppliers, setSuppliers, fssReady, { onSync: setSyncToast });
   useFSSCollection("purchaseOrders", purchaseOrders, setPurchaseOrders, fssReady, { onSync: setSyncToast });
-  useFSSCollection("stockMovements", stockMovements, setStockMovements, fssReady, { onSync: setSyncToast });
+  // ── stockMovements Windowed Sync — শুধু শেষ ৩০ দিনের মুভমেন্ট real-time ──
+  // আগে: useFSSCollection("stockMovements"...) → পুরো collection pull (১০ লাখ
+  // ইনভয়েসে stockMovements-ও লাখ ছাড়িয়ে যেত)। এখন: শুধু ৩০ দিনের window —
+  // কোনো live UI পুরনো stockMovements read করে না (শুধু backup/export-এ যায়),
+  // তাই windowing-এ কোনো ফিচার ভাঙে না। নতুন movement তৈরির সময়
+  // pushStockMovement() দিয়ে সরাসরি Firestore-এ লেখা হয় (৭টা creation site)।
+  // Firestore index লাগবে: stockMovements → dateKey (ASC)।
+  useEffect(() => {
+    if (!fssReady || !FSS._db) return;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - 30);
+    const cutoff = cutoffDate.toISOString().split("T")[0];
+
+    const colRef = collection(FSS._db, "stockMovements");
+    const q = query(colRef, where("dateKey", ">=", cutoff), orderBy("dateKey", "desc"));
+
+    const unsub = onSnapshot(q, (snap) => {
+      const recent = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setStockMovements(recent);
+    }, () => { /* offline — Firestore cache থেকে কাজ চলবে */ });
+
+    return () => unsub();
+  }, [fssReady]); // eslint-disable-line react-hooks/exhaustive-deps
   useFSSCollection("cashLogs", cashLogs, setCashLogs, fssReady, { onSync: setSyncToast });
   useFSSCollection("expenses", expenses, setExpenses, fssReady, { onSync: setSyncToast });
   useFSSCollection("returns",  returns,  setReturns,  fssReady, { onSync: setSyncToast });
@@ -9825,8 +9855,12 @@ function SmartBusinessMgmt() {
   // (৩০ দিনের বেশি) দিনে একবার পূর্ণাঙ্গভাবে backup-এ যোগ হলেই যথেষ্ট।
   const FULL_PULL_KEY = "hg_last_full_invoice_pull";
   const FULL_PULL_INTERVAL = 12 * 60 * 60 * 1000; // ১২ ঘণ্টা
+  // 🔴 stockMovements-ও এখন windowed (৩০ দিন) — invoices-এর মতো একই ১২-ঘণ্টার
+  // cached full-pull প্যাটার্ন, যাতে auto-backup-এ পুরনো movement হারিয়ে না যায়।
+  const FULL_PULL_KEY_SM = "hg_last_full_stockmovements_pull";
   const buildBackupData = useCallback(async () => {
     let fullInvoices = invoices;
+    let fullStockMovements = stockMovements;
     if (firebaseEnabled && FSS.isReady()) {
       const lastPull = Number(localStorage.getItem(FULL_PULL_KEY) || 0);
       if (Date.now() - lastPull >= FULL_PULL_INTERVAL) {
@@ -9835,13 +9869,21 @@ function SmartBusinessMgmt() {
           localStorage.setItem(FULL_PULL_KEY, String(Date.now()));
         } catch { fullInvoices = invoices; }
       }
+      const lastPullSM = Number(localStorage.getItem(FULL_PULL_KEY_SM) || 0);
+      if (Date.now() - lastPullSM >= FULL_PULL_INTERVAL) {
+        try {
+          fullStockMovements = await FSS.getCollectionOnce("stockMovements");
+          localStorage.setItem(FULL_PULL_KEY_SM, String(Date.now()));
+        } catch { fullStockMovements = stockMovements; }
+      }
     }
     const invoicesForBackup = (fullInvoices && fullInvoices.length >= invoices.length) ? fullInvoices : invoices;
+    const stockMovementsForBackup = (fullStockMovements && fullStockMovements.length >= stockMovements.length) ? fullStockMovements : stockMovements;
     // ── কেন্দ্রীয় রেজিস্ট্রি (BACKUP_FIELDS) থেকে লুপ করে payload/checksum/counts
     // বানানো হয় — নতুন কোনো collection ভবিষ্যতে যোগ হলে শুধু ওই একটা array-তে
     // নাম যোগ করলেই এই তিনটাই (payload, checksum, counts) নিজে থেকে কভার করবে,
     // এখানে আলাদা করে টাচ করা লাগবে না।
-    const stateMap = { customers, products, invoices: invoicesForBackup, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers };
+    const stateMap = { customers, products, invoices: invoicesForBackup, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements: stockMovementsForBackup, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers };
     const payload = {};
     const counts = {};
     BACKUP_FIELDS.forEach(f => {
@@ -15115,12 +15157,13 @@ function DashPurchaseEntryModal({ T, S, products, setProducts, setStockMovements
         }
       : p
     ));
-    setStockMovements(prev => [{
+    const mv1 = pushStockMovement({
       id: "sm_" + Date.now(), productId: peForm.productId,
       productName: prod.name, stock: newStock,
       prevStock: oldStock, delta: qty,
       at: now, dateKey: now.split("T")[0], source: "purchase"
-    }, ...prev]);
+    });
+    setStockMovements(prev => [mv1, ...prev]);
     setPurchaseOrders(prev => [entry, ...prev]);
     setPeForm(f => ({ ...EMPTY_PE, supplier: f.supplier }));
     showToast(`✅ ${prod.name} — ${qty} ${prod.unit||"পিস"} স্টকে যোগ হয়েছে`, "#a78bfa");
@@ -19019,11 +19062,12 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
         // যাতে FIFO deduction সবসময় batches[]-এর সাথে সিংক থাকে
         let updatedBatches = p.batches || [];
         if (delta !== 0) {
-          setStockMovements(su => [{
+          const mvEdit = pushStockMovement({
             id: uid(), productId: editId, productName: form.name,
             stock: updatedStock, prevStock, delta,
             at: now, dateKey: now.split("T")[0], source: "edit",
-          }, ...su]);
+          });
+          setStockMovements(su => [mvEdit, ...su]);
 
           if (delta > 0) {
             // stock বাড়লে → নতুন adjustment batch যোগ করো
@@ -19104,11 +19148,12 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
       setProducts(prev => [...prev, { id: newId, ...prod }]);
       // নতুন পণ্যে initial stock লগ করো (delta = totalStockVal, prevStock = 0)
       if (totalStockVal > 0) {
-        setStockMovements(prev => [{
+        const mvNew = pushStockMovement({
           id: uid(), productId: newId, productName: form.name,
           stock: totalStockVal, prevStock: 0, delta: totalStockVal,
           at: now, dateKey: now.split("T")[0], source: "new",
-        }, ...prev]);
+        });
+        setStockMovements(prev => [mvNew, ...prev]);
         // অটো ক্রয় এন্ট্রি লগ — প্রতিটি ব্যাচের জন্য আলাদা এন্ট্রি, batches[]-এর সাথে batchNo সিংক রাখা হলো
         setPurchaseOrders(prev => [...initialPOs, ...prev]);
       }
@@ -19155,7 +19200,8 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
         at: now, dateKey: now.split("T")[0],
         unit: p.unit || "",
       }, ...po]);
-      setStockMovements(su => [{ id: uid(), productId, productName: p.name, stock: newStock, prevStock: p.stock || 0, delta: amount, at: now, dateKey: now.split("T")[0], source: "quick" }, ...su]);
+      const mvQuick = pushStockMovement({ id: uid(), productId, productName: p.name, stock: newStock, prevStock: p.stock || 0, delta: amount, at: now, dateKey: now.split("T")[0], source: "quick" });
+      setStockMovements(su => [mvQuick, ...su]);
       return { ...p, stock: newStock, lastUpdated: now, batches: [...(p.batches || []), newBatch] };
     }));
     showToast(`স্টক +${amount} যোগ হয়েছে`);
@@ -19220,12 +19266,13 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               }
             : p
           ));
-          setStockMovements(prev => [{
+          const mvBulk = pushStockMovement({
             id: "sm_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7), productId,
             productName: prod.name, stock: newStock,
             prevStock: oldStock, delta: qty,
             at: now, dateKey: now.split("T")[0], source: "purchase"
-          }, ...prev]);
+          });
+          setStockMovements(prev => [mvBulk, ...prev]);
           setPurchaseOrders(prev => [entry, ...prev]);
           return { prod, qty };
         };
@@ -19755,11 +19802,12 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                       productType: "product", expiryDate: peForm.expiryDate || "", barcode: "", lastUpdated: now,
                       batches: [firstBatch],
                     }]);
-                    setStockMovements(prev => [{
+                    const mvNewProd = pushStockMovement({
                       id: uid(), productId: newId, productName: name,
                       stock: qty, prevStock: 0, delta: qty,
                       at: now, dateKey: todayK, source: "purchase",
-                    }, ...prev]);
+                    });
+                    setStockMovements(prev => [mvNewProd, ...prev]);
                     setPurchaseOrders(prev => [{
                       id: uid(), _type: "pe",
                       productId: newId, productName: name, unit: unitFinal,
@@ -20932,6 +20980,7 @@ function ReturnModule({ T, S, invoices, products, customers, returns = [], setRe
           date: todayKey, dateKey: todayKey, addedBy: currentUser?.name || "মালিক",
           createdAt: new Date().toISOString(),
         };
+        pushStockMovement(mvEntry);
         setStockMovements(prev => [mvEntry, ...prev]);
       });
     }
