@@ -22551,17 +22551,39 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
             🔧 ডিবাগ: বাটন কাজ করছে কিনা টেস্ট করুন
           </button>
           <button onClick={async () => {
-              const pending = await Notif.getPending();
-              const found = pending.filter(n => n.id >= NOTIF_ID_BASE && n.id < NOTIF_ID_BASE + NOTIF_MAX_TIMES);
-              if (found.length > 0) {
-                const times = found.map(item => {
-                  const sch = item.schedule || {};
-                  return sch.on ? `${String(sch.on.hour).padStart(2,"0")}:${String(sch.on.minute).padStart(2,"0")}` : JSON.stringify(sch);
-                }).join(", ");
-                showToast(`✅ ${found.length}টি শিডিউল আছে — সময়: ${times}`, "#22c55e");
-              } else {
-                showToast(`⚠️ কোনো শিডিউল পাওয়া যায়নি (পাওয়া গেছে: ${pending.length}টি)`, "#ef4444");
+              // 🔴 ডিবাগ ফিক্স — আগে এখানে try/catch/timeout ছিল না, তাই hang
+              // হলে বাটন চাপ দিয়ে কিছুই দেখা যেত না (সম্পূর্ণ silent)। এখন
+              // diagnose() (দ্রুত, native call ছাড়াই বেশিরভাগ তথ্য) আগে দেখাবে,
+              // তারপর getPending()-ও timeout-guard সহ চেষ্টা করবে।
+              let msg = "";
+              try {
+                const diag = await withTimeout(Notif.diagnose(), 4000, "Diagnose");
+                msg += `রেজিস্টার্ড প্লাগইন: ${diag.hasRegisteredPlugin ? "হ্যাঁ" : "না"}\n`;
+                msg += `Capacitor native: ${diag.isNative ? "হ্যাঁ" : "না"}\n`;
+                if (diag.capacitorError) msg += `checkPermissions error: ${diag.capacitorError}\n`;
+                if (diag.capacitorCheckResult) msg += `checkPermissions ফলাফল: ${JSON.stringify(diag.capacitorCheckResult)}\n`;
+                msg += `Browser permission: ${diag.browserPermission}\n`;
+                msg += `Exact Alarm: ${diag.exactAlarmGranted === true ? "দেওয়া আছে" : diag.exactAlarmGranted === false ? "বন্ধ" : "n/a"}\n`;
+              } catch(e) {
+                msg += `diagnose() নিজেই আটকে গেছে/error: ${e?.message || e}\n`;
               }
+              try {
+                const pending = await withTimeout(Notif.getPending(), 4000, "getPending");
+                const found = pending.filter(n => n.id >= NOTIF_ID_BASE && n.id < NOTIF_ID_BASE + NOTIF_MAX_TIMES);
+                if (found.length > 0) {
+                  const times = found.map(item => {
+                    const sch = item.schedule || {};
+                    return sch.on ? `${String(sch.on.hour).padStart(2,"0")}:${String(sch.on.minute).padStart(2,"0")}` : JSON.stringify(sch);
+                  }).join(", ");
+                  msg += `✅ ${found.length}টি শিডিউল আছে — সময়: ${times}`;
+                } else {
+                  msg += `⚠️ কোনো শিডিউল পাওয়া যায়নি (পাওয়া গেছে: ${pending.length}টি)`;
+                }
+              } catch(e) {
+                msg += `getPending() error: ${e?.message || e}`;
+              }
+              try { showToast(msg.split("\n")[msg.split("\n").length - 1], "#7c3aed"); } catch {}
+              try { window.alert(msg); } catch {}
             }}
             style={{ width:"100%", marginTop:8, background:"transparent", color:"#c4b5fd", border:"1px solid #7c3aed66", borderRadius:12, padding:"8px 0", fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
             শিডিউল স্ট্যাটাস চেক করুন
