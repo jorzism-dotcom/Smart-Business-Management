@@ -50,6 +50,14 @@ const useAppStore = create(subscribeWithSelector((set) => ({
   // ── UI State ──────────────────────────────────────────────────────────────
   tab:               "dashboard",
   loaded:            false,
+  // 🔴 ফিক্স (Auto Sync/Auto Backup toggle নিজে নিজে অফ): `loaded` wave-1 এ
+  // তাড়াতাড়ি true হয়ে যায়, কিন্তু autoBackupEnabled/autoMasterSyncEnabled
+  // real value আসে wave-2 তে (দেরিতে, setTimeout 0)। এই মাঝের সময়ে persistence
+  // effect যদি `loaded` দেখে save করে ফেলে, তাহলে store-এর তখনকার default
+  // (false) value দিয়ে disk-এর real saved (true) value ওভাররাইট হয়ে যেতে
+  // পারত (wave-2 read এর সাথে race করে)। তাই এই দুইটার persistence effect
+  // এখন থেকে `settingsLoaded` (wave-2 শেষ হলে true) দিয়ে গার্ড হবে।
+  settingsLoaded:    false,
   authChecked:       false,
   toast:             null,
   modal:             null,
@@ -2419,6 +2427,7 @@ const Notif = {
       browserPermission: ("Notification" in window) ? Notification.permission : "n/a",
       capacitorCheckResult: null,
       capacitorError: null,
+      exactAlarmGranted: null, // 🔴 নতুন — Android 12+ এ repeating নোটিফিকেশনের জন্য দরকার
     };
     if (info.isNative) {
       try {
@@ -2428,8 +2437,42 @@ const Notif = {
       } catch(e) {
         info.capacitorError = e?.message || String(e);
       }
+      info.exactAlarmGranted = await Notif.checkExactAlarmPermission();
     }
     return info;
+  },
+
+  // 🔴 নতুন — Android 12+ (API 31+) এ repeatDailyAt/exact-time নোটিফিকেশন
+  // পাঠাতে হলে সাধারণ notification permission ছাড়াও আলাদা "Exact Alarm"
+  // permission লাগে। এটা না থাকলে OS নিজে থেকেই শিডিউলকে inexact করে দেয় —
+  // ফলে UI-তে সব ঠিক দেখালেও নোটিফিকেশন দেরিতে আসে বা একদমই আসে না।
+  // @capacitor/local-notifications v5+ এ checkExactNotificationSetting()/
+  // changeExactNotificationSetting() মেথড আছে — পুরনো ভার্সনে না থাকলে
+  // null রিটার্ন করে (মানে জানা যাচ্ছে না, ধরে নিচ্ছি সমস্যা নেই)।
+  async checkExactAlarmPermission() {
+    try {
+      const LocalNotifications = await Notif._getLocalNotif();
+      if (typeof LocalNotifications.checkExactNotificationSetting !== "function") return null;
+      const r = await LocalNotifications.checkExactNotificationSetting();
+      // ডকুমেন্টেশন অনুযায়ী রিটার্ন { exact_alarm: "granted" | "denied" }
+      return r?.exact_alarm === "granted";
+    } catch(e) {
+      console.warn("Notif checkExactAlarmPermission error:", e?.message || e);
+      return null;
+    }
+  },
+
+  // ব্যবহারকারীকে সরাসরি Android-এর "Exact Alarm" সেটিংস স্ক্রিনে পাঠানো
+  async openExactAlarmSettings() {
+    try {
+      const LocalNotifications = await Notif._getLocalNotif();
+      if (typeof LocalNotifications.changeExactNotificationSetting !== "function") return false;
+      await LocalNotifications.changeExactNotificationSetting();
+      return true;
+    } catch(e) {
+      console.warn("Notif openExactAlarmSettings error:", e?.message || e);
+      return false;
+    }
   },
 
   // বর্তমান permission status চেক করা (request না করে)
@@ -9006,6 +9049,7 @@ function SmartBusinessMgmt() {
   const masterResetHash  = useAppStore(s => s.masterResetHash);
   const users            = useAppStore(s => s.users);
   const loaded           = useAppStore(s => s.loaded);
+  const settingsLoaded   = useAppStore(s => s.settingsLoaded); // 🔴 wave-2 (deferred keys) লোড শেষ হলে true
   const authChecked      = useAppStore(s => s.authChecked);
   // Group C: UI state
   const toast            = useAppStore(s => s.toast);
@@ -9418,6 +9462,7 @@ function SmartBusinessMgmt() {
           auditLogs:             boot2[SK.auditLogs]            || [],
           quotations:            boot2[SK.quotations]           || [],
           supplierPayments:      boot2[SK.supplierPayments]     || [],
+          settingsLoaded:        true, // 🔴 এখন থেকেই autoBackupEnabled/autoMasterSyncEnabled-এর real value store-এ বসলো — persistence effect চালু করা নিরাপদ
         });
       }, 0);
 
@@ -9713,8 +9758,13 @@ function SmartBusinessMgmt() {
   useEffect(() => { if (loaded) save(SK.smsGateway, smsGateway); }, [smsGateway, loaded]);
   useEffect(() => { if (loaded) save(SK.anthropicKey, anthropicKey); }, [anthropicKey, loaded]);
   useEffect(() => { if (loaded) save(SK.smsTemplates, smsTemplates); }, [smsTemplates, loaded]);
-  useEffect(() => { if (loaded) save(SK.autoBackupEnabled, autoBackupEnabled); }, [autoBackupEnabled, loaded]);
-  useEffect(() => { if (loaded) save(SK.autoMasterSyncEnabled, autoMasterSyncEnabled); }, [autoMasterSyncEnabled, loaded]);
+  // 🔴 ফিক্স: এই দুইটা `loaded`-এর বদলে `settingsLoaded` দিয়ে গার্ড করা হলো —
+  // কারণ এদের real value wave-2 তে (দেরিতে) লোড হয়, `loaded` তার আগেই true
+  // হয়ে যায়। আগে `loaded` দেখে save করলে boot-এর প্রথম মুহূর্তে এখনো-default
+  // (false) value দিয়ে disk-এর real saved (true) value ওভাররাইট হয়ে যেতে
+  // পারত — এটাই ছিল "Auto Sync/Auto Backup টগল নিজে নিজে অফ হয়ে যাওয়া"র কারণ।
+  useEffect(() => { if (settingsLoaded) save(SK.autoBackupEnabled, autoBackupEnabled); }, [autoBackupEnabled, settingsLoaded]);
+  useEffect(() => { if (settingsLoaded) save(SK.autoMasterSyncEnabled, autoMasterSyncEnabled); }, [autoMasterSyncEnabled, settingsLoaded]);
   useEffect(() => { if (loaded && lastMasterSync) save(SK.lastMasterSync, lastMasterSync); }, [lastMasterSync, loaded]);
   useEffect(() => { if (loaded) save(SK.firebaseConfig,  firebaseConfig);  }, [firebaseConfig, loaded]);   // 🔥
   useEffect(() => { if (loaded) save(SK.firebaseEnabled, firebaseEnabled); }, [firebaseEnabled, loaded]);
@@ -22137,13 +22187,22 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
   });
   const [permStatus, setPermStatus] = useState(null); // null=checking | true | false
   const [diagInfo, setDiagInfo] = useState(null);
+  const [exactAlarmOk, setExactAlarmOk] = useState(null); // 🔴 নতুন — null=জানা যায়নি/প্রযোজ্য নয়, true/false
   React.useEffect(() => {
     Notif.checkPermission().then(setPermStatus);
+    if (window.Capacitor?.isNativePlatform()) {
+      Notif.checkExactAlarmPermission().then(setExactAlarmOk);
+    }
   }, []);
   const runDiagnostic = async () => {
     const info = await Notif.diagnose();
     setDiagInfo(info);
     setPermStatus(info.isNative ? (info.capacitorCheckResult?.display === "granted") : (info.browserPermission === "granted"));
+    setExactAlarmOk(info.exactAlarmGranted);
+  };
+  const fixExactAlarm = async () => {
+    const opened = await Notif.openExactAlarmSettings();
+    if (!opened) showToast("⚠️ এই ফোনে সরাসরি সেটিংস খোলা যায়নি — ফোনের Settings → Apps → " + shopName + " → Alarms & reminders থেকে Allow করুন", "#ef4444");
   };
 
   // 🕐 একাধিক সময় — সারাদিনে যতবার ইচ্ছা নোটিফিকেশন পাওয়ার জন্য
@@ -22360,6 +22419,15 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
                 return; // permission না পেলে toggle চালু করব না
               }
               await rescheduleAll(notifTimes);
+              // 🔴 নতুন — টগল অন করার সময় exact alarm permission-ও চেক করে নেওয়া, না হলে
+              // "সব ঠিক আছে" দেখিয়েও notification আসবে না — ব্যবহারকারী বুঝতেই পারবে না কেন
+              if (window.Capacitor?.isNativePlatform()) {
+                const exactOk = await Notif.checkExactAlarmPermission();
+                setExactAlarmOk(exactOk);
+                if (exactOk === false) {
+                  showToast("⚠️ নোটিফিকেশন চালু হয়েছে, কিন্তু Exact Alarm অনুমতিও লাগবে — নিচের বাটন থেকে দিন", "#f59e0b");
+                }
+              }
             } else {
               await cancelAllScheduled();
             }
@@ -22379,12 +22447,22 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
           </button>
         </div>
       )}
+      {notifEnabled && permStatus !== false && exactAlarmOk === false && (
+        <div style={{ marginTop:10, background:"#f59e0b1a", border:"1px solid #f59e0b44", borderRadius:10, padding:"8px 12px", color:"#fcd34d", fontSize:11, fontWeight:700 }}>
+          ⚠️ "Exact Alarm" পারমিশন বন্ধ আছে — এটা ছাড়া নির্দিষ্ট সময়ে নোটিফিকেশন আসবে না বা অনেক দেরিতে আসবে (Notification permission আলাদা, এটা আরেকটা)।
+          <button onClick={fixExactAlarm}
+            style={{ display:"block", marginTop:8, background:"#f59e0b33", border:"1px solid #f59e0b66", borderRadius:8, padding:"6px 10px", color:"#fde68a", fontSize:11, fontWeight:800, cursor:"pointer", fontFamily:"inherit" }}>
+            ⏰ Exact Alarm অনুমতি দিন
+          </button>
+        </div>
+      )}
       {diagInfo && (
         <div style={{ marginTop:8, background:"#0f0e25", border:"1px solid #8b5cf644", borderRadius:10, padding:"10px 12px", color:"#cbd5e1", fontSize:10.5, fontFamily:"monospace", lineHeight:1.6, wordBreak:"break-word" }}>
           <div>Native App: <b style={{color: diagInfo.isNative ? "#4ade80":"#f87171"}}>{diagInfo.isNative ? "হ্যাঁ" : "না (Browser/PWA)"}</b></div>
           <div>LocalNotifications Plugin: <b style={{color: diagInfo.hasRegisteredPlugin ? "#4ade80":"#f87171"}}>{diagInfo.hasRegisteredPlugin ? "পাওয়া গেছে" : "পাওয়া যায়নি"}</b></div>
           {diagInfo.capacitorCheckResult && <div>Capacitor permission status: <b>{JSON.stringify(diagInfo.capacitorCheckResult)}</b></div>}
           {diagInfo.capacitorError && <div style={{color:"#f87171"}}>Capacitor error: {diagInfo.capacitorError}</div>}
+          <div>Exact Alarm permission: <b style={{color: diagInfo.exactAlarmGranted === true ? "#4ade80" : diagInfo.exactAlarmGranted === false ? "#f87171" : "#94a3b8"}}>{diagInfo.exactAlarmGranted === true ? "দেওয়া আছে" : diagInfo.exactAlarmGranted === false ? "বন্ধ" : "প্রযোজ্য নয়/জানা যায়নি"}</b></div>
           <div>Browser Notification API: <b style={{color: diagInfo.hasBrowserNotification ? "#4ade80":"#f87171"}}>{diagInfo.hasBrowserNotification ? "আছে" : "নেই"}</b></div>
           <div>Browser permission: <b>{diagInfo.browserPermission}</b></div>
         </div>
