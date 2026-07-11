@@ -2555,6 +2555,12 @@ const Notif = {
           notif.schedule = { on: { hour: repeatDailyAt.hour, minute: repeatDailyAt.minute }, allowWhileIdle: true };
         } else if (scheduleAt) {
           notif.schedule = { at: new Date(scheduleAt), allowWhileIdle: true };
+        } else {
+          // 🔴 ফিক্স — schedule ফিল্ড পুরোপুরি বাদ দিলে (immediate ধরে নেওয়ার আশায়)
+          // ডিভাইসে notification silently কখনোই দেখানো হচ্ছিল না — ডিবাগ ৫ টেস্টে
+          // প্রমাণিত হয়েছে explicit schedule.at থাকলে ঠিকমতো দেখায়। তাই এখন immediate
+          // notification-এর জন্যও ১ সেকেন্ড পরের একটা explicit 'at' সময় দেওয়া হচ্ছে।
+          notif.schedule = { at: new Date(Date.now() + 1000), allowWhileIdle: true };
         }
         await LocalNotifications.schedule({ notifications: [notif] });
         return;
