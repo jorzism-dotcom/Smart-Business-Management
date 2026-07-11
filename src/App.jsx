@@ -22311,16 +22311,13 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
 
   // 🔁 সব সময়ের জন্য নোটিফিকেশন (re)schedule করা — Settings থেকে সময় পরিবর্তন/যুক্ত/মুছলে সাথে সাথে আপডেট হয়ে যাবে
   const rescheduleAll = async (times) => {
-    try {
-      const granted = await Notif.requestPermission();
-      setPermStatus(granted);
-      if (!granted) return;
+    const doScheduleAll = async () => {
       await cancelAllScheduled();
       const sum = buildSummary();
       const { body, largeBody } = buildNotifContent(sum);
       for (let i = 0; i < Math.min(times.length, NOTIF_MAX_TIMES); i++) {
         const t = times[i];
-        await Notif.send({
+        await withTimeout(Notif.send({
           id: NOTIF_ID_BASE + i,
           title: `✨ ${shopName} — আজকের সারসংক্ষেপ`,
           iconColor: "#8b5cf6",
@@ -22328,8 +22325,26 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
           largeBody,
           summaryText: `${shopName} • দৈনিক রিপোর্ট ✨`,
           repeatDailyAt: { hour: t.hour, minute: t.minute },
-        });
+        }), 6000, "Notification schedule");
       }
+    };
+    // 🔴 ফিক্স — Notif.requestPermission() (checkPermissions/requestPermissions)
+    // এই ডিভাইসে কোনো timeout ছাড়া plain await করলে চিরকাল hang করে থাকে (কখনো
+    // resolve হয় না) — যেটার মানে rescheduleAll() (অ্যাপ খোলার সময় স্বয়ংক্রিয়ভাবে
+    // কল হওয়াসহ) নিঃশব্দে আটকে যেত, তাই দৈনিক নোটিফিকেশনই কখনো শিডিউল হতো না।
+    // ডিবাগ ৫ প্রমাণ করেছে permission check বাদ দিয়ে সরাসরি schedule() কাজ করে।
+    try {
+      await doScheduleAll();
+      setPermStatus(true);
+      return;
+    } catch(e) {
+      // সরাসরি schedule ব্যর্থ — তখনই permission request ট্রাই করব (timeout-guard সহ)
+    }
+    try {
+      const granted = await withTimeout(Notif.requestPermission(), 15000, "Permission check");
+      setPermStatus(granted);
+      if (!granted) return;
+      await doScheduleAll();
     } catch(e) { /* silent */ }
   };
 
@@ -22393,29 +22408,38 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
   ]);
 
   const sendTestNotif = async () => {
+    const sum = buildSummary();
+    const { body, largeBody } = buildNotifContent(sum, "\n\n(টেস্ট)");
+    const doSend = () => withTimeout(Notif.send({
+      id: 9999,
+      title: `✨ ${shopName} — আজকের সারসংক্ষেপ`,
+      iconColor: "#8b5cf6",
+      body,
+      largeBody,
+      summaryText: `${shopName} • দৈনিক রিপোর্ট ✨`,
+    }), 6000, "Notification send");
+    // 🔴 ফিক্স ৩ — এই ডিভাইসে LocalNotifications.checkPermissions()/
+    // requestPermissions() নিজেই hang করে (২০ সেকেন্ডেও সাড়া দেয়নি, কোনো
+    // পপআপও আসেনি) — অথচ ডিবাগ ৫ প্রমাণ করেছে permission checking বাদ দিয়ে
+    // সরাসরি schedule() কল করলে ঠিকমতো কাজ করে ও নোটিফিকেশন সত্যিই দেখায়।
+    // তাই permission-check ধাপ পুরোপুরি এড়িয়ে সরাসরি schedule() ট্রাই করা
+    // হচ্ছে (ডিবাগ ৫-এর মতোই) — ব্যর্থ হলেই কেবল permission request ট্রাই হবে।
     try {
-      // 🔴 ফিক্স ২ — আগের ফিক্সে এখানে Notif.checkPermission() কল করা হতো
-      // কোনো timeout ছাড়াই। সেটা hang করলে পুরো ফাংশনটাই কোনো toast/error
-      // ছাড়াই চিরকাল আটকে থাকত (silent hang)। তাই সেই pre-check বাদ দিয়ে
-      // সরাসরি সতর্কবার্তা দেখানো হচ্ছে (permission আগে থেকে থাকলে এই বাড়তি
-      // alert-টা নিরীহ, শুধু একটা বাড়তি ট্যাপ লাগবে)।
+      await doSend();
+      showToast("🔔 টেস্ট নোটিফিকেশন পাঠানো হয়েছে");
+      return;
+    } catch (sendErr) {
+      // সরাসরি send ব্যর্থ — হয়তো সত্যিই permission নেই, তখনই request করব
+    }
+    try {
       window.alert("⏳ এখন OK চাপার পর permission check হবে — যদি একটা Allow/Deny সিস্টেম পপআপ আসে, তাতে অবশ্যই 'Allow' চাপুন।");
-      const granted = await withTimeout(Notif.requestPermission(), 20000, "Permission check");
+      const granted = await withTimeout(Notif.requestPermission(), 15000, "Permission check");
       setPermStatus(granted);
       if (!granted) {
         showToast("⚠️ নোটিফিকেশন Permission নেই — Settings থেকে Allow করুন", "#ef4444");
         return;
       }
-      const sum = buildSummary();
-      const { body, largeBody } = buildNotifContent(sum, "\n\n(টেস্ট)");
-      await withTimeout(Notif.send({
-        id: 9999,
-        title: `✨ ${shopName} — আজকের সারসংক্ষেপ`,
-        iconColor: "#8b5cf6",
-        body,
-        largeBody,
-        summaryText: `${shopName} • দৈনিক রিপোর্ট ✨`,
-      }), 6000, "Notification send");
+      await doSend();
       showToast("🔔 টেস্ট নোটিফিকেশন পাঠানো হয়েছে");
     } catch(e) {
       // 🔴 ডিবাগ ফলব্যাক — showToast নিজেই ব্যর্থ/অদৃশ্য হলেও যেন কারণটা চোখে পড়ে
@@ -22459,12 +22483,11 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
           onClick={async () => {
             const v = !notifEnabled;
             if (v) {
-              const granted = await Notif.requestPermission();
-              setPermStatus(granted);
-              if (!granted) {
-                showToast("⚠️ নোটিফিকেশন Permission দেওয়া হয়নি — Settings থেকে Allow করুন", "#ef4444");
-                return; // permission না পেলে toggle চালু করব না
-              }
+              // 🔴 ফিক্স — আগে এখানে Notif.requestPermission() সরাসরি (timeout ছাড়া)
+              // await করা হতো, যেটা এই ডিভাইসে চিরকাল hang করে টগলটাই আটকে দিত।
+              // rescheduleAll() এখন নিজেই আগে সরাসরি schedule ট্রাই করে (ডিবাগ ৫-এর
+              // মতো), ব্যর্থ হলেই কেবল timeout-guarded permission request করে —
+              // তাই আলাদা pre-check না করে সরাসরি সেটাই কল করা হচ্ছে।
               await rescheduleAll(notifTimes);
               // 🔴 নতুন — টগল অন করার সময় exact alarm permission-ও চেক করে নেওয়া, না হলে
               // "সব ঠিক আছে" দেখিয়েও notification আসবে না — ব্যবহারকারী বুঝতেই পারবে না কেন
