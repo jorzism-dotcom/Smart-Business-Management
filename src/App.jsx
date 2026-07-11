@@ -4908,6 +4908,14 @@ const pushStockMovement = (entry) => {
   return entry;
 };
 
+// ── cashLogs-ও এখন windowed real-time sync (৩৫ দিন), একই কারণে useFSSCollection
+// আর local→remote push করে না। একমাত্র creation site (Dashboard-এর addCashLog)
+// থেকে এই হেল্পার দিয়ে সরাসরি Firestore-এ push করা হয়।
+const pushCashLog = (entry) => {
+  if (FSS.isReady()) FSS.setRecord("cashLogs", entry.id, withTs(entry));
+  return entry;
+};
+
 function useFSSCollection(name, value, setValue, ready, opts = {}) {
   const { instant = false, filterIncoming = null, onSync = null } = opts;
   const lastSynced  = useRef(null);
@@ -9572,7 +9580,29 @@ function SmartBusinessMgmt() {
 
     return () => unsub();
   }, [fssReady]); // eslint-disable-line react-hooks/exhaustive-deps
-  useFSSCollection("cashLogs", cashLogs, setCashLogs, fssReady, { onSync: setSyncToast });
+  // ── cashLogs Windowed Sync — শুধু শেষ ৩৫ দিনের ক্যাশ লগ real-time (Dashboard-এর
+  // "আজকের ওপেনিং/উইথড্রয়াল" হিসাবের জন্য এতটুকুই যথেষ্ট)। আগে: পুরো collection
+  // pull, বছরের পর বছর ওপেনিং/উইথড্রয়াল এন্ট্রি জমে বড় দোকানে বাড়তেই থাকত।
+  // নতুন এন্ট্রি তৈরির সময় addCashLog()-এর ভেতরেই সরাসরি Firestore-এ push হয়
+  // (pushCashLog হেল্পার দিয়ে)। History রিপোর্টের week/month/year period-এর জন্য
+  // Dashboard-এ আলাদা on-demand Firestore রেঞ্জ query আছে (cashHistFull state)।
+  // Firestore index লাগবে: cashLogs → dateKey (ASC)।
+  useEffect(() => {
+    if (!fssReady || !FSS._db) return;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - 35);
+    const cutoff = cutoffDate.toISOString().split("T")[0];
+
+    const colRef = collection(FSS._db, "cashLogs");
+    const q = query(colRef, where("dateKey", ">=", cutoff), orderBy("dateKey", "desc"));
+
+    const unsub = onSnapshot(q, (snap) => {
+      const recent = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setCashLogs(recent);
+    }, () => { /* offline — Firestore cache থেকে কাজ চলবে */ });
+
+    return () => unsub();
+  }, [fssReady]); // eslint-disable-line react-hooks/exhaustive-deps
   useFSSCollection("expenses", expenses, setExpenses, fssReady, { onSync: setSyncToast });
   useFSSCollection("returns",  returns,  setReturns,  fssReady, { onSync: setSyncToast });
   useFSSCollection("auditLogs", auditLogs, setAuditLogs, fssReady, { onSync: setSyncToast });
@@ -9907,10 +9937,14 @@ function SmartBusinessMgmt() {
   // cached full-pull প্যাটার্ন, যাতে auto-backup-এ পুরনো movement হারিয়ে না যায়।
   const FULL_PULL_KEY_SM = "hg_last_full_stockmovements_pull";
   const FULL_PULL_KEY_TXN = "hg_last_full_txns_pull";
+  // 🔴 cashLogs-ও এখন windowed (৩৫ দিন) — একই ১২-ঘণ্টার cached full-pull প্যাটার্ন,
+  // যাতে auto-backup-এ পুরনো ওপেনিং/উইথড্রয়াল এন্ট্রি হারিয়ে না যায়।
+  const FULL_PULL_KEY_CASH = "hg_last_full_cashlogs_pull";
   const buildBackupData = useCallback(async () => {
     let fullInvoices = invoices;
     let fullStockMovements = stockMovements;
     let fullTxns = txns;
+    let fullCashLogs = cashLogs;
     if (firebaseEnabled && FSS.isReady()) {
       const lastPull = Number(localStorage.getItem(FULL_PULL_KEY) || 0);
       if (Date.now() - lastPull >= FULL_PULL_INTERVAL) {
@@ -9933,15 +9967,23 @@ function SmartBusinessMgmt() {
           localStorage.setItem(FULL_PULL_KEY_TXN, String(Date.now()));
         } catch { fullTxns = txns; }
       }
+      const lastPullCash = Number(localStorage.getItem(FULL_PULL_KEY_CASH) || 0);
+      if (Date.now() - lastPullCash >= FULL_PULL_INTERVAL) {
+        try {
+          fullCashLogs = await FSS.getCollectionOnce("cashLogs");
+          localStorage.setItem(FULL_PULL_KEY_CASH, String(Date.now()));
+        } catch { fullCashLogs = cashLogs; }
+      }
     }
     const invoicesForBackup = (fullInvoices && fullInvoices.length >= invoices.length) ? fullInvoices : invoices;
     const stockMovementsForBackup = (fullStockMovements && fullStockMovements.length >= stockMovements.length) ? fullStockMovements : stockMovements;
     const txnsForBackup = (fullTxns && fullTxns.length >= txns.length) ? fullTxns : txns;
+    const cashLogsForBackup = (fullCashLogs && fullCashLogs.length >= cashLogs.length) ? fullCashLogs : cashLogs;
     // ── কেন্দ্রীয় রেজিস্ট্রি (BACKUP_FIELDS) থেকে লুপ করে payload/checksum/counts
     // বানানো হয় — নতুন কোনো collection ভবিষ্যতে যোগ হলে শুধু ওই একটা array-তে
     // নাম যোগ করলেই এই তিনটাই (payload, checksum, counts) নিজে থেকে কভার করবে,
     // এখানে আলাদা করে টাচ করা লাগবে না।
-    const stateMap = { customers, products, invoices: invoicesForBackup, txns: txnsForBackup, smsLog, paymentInvoices, purchaseOrders, stockMovements: stockMovementsForBackup, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers };
+    const stateMap = { customers, products, invoices: invoicesForBackup, txns: txnsForBackup, smsLog, paymentInvoices, purchaseOrders, stockMovements: stockMovementsForBackup, users, cashLogs: cashLogsForBackup, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers };
     const payload = {};
     const counts = {};
     BACKUP_FIELDS.forEach(f => {
@@ -15457,6 +15499,59 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
   // ক্যাশ হিস্ট্রি Print/WhatsApp বাটনের busy-state — আগে cashModal==="history" ব্লকের ভিতরে conditionally call হতো যা Rules of Hooks ভঙ্গ করে React error #310 (Rendered more hooks than during the previous render) সৃষ্টি করছিল
   const [cashHistBusy, setCashHistBusy] = React.useState(false);
 
+  // ── 💰 cashLogs windowing — লোকাল cashLogs state এখন Firestore-এ শুধু ৩৫ দিনের
+  // windowed real-time sync (দেখুন উপরের useEffect)। History রিপোর্টে
+  // week/month/year/কাস্টম-রেঞ্জ period সিলেক্ট করলে windowed লোকাল ডেটা যথেষ্ট
+  // না-ও হতে পারে, তাই কাস্টমার ডিটেইল পেজের customerTxnsFull প্যাটার্নের মতোই
+  // সরাসরি Firestore-এ dateKey রেঞ্জ query চালিয়ে সেই নির্দিষ্ট রেঞ্জের সম্পূর্ণ
+  // ডেটা আনা হয়। Rules of Hooks অনুযায়ী top-level এ unconditional call।
+  const [cashHistFull, setCashHistFull] = React.useState({ key: null, rows: null });
+  const cashHistRangeKeys = (() => {
+    const isPeriodModeTop = cashHistoryDate.startsWith("period:");
+    const activePeriodTop = isPeriodModeTop ? cashHistoryDate.replace("period:", "") : "custom";
+    const customDateValTop = isPeriodModeTop ? todayKeyStr : cashHistoryDate;
+    const toKeyTop = (d) => { const bd = new Date(d.getTime() - 2 * 60 * 60 * 1000 + 6 * 60 * 60 * 1000); return bd.toISOString().split("T")[0]; };
+    const nowTop = new Date();
+    let hsKey, heKey;
+    if (activePeriodTop === "today" || (activePeriodTop === "custom" && customDateValTop === todayKeyStr)) {
+      hsKey = heKey = todayKeyStr;
+    } else if (activePeriodTop === "yesterday") {
+      const y = new Date(nowTop); y.setDate(y.getDate() - 1); hsKey = heKey = toKeyTop(y);
+    } else if (activePeriodTop === "week") {
+      const dow = nowTop.getDay(); const mon = new Date(nowTop); mon.setDate(nowTop.getDate() - dow);
+      hsKey = toKeyTop(mon); heKey = todayKeyStr;
+    } else if (activePeriodTop === "month") {
+      const m = new Date(nowTop.getFullYear(), nowTop.getMonth(), 1); hsKey = toKeyTop(m); heKey = todayKeyStr;
+    } else if (activePeriodTop === "year") {
+      const y = new Date(nowTop.getFullYear(), 0, 1); hsKey = toKeyTop(y); heKey = todayKeyStr;
+    } else {
+      hsKey = heKey = customDateValTop;
+      if (activePeriodTop === "custom" && cashHistRangeMode) heKey = cashHistDateTo < customDateValTop ? customDateValTop : cashHistDateTo;
+    }
+    return { hsKey, heKey };
+  })();
+  const cashHistKeyStr = `${cashHistRangeKeys.hsKey}_${cashHistRangeKeys.heKey}`;
+  React.useEffect(() => {
+    if (cashModal !== "history" || !fssReady || !FSS._db) return;
+    let cancelled = false;
+    const { hsKey, heKey } = cashHistRangeKeys;
+    setCashHistFull({ key: cashHistKeyStr, rows: null }); // লোডিং শুরু
+    (async () => {
+      try {
+        const colRef = collection(FSS._db, "cashLogs");
+        const q = query(colRef, where("dateKey", ">=", hsKey), where("dateKey", "<=", heKey), orderBy("dateKey", "desc"));
+        const snap = await getDocs(q);
+        if (cancelled) return;
+        const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        setCashHistFull({ key: cashHistKeyStr, rows });
+      } catch (err) {
+        if (!cancelled) setCashHistFull({ key: cashHistKeyStr, rows: null }); // ব্যর্থ — fallback windowed লোকালে
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [cashModal, cashHistKeyStr, fssReady]); // eslint-disable-line react-hooks/exhaustive-deps
+
+
   const CASH_TYPE_META = {
     owner:    { label: "মালিক নিয়েছেন",     icon: "👤", color: "#ef4444" },
     supplier: { label: "সাপ্লায়ারকে দেওয়া",   icon: "🏭", color: "#f59e0b" },
@@ -15505,6 +15600,9 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
       by: currentUser?.name || "মালিক",
       ...(type === "withdrawal" ? { cashType, party: (cashType === "supplier" || cashType === "other") ? cashParty : "" } : {}),
     };
+    // cashLogs এখন windowed real-time sync (useFSSCollection নয়) — তাই লোকাল
+    // state-এর পাশাপাশি সরাসরি Firestore-এ push করতে হয় (stockMovements-এর মতো)।
+    pushCashLog(entry);
     setCashLogs(prev => [entry, ...(prev || [])]);
     setCashAmount(""); setCashNote(""); setCashParty(""); setCashType("owner"); setCashModal(null);
   };
@@ -15710,7 +15808,15 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
     }
 
     const isRangeMode = histStartKey !== histEndKey;
-    const histEntries = cashLogsAll.filter(c => c.dateKey >= histStartKey && c.dateKey <= histEndKey);
+    // ৩৫ দিনের windowed লোকাল cashLogs-এর বাইরের রেঞ্জ চাইলে (সপ্তাহ/মাস/বছর/পুরনো
+    // কাস্টম তারিখ) উপরের on-demand Firestore ফেচ (cashHistFull) থেকে ডেটা আসে।
+    // এখনো লোড হয়নি/অফলাইনে ব্যর্থ হলে windowed লোকাল ডেটাতেই fallback করে, যাতে
+    // পেজ খালি না দেখায়।
+    const histRangeKeyLocal = `${histStartKey}_${histEndKey}`;
+    const histEntries = (cashHistFull.key === histRangeKeyLocal && cashHistFull.rows)
+      ? cashHistFull.rows
+      : cashLogsAll.filter(c => c.dateKey >= histStartKey && c.dateKey <= histEndKey);
+    const histLoading = cashHistFull.key === histRangeKeyLocal && cashHistFull.rows === null;
 
     // সারসংক্ষেপ হিসাব
     const histOpeningEntries = histEntries.filter(c => c.type === "opening");
@@ -15868,6 +15974,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
         {/* তারিখ লেবেল */}
         <div style={{ textAlign:"center", color:"#94a3b8", fontSize:12, fontWeight:700, marginBottom:14 }}>
           {isHistToday ? "📍 আজ — " : "📅 "}{histDateLabel}
+          {histLoading && <span style={{ color:"#a78bfa", marginLeft:8 }}>⏳ লোড হচ্ছে...</span>}
         </div>
 
         {/* ── Print & WhatsApp বাটন ── */}
@@ -22439,6 +22546,102 @@ function Settings_({ T, S, shopName,
   const [userForm,    setUserForm]    = useState({ name: "", username: "", password: "", pin: "" });
   const [showGateway, setShowGateway] = useState(false);
   const [gwForm,      setGwForm]      = useState(smsGateway || { provider: "ssl", username: "", apiKey: "", senderId: "", accountSid: "" });
+
+  // ── 📜 Invoice History — Phase 2 cursor pagination —────────────────────────
+  // ৩০ দিনের windowed local invoices state-এর বাইরে পুরনো ইনভয়েস দেখার UI path
+  // আগে ছিল না (কোডে শুধু "Phase 2" কমেন্ট আর ব্যবহার-না-হওয়া startAfter import
+  // ছিল)। এখন সরাসরি Firestore থেকে dateKey (desc) + createdAt (desc) অনুযায়ী
+  // পাতায়-পাতায় (৩০টা করে) cursor pagination দিয়ে আনা হয় — লোকাল array-নির্ভর না,
+  // তাই ১ বছর/যত পুরনোই হোক খুঁজে বের করা যায়। Firestore index লাগবে:
+  // invoices → dateKey (desc) + createdAt (desc), কম্পোজিট।
+  const [invHistOpen,    setInvHistOpen]    = useState(false);
+  const [invHistRows,    setInvHistRows]    = useState([]);
+  const [invHistLoading, setInvHistLoading] = useState(false);
+  const [invHistDone,    setInvHistDone]    = useState(false);
+  const [invHistError,   setInvHistError]   = useState(null);
+  const invHistCursorRef = useRef(null);
+  const INV_HIST_PAGE_SIZE = 30;
+  const loadInvHistPage = useCallback(async (reset = false) => {
+    if (!fssReady || !FSS._db) { setInvHistError("Firestore প্রস্তুত না — ইন্টারনেট/কনফিগ চেক করুন"); return; }
+    setInvHistLoading(true); setInvHistError(null);
+    try {
+      const colRef = collection(FSS._db, "invoices");
+      const cursor = reset ? null : invHistCursorRef.current;
+      const q = cursor
+        ? query(colRef, orderBy("dateKey", "desc"), orderBy("createdAt", "desc"), startAfter(cursor), limit(INV_HIST_PAGE_SIZE))
+        : query(colRef, orderBy("dateKey", "desc"), orderBy("createdAt", "desc"), limit(INV_HIST_PAGE_SIZE));
+      const snap = await getDocs(q);
+      const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      invHistCursorRef.current = snap.docs.length ? snap.docs[snap.docs.length - 1] : cursor;
+      setInvHistDone(snap.docs.length < INV_HIST_PAGE_SIZE);
+      setInvHistRows(prev => reset ? rows : [...prev, ...rows]);
+    } catch (err) {
+      setInvHistError(err?.code || err?.message || "লোড ব্যর্থ হয়েছে — Firestore index লাগতে পারে");
+    } finally {
+      setInvHistLoading(false);
+    }
+  }, [fssReady]);
+  const openInvHist = () => {
+    invHistCursorRef.current = null;
+    setInvHistRows([]); setInvHistDone(false); setInvHistError(null);
+    setInvHistOpen(true);
+    loadInvHistPage(true);
+  };
+
+  // ══ 📜 Invoice History — ফুলস্ক্রিন পেজ (Phase 2 cursor pagination) ══
+  if (invHistOpen) {
+    const custMap = new Map((customers || []).map(c => [c.id, c]));
+    return (
+      <div style={{ minHeight:"100vh", background: T.bg, padding:"16px 14px 32px" }}>
+        <button style={S.textBtn} onClick={() => setInvHistOpen(false)}>← সেটিংসে ফিরুন</button>
+        <div style={{ color:"#f1edff", fontWeight:900, fontSize:18, margin:"10px 0 4px" }}>📜 ইনভয়েস হিস্ট্রি (পুরনো)</div>
+        <div style={{ color:"#94a3b8", fontSize:11.5, marginBottom:14 }}>নতুন থেকে পুরনো ক্রমে, ৩০টা করে লোড হয় — সরাসরি Firestore থেকে, লোকাল ৩০-দিনের সীমার বাইরের যেকোনো ইনভয়েস এখানে খুঁজে পাওয়া যাবে।</div>
+
+        {invHistError && (
+          <div style={{ background:"#ef444422", border:"1px solid #ef444455", borderRadius:12, padding:"10px 12px", color:"#fca5a5", fontSize:11.5, marginBottom:12 }}>
+            ⚠️ {invHistError}
+          </div>
+        )}
+
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {invHistRows.map((inv, i) => {
+            const cust = custMap.get(inv.customerId);
+            const badge = inv.payType === "baki" ? { label:"বাকি", color:"#ef4444" } : inv.payType === "partial" ? { label:"আংশিক", color:"#f59e0b" } : { label:"নগদ", color:"#22c55e" };
+            return (
+              <div key={inv.id || i} style={{ background:"rgba(255,255,255,0.03)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:12, padding:"11px 13px", display:"flex", justifyContent:"space-between", alignItems:"center", gap:10 }}>
+                <div style={{ minWidth:0 }}>
+                  <div style={{ color:"#f1edff", fontWeight:800, fontSize:13, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{cust?.name || inv.customerName || "ওয়াক-ইন"}</div>
+                  <div style={{ color:"#94a3b8", fontSize:10.5, marginTop:2 }}>{inv.date || inv.dateKey || "—"}</div>
+                </div>
+                <div style={{ textAlign:"right", flexShrink:0 }}>
+                  <div style={{ color:"#f1edff", fontWeight:900, fontSize:13 }}>৳{fmt(inv.total || 0)}</div>
+                  <div style={{ color: badge.color, fontSize:9.5, fontWeight:800, marginTop:2 }}>{badge.label}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {invHistRows.length === 0 && !invHistLoading && !invHistError && (
+          <div style={{ textAlign:"center", color:"#64748b", fontSize:12, marginTop:30 }}>কোনো ইনভয়েস পাওয়া যায়নি</div>
+        )}
+
+        <div style={{ marginTop:16, textAlign:"center" }}>
+          {!invHistDone ? (
+            <button
+              onClick={() => loadInvHistPage(false)}
+              disabled={invHistLoading}
+              style={{ background:"rgba(167,139,250,0.12)", border:"1px solid rgba(167,139,250,0.35)", borderRadius:12, padding:"11px 20px", color:"#ddd6fe", fontWeight:800, fontSize:12.5, cursor: invHistLoading ? "not-allowed" : "pointer", fontFamily:"inherit", opacity: invHistLoading ? 0.6 : 1 }}
+            >
+              {invHistLoading ? "⏳ লোড হচ্ছে..." : "আরও লোড করুন ↓"}
+            </button>
+          ) : invHistRows.length > 0 ? (
+            <div style={{ color:"#64748b", fontSize:11 }}>— সব ইনভয়েস দেখানো হয়েছে —</div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
   // 📤 ১ ক্লিকে বাকি রিমাইন্ডার SMS
   const [bulkSmsSending, setBulkSmsSending] = useState(false);
   const [bulkSmsProgress, setBulkSmsProgress] = useState({ done: 0, total: 0 });
@@ -22474,6 +22677,189 @@ function Settings_({ T, S, shopName,
   // ব্যাকআপ কার্ডে সতর্কতা দেখায় (ব্যর্থ হওয়ার আগেই)
   const [quotaInfo, setQuotaInfo] = useState(null);
   useEffect(() => { StorageQuota.check().then(setQuotaInfo); }, []);
+
+  // ── 🩺 Sync Diagnostics — windowing ফিচারগুলো (stockMovements/txns/cashLogs/
+  // Invoice History pagination) নিজে থেকেই চেক করে, ম্যানুয়ালি Firestore Console
+  // ঘেঁটে স্ক্রিনশট নেওয়ার বদলে। প্রতিটা ফিচারের জন্য pass/fail/todo রিপোর্ট করে। ──
+  const [syncDiag, setSyncDiag] = useState(null); // null | {running:true} | {ranAt, checks:[]}
+  const runSyncDiagnostics = async () => {
+    setSyncDiag({ running: true });
+    const checks = [];
+    const add = (feature, name, status, detail) => checks.push({ feature, name, status, detail });
+    const cutoffDate = new Date(); cutoffDate.setDate(cutoffDate.getDate() - 30);
+    const cutoff = cutoffDate.toISOString().split("T")[0];
+
+    if (!fssReady || !FSS._db) {
+      add("সাধারণ", "Firestore সংযোগ", "fail", "FSS প্রস্তুত না — ইন্টারনেট/কনফিগ চেক করুন");
+      setSyncDiag({ ranAt: new Date().toISOString(), checks });
+      return;
+    }
+
+    // ── ১) stockMovements windowing ──
+    try {
+      const localCount = (stockMovements || []).length;
+      const outOfWindow = (stockMovements || []).filter(m => (m.dateKey || "") < cutoff).length;
+      add("stockMovements", "Windowed তালিকা শুধু গত ৩০ দিনের কিনা",
+        outOfWindow === 0 ? "pass" : "fail",
+        outOfWindow === 0 ? `${localCount}টি এন্ট্রি, সবই ৩০ দিনের মধ্যে` : `${outOfWindow}টি এন্ট্রি ৩০ দিনের বাইরে চলে এসেছে — windowing কাজ করছে না`);
+
+      const fullSnap = await getDocs(collection(FSS._db, "stockMovements"));
+      add("stockMovements", "ব্যাকআপ ফুল-পুল (কোনো ডেটা হারায়নি কিনা)",
+        fullSnap.size >= localCount ? "pass" : "fail",
+        `Firestore-এ মোট ${fullSnap.size}টি, লোকাল windowed ${localCount}টি`);
+
+      if (fullSnap.size > 0) {
+        const sample = fullSnap.docs[0].data();
+        const ok = !!sample.dateKey && !!sample.productId && sample.delta !== undefined && sample.stock !== undefined;
+        add("stockMovements", "ডকুমেন্ট স্ট্রাকচার", ok ? "pass" : "fail",
+          ok ? "dateKey/productId/delta/stock — সব ফিল্ড ঠিক আছে" : "কিছু প্রয়োজনীয় ফিল্ড অনুপস্থিত");
+      }
+
+      // ── Write→Read রাউন্ড-ট্রিপ — সত্যিই Firestore-এ পুশ হচ্ছে কিনা, শুধু পুরনো
+      // ডেটা read করে অনুমান না করে, একটা টেস্ট এন্ট্রি লিখে সরাসরি যাচাই করা হয়
+      // (কাজ শেষে টেস্ট এন্ট্রি মুছে ফেলা হয়) ──
+      try {
+        const testId = `difftest_sm_${Date.now()}`;
+        pushStockMovement({
+          id: testId, productId: "diag-test", productName: "ডায়াগনস্টিক টেস্ট এন্ট্রি",
+          stock: 0, prevStock: 0, delta: 0, at: new Date().toISOString(),
+          dateKey: new Date().toISOString().split("T")[0], source: "diagnostic-test",
+        });
+        await new Promise(r => setTimeout(r, 1500));
+        const snap = await getDoc(doc(FSS._db, "stockMovements", testId));
+        add("stockMovements", "Write→Read লাইভ টেস্ট (পুশ করে Firestore-এ সরাসরি যাচাই)",
+          snap.exists() ? "pass" : "fail",
+          snap.exists() ? "টেস্ট এন্ট্রি পুশ করার পর সরাসরি Firestore-এ পাওয়া গেছে — write path ঠিক আছে" : "টেস্ট এন্ট্রি Firestore-এ পাওয়া যায়নি — write path ভাঙা থাকতে পারে");
+        try { await deleteDoc(doc(FSS._db, "stockMovements", testId)); } catch {}
+      } catch (err) {
+        add("stockMovements", "Write→Read লাইভ টেস্ট", "fail", err?.code || err?.message || "unknown error");
+      }
+    } catch (err) {
+      add("stockMovements", "চেক ব্যর্থ হয়েছে", "fail", err?.code || err?.message || "unknown error");
+    }
+
+    // ── ২) txns windowing ──
+    try {
+      const localCount = (txns || []).length;
+      const outOfWindow = (txns || []).filter(t => (t.dateKey || "") < cutoff).length;
+      add("txns", "Windowed তালিকা শুধু গত ৩০ দিনের কিনা",
+        outOfWindow === 0 ? "pass" : "fail",
+        outOfWindow === 0 ? `${localCount}টি এন্ট্রি, সবই ৩০ দিনের মধ্যে` : `${outOfWindow}টি এন্ট্রি ৩০ দিনের বাইরে চলে এসেছে`);
+
+      const sampleCustomerId = (customers || [])[0]?.id;
+      if (sampleCustomerId) {
+        try {
+          const q = query(collection(FSS._db, "txns"), where("customerId", "==", sampleCustomerId), orderBy("dateKey", "desc"), limit(1));
+          const snap = await getDocs(q);
+          add("txns", "কাস্টমার ডিটেইল on-demand কোয়েরি (composite index)", "pass",
+            `সফল — কোনো এরর ছাড়া কোয়েরি চলেছে (${snap.size} রেকর্ড)`);
+        } catch (err) {
+          add("txns", "কাস্টমার ডিটেইল on-demand কোয়েরি (composite index)", "fail",
+            `ব্যর্থ — ${err?.code || err?.message}। Firestore Console → Indexes-এ customerId+dateKey কম্পোজিট ইনডেক্স লাগবে`);
+        }
+      } else {
+        add("txns", "কাস্টমার ডিটেইল on-demand কোয়েরি", "skip", "টেস্ট করার মতো কোনো কাস্টমার নেই");
+      }
+
+      const fullSnap = await getDocs(collection(FSS._db, "txns"));
+      add("txns", "ব্যাকআপ ফুল-পুল (কোনো ডেটা হারায়নি কিনা)",
+        fullSnap.size >= localCount ? "pass" : "fail",
+        `Firestore-এ মোট ${fullSnap.size}টি, লোকাল windowed ${localCount}টি`);
+
+      // ── Write→Read রাউন্ড-ট্রিপ — addTxn() আসল কাস্টমার ব্যালেন্স বদলে দেয় বলে
+      // সরাসরি কল না করে, একই write path (FSS.setRecord) দিয়ে একটা নিরীহ টেস্ট
+      // এন্ট্রি পুশ করে সরাসরি Firestore-এ যাচাই করা হয় (পরে মুছে ফেলা হয়) ──
+      try {
+        const testId = `difftest_txn_${Date.now()}`;
+        if (FSS.isReady()) {
+          FSS.setRecord("txns", testId, withTs({
+            id: testId, customerId: "diag-test", type: "joma", amount: 0, balanceAfter: 0,
+            invoiceId: null, note: "ডায়াগনস্টিক টেস্ট এন্ট্রি", source: "diagnostic-test",
+            date: new Date().toISOString(), dateKey: new Date().toISOString().split("T")[0],
+          }));
+        }
+        await new Promise(r => setTimeout(r, 1500));
+        const snap = await getDoc(doc(FSS._db, "txns", testId));
+        add("txns", "Write→Read লাইভ টেস্ট (পুশ করে Firestore-এ সরাসরি যাচাই)",
+          snap.exists() ? "pass" : "fail",
+          snap.exists() ? "টেস্ট এন্ট্রি পুশ করার পর সরাসরি Firestore-এ পাওয়া গেছে — write path ঠিক আছে" : "টেস্ট এন্ট্রি Firestore-এ পাওয়া যায়নি — write path ভাঙা থাকতে পারে");
+        try { await deleteDoc(doc(FSS._db, "txns", testId)); } catch {}
+      } catch (err) {
+        add("txns", "Write→Read লাইভ টেস্ট", "fail", err?.code || err?.message || "unknown error");
+      }
+    } catch (err) {
+      add("txns", "চেক ব্যর্থ হয়েছে", "fail", err?.code || err?.message || "unknown error");
+    }
+
+    // ── ৩) cashLogs windowing ──
+    try {
+      const cutoffCash = new Date(); cutoffCash.setDate(cutoffCash.getDate() - 35);
+      const cutoffCashKey = cutoffCash.toISOString().split("T")[0];
+      const localCount = (cashLogs || []).length;
+      const outOfWindow = (cashLogs || []).filter(c => (c.dateKey || "") < cutoffCashKey).length;
+      add("cashLogs", "Windowed তালিকা শুধু গত ৩৫ দিনের কিনা",
+        outOfWindow === 0 ? "pass" : "fail",
+        outOfWindow === 0 ? `${localCount}টি এন্ট্রি, সবই ৩৫ দিনের মধ্যে` : `${outOfWindow}টি এন্ট্রি ৩৫ দিনের বাইরে চলে এসেছে — windowing কাজ করছে না`);
+
+      try {
+        const q = query(collection(FSS._db, "cashLogs"), where("dateKey", ">=", cutoffCashKey), where("dateKey", "<=", new Date().toISOString().split("T")[0]), orderBy("dateKey", "desc"), limit(1));
+        const snap = await getDocs(q);
+        add("cashLogs", "History রিপোর্ট on-demand রেঞ্জ-কোয়েরি", "pass", `সফল — কোনো এরর ছাড়া কোয়েরি চলেছে (${snap.size} রেকর্ড)`);
+      } catch (err) {
+        add("cashLogs", "History রিপোর্ট on-demand রেঞ্জ-কোয়েরি", "fail",
+          `ব্যর্থ — ${err?.code || err?.message}। Firestore Console → Indexes-এ cashLogs → dateKey ইনডেক্স লাগবে`);
+      }
+
+      const fullSnap = await getDocs(collection(FSS._db, "cashLogs"));
+      add("cashLogs", "ব্যাকআপ ফুল-পুল (কোনো ডেটা হারায়নি কিনা)",
+        fullSnap.size >= localCount ? "pass" : "fail",
+        `Firestore-এ মোট ${fullSnap.size}টি, লোকাল windowed ${localCount}টি`);
+
+      // ── Write→Read রাউন্ড-ট্রিপ — stockMovements/txns-এর মতোই একই write path
+      // (FSS.setRecord) দিয়ে একটা নিরীহ টেস্ট এন্ট্রি পুশ করে সরাসরি Firestore-এ
+      // যাচাই করা হয় (পরে মুছে ফেলা হয়) ──
+      try {
+        const testId = `difftest_cash_${Date.now()}`;
+        pushCashLog({
+          id: testId, type: "opening", amount: 0, note: "ডায়াগনস্টিক টেস্ট এন্ট্রি",
+          date: new Date().toISOString(), dateKey: new Date().toISOString().split("T")[0],
+          createdAt: new Date().toISOString(), by: "diagnostic-test",
+        });
+        await new Promise(r => setTimeout(r, 1500));
+        const snap = await getDoc(doc(FSS._db, "cashLogs", testId));
+        add("cashLogs", "Write→Read লাইভ টেস্ট (পুশ করে Firestore-এ সরাসরি যাচাই)",
+          snap.exists() ? "pass" : "fail",
+          snap.exists() ? "টেস্ট এন্ট্রি পুশ করার পর সরাসরি Firestore-এ পাওয়া গেছে — write path ঠিক আছে" : "টেস্ট এন্ট্রি Firestore-এ পাওয়া যায়নি — write path ভাঙা থাকতে পারে");
+        try { await deleteDoc(doc(FSS._db, "cashLogs", testId)); } catch {}
+      } catch (err) {
+        add("cashLogs", "Write→Read লাইভ টেস্ট", "fail", err?.code || err?.message || "unknown error");
+      }
+    } catch (err) {
+      add("cashLogs", "চেক ব্যর্থ হয়েছে", "fail", err?.code || err?.message || "unknown error");
+    }
+
+    // ── ৪) Invoice History cursor pagination (Phase 2) ──
+    try {
+      const q = query(collection(FSS._db, "invoices"), orderBy("dateKey", "desc"), orderBy("createdAt", "desc"), limit(1));
+      const snap = await getDocs(q);
+      add("Invoice History", "Cursor Pagination (Phase 2) কোয়েরি", "pass", `সফল — dateKey+createdAt কম্পোজিট কোয়েরি চলেছে (${snap.size} রেকর্ড)`);
+      if (snap.docs.length) {
+        try {
+          const q2 = query(collection(FSS._db, "invoices"), orderBy("dateKey", "desc"), orderBy("createdAt", "desc"), startAfter(snap.docs[0]), limit(1));
+          await getDocs(q2);
+          add("Invoice History", "startAfter cursor দিয়ে পরের পাতা", "pass", "সফল — cursor pagination কাজ করছে");
+        } catch (err) {
+          add("Invoice History", "startAfter cursor দিয়ে পরের পাতা", "fail", err?.code || err?.message || "unknown error");
+        }
+      }
+    } catch (err) {
+      add("Invoice History", "Cursor Pagination (Phase 2) কোয়েরি", "fail",
+        `ব্যর্থ — ${err?.code || err?.message}। Firestore Console → Indexes-এ invoices → dateKey+createdAt কম্পোজিট ইনডেক্স লাগবে`);
+    }
+
+    setSyncDiag({ ranAt: new Date().toISOString(), checks });
+  };
+
   // #৬ কনফ্লিক্ট রেজোলিউশন — "remote" মানে ইতিমধ্যে প্রয়োগ হয়ে গেছে, শুধু ব্যাজ
   // সরিয়ে দিলেই হয়। "local" মানে সংঘর্ষিত ফিল্ডগুলোতে এই ডিভাইসের মান
   // বর্তমান রেকর্ডের ওপর বসিয়ে আবার Firestore-এ পুশ করা হয় — বাকি রেকর্ড
@@ -23410,6 +23796,83 @@ function Settings_({ T, S, shopName,
                   </div>
                 );
               })()}
+
+              {/* ── 📜 Invoice History — Phase 2 cursor pagination দিয়ে পুরনো ইনভয়েস খোঁজা ── */}
+              <div style={{ marginBottom:10, borderRadius:10, border:"1px solid #a78bfa44", background:"#a78bfa0f", padding:"10px 11px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:6, minWidth:0 }}>
+                  <span style={{ fontSize:13 }}>📜</span>
+                  <div style={{ minWidth:0 }}>
+                    <div style={{ color:"#c4b5fd", fontWeight:800, fontSize:10.5 }}>ইনভয়েস হিস্ট্রি</div>
+                    <div style={{ color:"#94a3b8", fontSize:8.5 }}>৩০ দিনের বেশি পুরনো ইনভয়েস খুঁজুন</div>
+                  </div>
+                </div>
+                <button
+                  onClick={openInvHist}
+                  style={{ background:"#a78bfa22", border:"1px solid #a78bfa55", borderRadius:7, padding:"5px 11px", color:"#c4b5fd", fontSize:9.5, fontWeight:800, cursor:"pointer", fontFamily:"inherit", flexShrink:0 }}
+                >
+                  দেখুন →
+                </button>
+              </div>
+
+              {/* ── 🩺 Sync Diagnostics — ৪টা windowing ফিচার (stockMovements/txns/
+                  cashLogs/Invoice History pagination) এক ক্লিকে নিজে থেকে চেক করে ── */}
+              <div style={{ marginBottom:10, borderRadius:10, border:"1px solid #38bdf844", background:"#38bdf80f", padding:"10px 11px" }}>
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                    <span style={{ fontSize:13 }}>🩺</span>
+                    <span style={{ color:"#38bdf8", fontWeight:800, fontSize:10.5 }}>সিঙ্ক ডায়াগনস্টিকস</span>
+                  </div>
+                  <button
+                    onClick={runSyncDiagnostics}
+                    disabled={syncDiag?.running}
+                    style={{ background:"#38bdf822", border:"1px solid #38bdf855", borderRadius:7, padding:"5px 11px", color:"#38bdf8", fontSize:9.5, fontWeight:800, cursor: syncDiag?.running ? "not-allowed" : "pointer", fontFamily:"inherit", opacity: syncDiag?.running ? 0.6 : 1 }}
+                  >
+                    {syncDiag?.running ? "চলছে..." : "▶ চালান"}
+                  </button>
+                </div>
+                {!syncDiag && (
+                  <div style={{ color:"#94a3b8", fontSize:9.5 }}>stockMovements / txns / cashLogs windowing, Invoice History pagination — এই ৪টা ফিচার নিজে থেকে টেস্ট করতে "চালান" চাপুন।</div>
+                )}
+                {syncDiag?.checks && (() => {
+                  const groups = {};
+                  syncDiag.checks.forEach(c => { (groups[c.feature] = groups[c.feature] || []).push(c); });
+                  const iconFor = (s) => s === "pass" ? "✅" : s === "fail" ? "❌" : s === "todo" ? "⏳" : "⏭️";
+                  const colorFor = (s) => s === "pass" ? "#22c55e" : s === "fail" ? "#ef4444" : s === "todo" ? "#94a3b8" : "#f59e0b";
+                  const passCount = syncDiag.checks.filter(c => c.status === "pass").length;
+                  const failCount = syncDiag.checks.filter(c => c.status === "fail").length;
+                  const totalCount = syncDiag.checks.length;
+                  return (
+                    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                      <div style={{
+                        display:"flex", alignItems:"center", justifyContent:"space-between",
+                        background: failCount > 0 ? "#ef444418" : "#22c55e18",
+                        border: `1px solid ${failCount > 0 ? "#ef444455" : "#22c55e55"}`,
+                        borderRadius:8, padding:"7px 10px", marginBottom:2,
+                      }}>
+                        <span style={{ color: failCount > 0 ? "#fca5a5" : "#86efac", fontWeight:800, fontSize:10.5 }}>
+                          {failCount > 0 ? `⚠️ ${failCount}টা সমস্যা পাওয়া গেছে` : "✅ সব ঠিক আছে"}
+                        </span>
+                        <span style={{ color:"#94a3b8", fontSize:9 }}>{passCount}/{totalCount} পাস</span>
+                      </div>
+                      {Object.keys(groups).map(feature => (
+                        <div key={feature}>
+                          <div style={{ color:"#e2e8f0", fontWeight:800, fontSize:10, marginBottom:3 }}>{feature}</div>
+                          {groups[feature].map((c, i) => (
+                            <div key={i} style={{ display:"flex", gap:6, marginBottom:3, paddingLeft:6 }}>
+                              <span style={{ fontSize:10 }}>{iconFor(c.status)}</span>
+                              <div style={{ flex:1 }}>
+                                <div style={{ color:colorFor(c.status), fontSize:9.5, fontWeight:700 }}>{c.name}</div>
+                                <div style={{ color:"#94a3b8", fontSize:8.5 }}>{c.detail}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                      <div style={{ color:"#64748b", fontSize:8, marginTop:2 }}>সর্বশেষ চালানো হয়েছে: {new Date(syncDiag.ranAt).toLocaleTimeString("bn-BD", { hour:"2-digit", minute:"2-digit" })}</div>
+                    </div>
+                  );
+                })()}
+              </div>
 
               {/* ── #৩ Backup Health — Drive/Local/Master Sync তিনটার "কতক্ষণ আগে"
                   একসাথে, স্ট্যালনেস অনুযায়ী রঙ বদলায় (২৪ ঘণ্টার কম=সবুজ,
