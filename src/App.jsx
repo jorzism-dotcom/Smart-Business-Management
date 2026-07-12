@@ -15638,6 +15638,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
       source: "expired_removal",
       costPrice: batch.costPrice || 0, qty, value, expiryDate: batch.expiryDate || "",
       batchNo: batch.batchNo || "", unit: product.unit || "", by: currentUser?.name || "এডমিন",
+      company: product.company || product.category || "অজ্ঞাত",
     };
     pushStockMovement(mv);
     setStockMovements(prev => [mv, ...(prev || [])]);
@@ -16508,12 +16509,6 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
     // লজিকে না গিয়েই সরাসরি রিটার্ন করে দেয়।
     if (baseInvKey === 'expired') {
       const sortedItems = [...items].sort((a,b) => new Date(a.expiryDate) - new Date(b.expiryDate));
-      const buildExpiredPdfHtml = () => {
-        const rows = sortedItems.map((p,i) =>
-          `<tr><td class="serial">${i+1}</td><td>${p.name}</td><td>${p.company||p.category||"অজ্ঞাত"}</td><td class="num">${p.stock||0}${p.unit||""}</td><td class="num">${fmtExpiryMonth(p.expiryDate)}</td></tr>`
-        ).join("");
-        return buildPdfHtml(`<div class="section"><table><thead><tr><th class="serial">#</th><th>পণ্য</th><th>সাপ্লায়ার</th><th class="num">স্টক</th><th class="num">মেয়াদ</th></tr></thead><tbody>${rows}</tbody></table></div>`, shopName, title);
-      };
       const suppliersInvolved = new Set(sortedItems.map(p => p.company || p.category || "অজ্ঞাত")).size;
 
       return (
@@ -16529,26 +16524,10 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
 
           {/* মাসিক মেয়াদোত্তীর্ণ হিসাব — শুধু এডমিন */}
           {currentUser?.role !== "staff" && (
-            <button onClick={() => setInvModal('expired-monthly')}
+            <button onClick={() => setInvModal(`expired-monthly:${todayEn().slice(0,7)}`)}
               style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"center", gap:7, background:"linear-gradient(135deg,#7c2d12,#dc2626)", border:"none", borderRadius:12, padding:"11px", color:"#fff", fontWeight:800, fontSize:12.5, cursor:"pointer", fontFamily:"inherit", marginBottom:12, boxShadow:"0 4px 14px rgba(220,38,38,0.3)" }}>
               📊 মাসিক মেয়াদোত্তীর্ণ হিসাব দেখুন
             </button>
-          )}
-
-          {/* Print/WA */}
-          {sortedItems.length > 0 && (
-            <div style={{ display:"flex", gap:8, marginBottom:14 }}>
-              <button onClick={() => openPrintWindow(buildExpiredPdfHtml())}
-                style={{ flex:1, background:"linear-gradient(135deg,#0369a1,#0ea5e9)", border:"none", borderRadius:12, padding:"10px", color:"#fff", fontWeight:800, fontSize:12, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/></svg>
-                🖨️ Print
-              </button>
-              <button onClick={() => { const lines = sortedItems.map((p,i)=>`${i+1}. ${p.name} (${p.company||p.category||"অজ্ঞাত"}) — ${p.stock||0}${p.unit||""} — মেয়াদ: ${fmtExpiryMonth(p.expiryDate)}`).join("\n"); window.open(`https://wa.me/?text=${encodeURIComponent(title+"\n"+shopName+"\n\n"+lines)}`,"_blank"); }}
-                style={{ flex:1, background:"linear-gradient(135deg,#065f46,#10b981)", border:"none", borderRadius:12, padding:"10px", color:"#fff", fontWeight:800, fontSize:12, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z"/></svg>
-                📤 WhatsApp
-              </button>
-            </div>
           )}
 
           {sortedItems.length === 0 && <div style={{ color:"#64748b", textAlign:"center", marginTop:40, fontSize:14 }}>কোনো মেয়াদোত্তীর্ণ পণ্য নেই</div>}
@@ -16564,48 +16543,39 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
                     <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"left" }}>সাপ্লায়ার</th>
                     <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"right" }}>স্টক</th>
                     <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"right" }}>মেয়াদ</th>
+                    {currentUser?.role !== "staff" && <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"center", width:40 }}></th>}
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedItems.map((p, i) => (
+                  {sortedItems.map((p, i) => {
+                    const expBatches = currentUser?.role !== "staff" ? getExpiredBatchesOf(p, now) : [];
+                    return (
                     <tr key={p.id} style={{ background: i % 2 === 1 ? "#f8faff" : "#fff" }}>
                       <td style={{ padding:"9px 10px", fontSize:12, textAlign:"center", fontWeight:700, color:"#0369a1", borderBottom:"1px solid #f1f5f9" }}>{i+1}</td>
                       <td style={{ padding:"9px 10px", fontSize:12.5, color:"#0f172a", borderBottom:"1px solid #f1f5f9" }}>{p.name}{p.unit ? <span style={{ color:"#94a3b8", fontSize:11 }}> ({p.unit})</span> : null}</td>
                       <td style={{ padding:"9px 10px", fontSize:12, color:"#334155", borderBottom:"1px solid #f1f5f9" }}>{p.company || p.category || "অজ্ঞাত"}</td>
                       <td style={{ padding:"9px 10px", fontSize:12.5, fontWeight:700, color:"#0f172a", textAlign:"right", borderBottom:"1px solid #f1f5f9" }}>{p.stock||0}</td>
                       <td style={{ padding:"9px 10px", fontSize:12, fontWeight:700, color:"#dc2626", textAlign:"right", borderBottom:"1px solid #f1f5f9" }}>{fmtExpiryMonth(p.expiryDate)}</td>
+                      {currentUser?.role !== "staff" && (
+                        <td style={{ padding:"9px 6px", textAlign:"center", borderBottom:"1px solid #f1f5f9" }}>
+                          {expBatches.length > 0 && (
+                            <div style={{ display:"flex", flexDirection:"column", gap:3, alignItems:"center" }}>
+                              {expBatches.map((b, bi) => (
+                                <button key={bi}
+                                  onClick={() => setExpRemoveConfirm({ product: p, batch: b })}
+                                  title={`দোকান থেকে সরিয়ে ফেলেছেন? অ্যাপ থেকেও সরান ${b.batchNo ? `(${b.batchNo})` : ""}`}
+                                  style={{ display:"flex", alignItems:"center", justifyContent:"center", width:26, height:26, background:"#ef444414", border:"1px solid #ef444440", borderRadius:8, color:"#dc2626", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>
+                                  🗑️
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      )}
                     </tr>
-                  ))}
+                  );})}
                 </tbody>
               </table>
-            </div>
-          )}
-
-          {/* 🗑️ দোকান থেকে সরানো ব্যাচ — অ্যাপ থেকেও সরানোর অ্যাকশন (শুধু এডমিন) */}
-          {currentUser?.role !== "staff" && sortedItems.some(p => getExpiredBatchesOf(p, now).length > 0) && (
-            <div>
-              <div style={{ color:"#94a3b8", fontSize:11.5, fontWeight:700, marginBottom:8 }}>দোকান থেকে সরিয়ে ফেলেছেন? অ্যাপ থেকেও সরান —</div>
-              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-                {sortedItems.map(p => {
-                  const expBatches = getExpiredBatchesOf(p, now);
-                  if (expBatches.length === 0) return null;
-                  return (
-                    <div key={p.id} style={{ background:"#071a0f", border:"1px solid #ef444422", borderRadius:12, padding:"10px 12px" }}>
-                      <div style={{ color:"#e2e8f0", fontWeight:700, fontSize:12.5, marginBottom:6 }}>{p.name}</div>
-                      <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
-                        {expBatches.map((b, bi) => (
-                          <button key={bi}
-                            onClick={() => setExpRemoveConfirm({ product: p, batch: b })}
-                            style={{ display:"flex", alignItems:"center", justifyContent:"space-between", background:"#ef444414", border:"1px solid #ef444440", borderRadius:10, padding:"7px 10px", color:"#f87171", fontSize:11, fontWeight:800, cursor:"pointer", fontFamily:"inherit" }}>
-                            <span>🗑️ সরান {b.batchNo ? `(${b.batchNo})` : ""}</span>
-                            <span>{b.qty}{p.unit||""} · ৳{fmt(Math.round((b.qty||0)*(b.costPrice||0)))}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
             </div>
           )}
         </div>
@@ -16745,7 +16715,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
 
         {/* মাসিক মেয়াদোত্তীর্ণ হিসাব — শুধু এডমিন */}
         {baseInvKey === 'expired' && currentUser?.role !== "staff" && (
-          <button onClick={() => setInvModal('expired-monthly')}
+          <button onClick={() => setInvModal(`expired-monthly:${todayEn().slice(0,7)}`)}
             style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"center", gap:7, background:"linear-gradient(135deg,#7c2d12,#dc2626)", border:"none", borderRadius:12, padding:"11px", color:"#fff", fontWeight:800, fontSize:12.5, cursor:"pointer", fontFamily:"inherit", marginBottom:12, boxShadow:"0 4px 14px rgba(220,38,38,0.3)" }}>
             📊 মাসিক মেয়াদোত্তীর্ণ হিসাব দেখুন
           </button>
@@ -16822,87 +16792,88 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
     });
     const months = Object.values(byMonth).sort((a,b) => b.key.localeCompare(a.key));
 
-    const selMonthKey = invModal.includes(":") ? invModal.split(":")[1] : null;
+    const currentMonthKey = todayEn().slice(0,7);
+    const selMonthKey = (invModal.includes(":") ? invModal.split(":")[1] : null) || currentMonthKey;
 
-    // ── নির্দিষ্ট মাসের বিস্তারিত (দিন-ভিত্তিক লিস্ট + Print/WhatsApp) ──
-    if (selMonthKey) {
-      const m = byMonth[selMonthKey] || { key: selMonthKey, qty:0, value:0, rows:[] };
-      const sortedRows = [...m.rows].sort((a,b) => (b.dateKey||"").localeCompare(a.dateKey||"") || (b.at||"").localeCompare(a.at||""));
-      const waText = `*${shopName}*\nমেয়াদোত্তীর্ণ পণ্যের মাসিক হিসাব — ${monthLabel(selMonthKey)}\nমোট: ${m.qty}টি · মূল্য ৳${fmt(m.value)}\n\n` +
-        sortedRows.map((r,i) => `${i+1}. ${r.productName} — ${r.qty}${r.unit||""} · ৳${fmt(r.value||0)} · ${r.dateKey}`).join("\n");
-      const pdfRows = sortedRows.map((r,i) => `<tr><td class="serial">${i+1}</td><td>${r.productName}</td><td class="num">${r.qty}${r.unit||""}</td><td class="num">৳${fmt(r.value||0)}</td><td class="num">${r.dateKey}</td></tr>`).join("");
-      const pdfHtml = buildPdfHtml(`<div class="section"><table><thead><tr><th class="serial">#</th><th>পণ্য</th><th class="num">পরিমাণ</th><th class="num">মূল্য</th><th class="num">তারিখ</th></tr></thead><tbody>${pdfRows}</tbody></table></div>`, shopName, `মেয়াদোত্তীর্ণ পণ্যের হিসাব — ${monthLabel(selMonthKey)}`);
-      return (
-        <div style={{ ...S.page, padding:"0 14px 16px" }}>
-          <button style={S.textBtn} onClick={() => setInvModal('expired-monthly')}>← মাসের তালিকায় ফিরুন</button>
-          <div style={{ color:"#e2e8f0", fontWeight:900, fontSize:16, marginBottom:2 }}>{monthLabel(selMonthKey)} — মেয়াদোত্তীর্ণ পণ্যের হিসাব</div>
-          <div style={{ color:"#64748b", fontSize:12, marginBottom:12 }}>{m.qty}টি পণ্য · মোট মূল্য ৳{fmt(m.value)}</div>
-          {sortedRows.length > 0 && (
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:14 }}>
-              <button onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent(waText)}`, "_blank")}
-                style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, background:"linear-gradient(135deg,#065f46,#22c55e)", color:"#fff", border:"none", borderRadius:12, padding:"11px 8px", fontWeight:800, fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>
-                📤 WhatsApp
-              </button>
-              <button onClick={() => printPdfHtml(pdfHtml)}
-                style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, background:"linear-gradient(135deg,#1e40af,#3b82f6)", color:"#fff", border:"none", borderRadius:12, padding:"11px 8px", fontWeight:800, fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>
-                🖨️ Print
-              </button>
-            </div>
-          )}
-          {sortedRows.length === 0 && <div style={{ color:"#64748b", textAlign:"center", marginTop:40, fontSize:14 }}>এই মাসে কোনো মেয়াদোত্তীর্ণ পণ্য সরানো হয়নি</div>}
-          {sortedRows.length > 0 && (
-            <div style={{ background:"#fff", borderRadius:14, overflow:"hidden", boxShadow:"0 1px 4px rgba(0,0,0,0.08)" }}>
-              <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:"inherit" }}>
-                <thead>
-                  <tr style={{ background:"linear-gradient(135deg,#0369a1,#0284c7)" }}>
-                    <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"center", width:34 }}>#</th>
-                    <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"left" }}>পণ্য</th>
-                    <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"right" }}>পরিমাণ</th>
-                    <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"right" }}>মূল্য</th>
-                    <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"right" }}>তারিখ</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedRows.map((r, i) => (
-                    <tr key={r.id || i} style={{ background: i % 2 === 1 ? "#f8faff" : "#fff" }}>
-                      <td style={{ padding:"9px 10px", fontSize:12, textAlign:"center", fontWeight:700, color:"#0369a1", borderBottom:"1px solid #f1f5f9" }}>{i+1}</td>
-                      <td style={{ padding:"9px 10px", fontSize:12.5, color:"#0f172a", borderBottom:"1px solid #f1f5f9" }}>{r.productName}{r.batchNo ? <span style={{ color:"#94a3b8", fontSize:11 }}> ({r.batchNo})</span> : null}</td>
-                      <td style={{ padding:"9px 10px", fontSize:12.5, color:"#334155", textAlign:"right", borderBottom:"1px solid #f1f5f9" }}>{r.qty}{r.unit||""}</td>
-                      <td style={{ padding:"9px 10px", fontSize:12.5, fontWeight:700, color:"#0f172a", textAlign:"right", borderBottom:"1px solid #f1f5f9" }}>৳{fmt(r.value||0)}</td>
-                      <td style={{ padding:"9px 10px", fontSize:12, color:"#334155", textAlign:"right", borderBottom:"1px solid #f1f5f9" }}>{r.dateKey}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      );
-    }
+    // মাস কী ("YYYY-MM") এক মাস আগে/পরে সরানোর হেল্পার
+    const shiftMonthKey = (mk, delta) => {
+      const [y, mo] = mk.split("-").map(Number);
+      const d = new Date(y, (mo - 1) + delta, 1);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+    };
+    // মাস পিকারের ড্রপডাউনে দেখানোর জন্য — যেসব মাসে ডেটা আছে + বর্তমান মাস (নাহলে দেখা যাবে না)
+    const pickerMonthKeys = Array.from(new Set([currentMonthKey, ...months.map(x=>x.key), selMonthKey])).sort((a,b)=>b.localeCompare(a));
 
-    // ── মাসভিত্তিক তালিকা (মূল পেজ) ──
+    const m = byMonth[selMonthKey] || { key: selMonthKey, qty:0, value:0, rows:[] };
+    const sortedRows = [...m.rows].sort((a,b) => (b.dateKey||"").localeCompare(a.dateKey||"") || (b.at||"").localeCompare(a.at||""));
+    const waText = `*${shopName}*\nমেয়াদোত্তীর্ণ পণ্যের মাসিক হিসাব — ${monthLabel(selMonthKey)}\nমোট: ${m.qty}টি · মূল্য ৳${fmt(m.value)}\n\n` +
+      sortedRows.map((r,i) => `${i+1}. ${r.productName} (${r.company||"অজ্ঞাত"}) — ${r.qty}${r.unit||""} · ৳${fmt(r.value||0)} · ${r.dateKey}`).join("\n");
+    const pdfRows = sortedRows.map((r,i) => `<tr><td class="serial">${i+1}</td><td>${r.productName}</td><td>${r.company||"অজ্ঞাত"}</td><td class="num">${r.qty}${r.unit||""}</td><td class="num">৳${fmt(r.value||0)}</td><td class="num">${r.dateKey}</td></tr>`).join("");
+    const pdfHtml = buildPdfHtml(`<div class="section"><table><thead><tr><th class="serial">#</th><th>পণ্য</th><th>সাপ্লায়ার</th><th class="num">পরিমাণ</th><th class="num">মূল্য</th><th class="num">তারিখ</th></tr></thead><tbody>${pdfRows}</tbody></table></div>`, shopName, `মেয়াদোত্তীর্ণ পণ্যের হিসাব — ${monthLabel(selMonthKey)}`);
     return (
       <div style={{ ...S.page, padding:"0 14px 16px" }}>
-        <button style={S.textBtn} onClick={() => setInvModal('expired')}>← ফিরুন</button>
-        <div style={{ color:"#e2e8f0", fontWeight:900, fontSize:16, marginBottom:2 }}>মাসিক মেয়াদোত্তীর্ণ হিসাব</div>
-        <div style={{ color:"#64748b", fontSize:12, marginBottom:12 }}>ইংরেজি মাস অনুযায়ী (GMT+6) — যা সরানো হয়েছে তার হিসাব</div>
-        {loadingFull && <div style={{ color:"#64748b", textAlign:"center", marginTop:20, fontSize:13 }}>সম্পূর্ণ ইতিহাস লোড হচ্ছে…</div>}
-        {!loadingFull && months.length === 0 && <div style={{ color:"#64748b", textAlign:"center", marginTop:40, fontSize:14 }}>এখনো কোনো মেয়াদোত্তীর্ণ পণ্য সরানো হয়নি</div>}
-        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-          {months.map(m => (
-            <div key={m.key} className="tap-card" onClick={() => setInvModal(`expired-monthly:${m.key}`)}
-              style={{ background:"linear-gradient(135deg,#ef44440d,#071a0f)", border:"1.5px solid #ef444433", borderRadius:16, padding:"14px 16px", cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <div>
-                <div style={{ color:"#e2e8f0", fontWeight:800, fontSize:14 }}>{monthLabel(m.key)}</div>
-                <div style={{ color:"#94a3b8", fontSize:11, marginTop:3 }}>{m.qty}টি পণ্য মেয়াদোত্তীর্ণ হয়ে সরানো হয়েছে</div>
-              </div>
-              <div style={{ textAlign:"right" }}>
-                <div style={{ color:"#f87171", fontWeight:900, fontSize:16 }}>৳{fmt(m.value)}</div>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round" style={{ marginTop:4 }}><polyline points="9 18 15 12 9 6"/></svg>
-              </div>
-            </div>
-          ))}
+        <button style={S.textBtn} onClick={() => setInvModal('expired')}>← ড্যাশবোর্ডে ফিরুন</button>
+        <div style={{ color:"#e2e8f0", fontWeight:900, fontSize:16, marginBottom:2 }}>মেয়াদোত্তীর্ণ পণ্যের মাসিক হিসাব</div>
+
+        {/* ── মাস পিকার ── */}
+        <div style={{ display:"flex", alignItems:"center", gap:8, margin:"10px 0 12px" }}>
+          <button onClick={() => setInvModal(`expired-monthly:${shiftMonthKey(selMonthKey, -1)}`)}
+            style={{ width:34, height:34, flexShrink:0, background:"#071a0f", border:"1px solid #ef444440", borderRadius:10, color:"#f87171", fontSize:16, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+            ‹
+          </button>
+          <select value={selMonthKey} onChange={(e) => setInvModal(`expired-monthly:${e.target.value}`)}
+            style={{ flex:1, background:"#071a0f", border:"1px solid #ef444440", borderRadius:10, color:"#e2e8f0", fontWeight:800, fontSize:13.5, padding:"8px 10px", fontFamily:"inherit", textAlignLast:"center" }}>
+            {pickerMonthKeys.map(mk => <option key={mk} value={mk}>{monthLabel(mk)}</option>)}
+          </select>
+          <button onClick={() => setInvModal(`expired-monthly:${shiftMonthKey(selMonthKey, 1)}`)}
+            style={{ width:34, height:34, flexShrink:0, background:"#071a0f", border:"1px solid #ef444440", borderRadius:10, color:"#f87171", fontSize:16, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+            ›
+          </button>
         </div>
+
+        {loadingFull && <div style={{ color:"#64748b", textAlign:"center", marginTop:20, fontSize:13 }}>সম্পূর্ণ ইতিহাস লোড হচ্ছে…</div>}
+        <div style={{ color:"#64748b", fontSize:12, marginBottom:12 }}>{m.qty}টি পণ্য · মোট মূল্য ৳{fmt(m.value)}</div>
+        {sortedRows.length > 0 && (
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:14 }}>
+            <button onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent(waText)}`, "_blank")}
+              style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, background:"linear-gradient(135deg,#065f46,#22c55e)", color:"#fff", border:"none", borderRadius:12, padding:"11px 8px", fontWeight:800, fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>
+              📤 WhatsApp
+            </button>
+            <button onClick={() => printPdfHtml(pdfHtml)}
+              style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, background:"linear-gradient(135deg,#1e40af,#3b82f6)", color:"#fff", border:"none", borderRadius:12, padding:"11px 8px", fontWeight:800, fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>
+              🖨️ Print
+            </button>
+          </div>
+        )}
+        {sortedRows.length === 0 && <div style={{ color:"#64748b", textAlign:"center", marginTop:40, fontSize:14 }}>এই মাসে কোনো মেয়াদোত্তীর্ণ পণ্য সরানো হয়নি</div>}
+        {sortedRows.length > 0 && (
+          <div style={{ background:"#fff", borderRadius:14, overflow:"hidden", boxShadow:"0 1px 4px rgba(0,0,0,0.08)" }}>
+            <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:"inherit" }}>
+              <thead>
+                <tr style={{ background:"linear-gradient(135deg,#0369a1,#0284c7)" }}>
+                  <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"center", width:34 }}>#</th>
+                  <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"left" }}>পণ্য</th>
+                  <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"left" }}>সাপ্লায়ার</th>
+                  <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"right" }}>পরিমাণ</th>
+                  <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"right" }}>মূল্য</th>
+                  <th style={{ color:"#fff", padding:"9px 10px", fontSize:11.5, fontWeight:700, textAlign:"right" }}>তারিখ</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedRows.map((r, i) => (
+                  <tr key={r.id || i} style={{ background: i % 2 === 1 ? "#f8faff" : "#fff" }}>
+                    <td style={{ padding:"9px 10px", fontSize:12, textAlign:"center", fontWeight:700, color:"#0369a1", borderBottom:"1px solid #f1f5f9" }}>{i+1}</td>
+                    <td style={{ padding:"9px 10px", fontSize:12.5, color:"#0f172a", borderBottom:"1px solid #f1f5f9" }}>{r.productName}{r.batchNo ? <span style={{ color:"#94a3b8", fontSize:11 }}> ({r.batchNo})</span> : null}</td>
+                    <td style={{ padding:"9px 10px", fontSize:12, color:"#334155", borderBottom:"1px solid #f1f5f9" }}>{r.company || "অজ্ঞাত"}</td>
+                    <td style={{ padding:"9px 10px", fontSize:12.5, color:"#334155", textAlign:"right", borderBottom:"1px solid #f1f5f9" }}>{r.qty}{r.unit||""}</td>
+                    <td style={{ padding:"9px 10px", fontSize:12.5, fontWeight:700, color:"#0f172a", textAlign:"right", borderBottom:"1px solid #f1f5f9" }}>৳{fmt(r.value||0)}</td>
+                    <td style={{ padding:"9px 10px", fontSize:12, color:"#334155", textAlign:"right", borderBottom:"1px solid #f1f5f9" }}>{r.dateKey}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     );
   }
@@ -23726,6 +23697,114 @@ function Settings_({ T, S, shopName,
         `ব্যর্থ — ${err?.code || err?.message}। Firestore Console → Indexes-এ invoices → dateKey+createdAt কম্পোজিট ইনডেক্স লাগবে`);
     }
 
+    // ── ৫) users/স্টাফ পারমিশন — সরাসরি Firestore থেকে যাচাই (এডমিন পারমিশন
+    // বদলালে স্টাফ ফোনে না পৌঁছানোর মতো সমস্যা এখানেই ধরা পড়বে) ──
+    try {
+      const localUsersCount = (users || []).length;
+      const fullSnap = await getDocs(collection(FSS._db, "users"));
+      add("users/স্টাফ", "ব্যাকআপ ফুল-পুল (স্টাফ ডেটা হারায়নি কিনা)",
+        fullSnap.size >= localUsersCount ? "pass" : "fail",
+        `Firestore-এ মোট ${fullSnap.size}জন, লোকাল ${localUsersCount}জন`);
+
+      const staffLocal = (users || []).filter(u => u.role === "staff");
+      if (staffLocal.length === 0) {
+        add("users/স্টাফ", "স্টাফ পারমিশন লাইভ যাচাই", "skip", "কোনো স্টাফ অ্যাকাউন্ট নেই");
+      } else {
+        const mismatches = [];
+        for (const u of staffLocal) {
+          try {
+            const remoteDoc = await getDoc(doc(FSS._db, "users", String(u.id)));
+            if (!remoteDoc.exists()) { mismatches.push(`${u.name} — Firestore-এ পাওয়াই যায়নি`); continue; }
+            const remote = remoteDoc.data();
+            const sameTemp = JSON.stringify(remote.tempPermissions || []) === JSON.stringify(u.tempPermissions || []);
+            const sameCanAdd = !!remote.canAddProduct === !!u.canAddProduct;
+            if (!sameTemp || !sameCanAdd) mismatches.push(`${u.name} — এই ডিভাইসের কপি ও Firestore-এর current ডেটা অমিল`);
+          } catch (err) {
+            mismatches.push(`${u.name} — Firestore থেকে read ব্যর্থ (${err?.code || err?.message})`);
+          }
+        }
+        add("users/স্টাফ", "স্টাফ পারমিশন লাইভ যাচাই (Firestore থেকে সরাসরি রিড, ক্যাশ এড়িয়ে)",
+          mismatches.length === 0 ? "pass" : "fail",
+          mismatches.length === 0 ? `${staffLocal.length}জন স্টাফের permission Firestore-এর সাথে হুবহু মিলছে` : mismatches.join("; "));
+      }
+
+      try {
+        const testId = `difftest_user_${Date.now()}`;
+        if (FSS.isReady()) FSS.setRecord("users", testId, withTs({ id: testId, name: "ডায়াগনস্টিক টেস্ট", role: "diagnostic-test" }));
+        await new Promise(r => setTimeout(r, 1500));
+        const snap = await getDoc(doc(FSS._db, "users", testId));
+        add("users/স্টাফ", "Write→Read লাইভ টেস্ট (instant push path)",
+          snap.exists() ? "pass" : "fail",
+          snap.exists() ? "টেস্ট এন্ট্রি সাথে সাথে Firestore-এ পাওয়া গেছে — write path ঠিক আছে" : "টেস্ট এন্ট্রি Firestore-এ পাওয়া যায়নি — write path ভাঙা থাকতে পারে (Firestore Rules চেক করুন)");
+        try { await deleteDoc(doc(FSS._db, "users", testId)); } catch {}
+      } catch (err) {
+        add("users/স্টাফ", "Write→Read লাইভ টেস্ট", "fail", err?.code || err?.message || "unknown error");
+      }
+    } catch (err) {
+      add("users/স্টাফ", "চেক ব্যর্থ হয়েছে", "fail", err?.code || err?.message || "unknown error");
+    }
+
+    // ── ৬) ডেটা ইন্টেগ্রিটি — লোকাল, নেটওয়ার্ক লাগে না। একটা কাজ করতে গিয়ে
+    // অজান্তেই অন্য জায়গায় ভাঙা তথ্য তৈরি হয়ে গেলে এখানেই ধরা পড়বে ──
+    try {
+      const custIds = new Set((customers || []).map(c => String(c.id)));
+      const orphanInvCust = (invoices || []).filter(inv => inv.customerId && !custIds.has(String(inv.customerId))).length;
+      add("ডেটা ইন্টেগ্রিটি", "ইনভয়েস → কাস্টমার রেফারেন্স", orphanInvCust === 0 ? "pass" : "fail",
+        orphanInvCust === 0 ? "সব ইনভয়েসের কাস্টমার বিদ্যমান" : `${orphanInvCust}টি ইনভয়েসের কাস্টমার আইডি খুঁজে পাওয়া যাচ্ছে না`);
+
+      const negStock = (products || []).filter(p => (p.stock || 0) < 0).length;
+      add("ডেটা ইন্টেগ্রিটি", "নেগেটিভ স্টক", negStock === 0 ? "pass" : "fail",
+        negStock === 0 ? "কোনো পণ্যের স্টক নেগেটিভ না" : `${negStock}টি পণ্যের স্টক নেগেটিভ`);
+
+      const batchMismatch = (products || []).filter(p => {
+        if (!p.batches || !p.batches.length) return false;
+        const sum = p.batches.reduce((s, b) => s + (b.qty || 0), 0);
+        return sum !== (p.stock || 0);
+      }).length;
+      add("ডেটা ইন্টেগ্রিটি", "ব্যাচ-স্টক সমষ্টি মিল", batchMismatch === 0 ? "pass" : "fail",
+        batchMismatch === 0 ? "সব পণ্যের ব্যাচের সমষ্টি মূল স্টকের সাথে মিলছে" : `${batchMismatch}টি পণ্যে ব্যাচের সমষ্টি ও stock ফিল্ড অমিল`);
+
+      const dupIds = (arr) => { const seen = new Set(); let dup = 0; (arr || []).forEach(x => { const k = String(x.id); if (seen.has(k)) dup++; seen.add(k); }); return dup; };
+      const dupProd = dupIds(products), dupCust = dupIds(customers), dupInv = dupIds(invoices), dupUsers = dupIds(users);
+      const dupTotal = dupProd + dupCust + dupInv + dupUsers;
+      add("ডেটা ইন্টেগ্রিটি", "ডুপ্লিকেট আইডি", dupTotal === 0 ? "pass" : "fail",
+        dupTotal === 0 ? "পণ্য/কাস্টমার/ইনভয়েস/ইউজারে কোনো ডুপ্লিকেট আইডি নেই" : `পণ্য:${dupProd} কাস্টমার:${dupCust} ইনভয়েস:${dupInv} ইউজার:${dupUsers} — ডুপ্লিকেট আইডি পাওয়া গেছে`);
+    } catch (err) {
+      add("ডেটা ইন্টেগ্রিটি", "চেক ব্যর্থ হয়েছে", "fail", err?.message || "unknown error");
+    }
+
+    // ── ৭) মেমোরি বনাম ডিভাইস স্টোরেজ — সেভ নিঃশব্দে ব্যর্থ হচ্ছে কিনা ──
+    try {
+      const pairs = [["customers", customers], ["products", products], ["invoices", invoices], ["users", users]];
+      const issues = [];
+      for (const [k, mem] of pairs) {
+        try {
+          const persisted = await load(SK[k]);
+          const memLen = Array.isArray(mem) ? mem.length : 0;
+          const perLen = Array.isArray(persisted) ? persisted.length : 0;
+          if (memLen > 0 && perLen === 0) issues.push(`${k}: মেমোরিতে ${memLen}টি আছে কিন্তু ডিভাইস স্টোরেজে ০টি — সেভ ব্যর্থ হতে পারে`);
+        } catch { issues.push(`${k}: স্টোরেজ থেকে পড়া যাচ্ছে না`); }
+      }
+      add("লোকাল স্টোরেজ", "মেমোরি বনাম ডিভাইস স্টোরেজ", issues.length === 0 ? "pass" : "fail",
+        issues.length === 0 ? "মূল ডেটা ঠিকমতো ডিভাইসে সেভ হচ্ছে" : issues.join("; "));
+    } catch (err) {
+      add("লোকাল স্টোরেজ", "চেক ব্যর্থ হয়েছে", "fail", err?.message || "unknown error");
+    }
+
+    // ── ৮) ব্যাকআপ/সার্বিক হেলথ — বিদ্যমান HealthMonitor পুনর্ব্যবহার ──
+    try {
+      const lowStockCount = (products || []).filter(p => (p.stock || 0) > 0 && (p.stock || 0) <= (p.minStockAlert || 5)).length;
+      const { level, alerts } = HealthMonitor.evaluate({
+        backupFailStreak, lastBackupError, restoreTestOk, restoreTestFailStreak,
+        fsConnected: fssReady && !!FSS._db, firebaseEnabled,
+        pendingConflictsCount: (pendingConflicts || []).length, lowStockCount,
+      });
+      add("ব্যাকআপ/হেলথ", "সার্বিক স্বাস্থ্য", level === "ok" ? "pass" : level === "warning" ? "skip" : "fail",
+        alerts.length ? alerts.map(a => a.msg).join("; ") : "কোনো সতর্কতা নেই");
+    } catch (err) {
+      add("ব্যাকআপ/হেলথ", "চেক ব্যর্থ হয়েছে", "fail", err?.message || "unknown error");
+    }
+
     setSyncDiag({ ranAt: new Date().toISOString(), checks });
   };
 
@@ -24631,24 +24710,26 @@ function Settings_({ T, S, shopName,
                 <div style={{ color:"#94a3b8", fontSize:9.5 }}>ইনভয়েস হিস্ট্রি এখন নিচের <span style={{color:"#c4b5fd", fontWeight:800}}>"ইনভয়েস হিস্ট্রি"</span> ট্যাবে পাবেন</div>
               </div>
 
-              {/* ── 🩺 Sync Diagnostics — ৪টা windowing ফিচার (stockMovements/txns/
-                  cashLogs/Invoice History pagination) এক ক্লিকে নিজে থেকে চেক করে ── */}
+              {/* ── 🩺 ফুল অ্যাপ চেকআপ — কানেকশন, স্টাফ পারমিশন সিঙ্ক, ডেটা
+                  ইন্টেগ্রিটি, লোকাল স্টোরেজ, ব্যাকআপ/হেলথ ও পুরনো windowing
+                  ফিচারগুলো (stockMovements/txns/cashLogs/Invoice History)
+                  এক ক্লিকে নিজে থেকে যাচাই করে ── */}
               <div style={{ marginBottom:10, borderRadius:10, border:"1px solid #38bdf844", background:"#38bdf80f", padding:"10px 11px" }}>
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:6 }}>
                     <span style={{ fontSize:13 }}>🩺</span>
-                    <span style={{ color:"#38bdf8", fontWeight:800, fontSize:10.5 }}>সিঙ্ক ডায়াগনস্টিকস</span>
+                    <span style={{ color:"#38bdf8", fontWeight:800, fontSize:10.5 }}>ফুল অ্যাপ চেকআপ</span>
                   </div>
                   <button
                     onClick={runSyncDiagnostics}
                     disabled={syncDiag?.running}
                     style={{ background:"#38bdf822", border:"1px solid #38bdf855", borderRadius:7, padding:"5px 11px", color:"#38bdf8", fontSize:9.5, fontWeight:800, cursor: syncDiag?.running ? "not-allowed" : "pointer", fontFamily:"inherit", opacity: syncDiag?.running ? 0.6 : 1 }}
                   >
-                    {syncDiag?.running ? "চলছে..." : "▶ চালান"}
+                    {syncDiag?.running ? "চলছে..." : "▶ ফুল চেকাপ চালান"}
                   </button>
                 </div>
                 {!syncDiag && (
-                  <div style={{ color:"#94a3b8", fontSize:9.5 }}>stockMovements / txns / cashLogs windowing, Invoice History pagination — এই ৪টা ফিচার নিজে থেকে টেস্ট করতে "চালান" চাপুন।</div>
+                  <div style={{ color:"#94a3b8", fontSize:9.5 }}>সিঙ্ক কানেকশন, স্টাফ পারমিশন, ডেটা ইন্টেগ্রিটি, লোকাল স্টোরেজ, ব্যাকআপ/হেলথ ও windowing ফিচার — সবকিছু এক ক্লিকে যাচাই করতে "ফুল চেকাপ চালান" চাপুন।</div>
                 )}
                 {syncDiag?.checks && (() => {
                   const groups = {};
