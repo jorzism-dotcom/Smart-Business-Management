@@ -22513,10 +22513,13 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
   // 🔴 ডিবাগ হেল্পার — native plugin call কখনো hang করলে (কখনো resolve/reject
   // না হলে) বাটন চাপ দেওয়ার পরেও কিছুই দেখা যায় না, একদম silent থেকে যায়।
   // এই টাইমআউট-রেস দিয়ে তা ধরা পড়বে ও alert-এ জানা যাবে।
-  const withTimeout = (promise, ms, label) => Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} — ${ms/1000}s এর মধ্যে সাড়া দেয়নি (plugin hang)`)), ms)),
-  ]);
+  const withTimeout = (promise, ms, label) => {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} — ${ms/1000}s এর মধ্যে সাড়া দেয়নি (plugin hang)`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  };
 
   const sendTestNotif = async () => {
     const sum = buildSummary();
@@ -22553,6 +22556,130 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
       try { showToast("নোটিফিকেশন পাঠানো যায়নি: " + (e?.message || e), "#ef4444"); } catch {}
       try { window.alert("টেস্ট নোটিফিকেশন এরর (id=" + freshId + "): " + (e?.message || e) + "\n\n💓 " + hbReport + "\n\n📋 টাইমিং লগ:\n" + log); } catch {}
     }
+  };
+
+  // 🩺 সম্পূর্ণ ডায়াগনস্টিক — একটা বাটনে সব সম্ভাব্য কারণ একসাথে টেস্ট করে, যাতে বারবার
+  // বিল্ড-টেস্ট-বিল্ড করার দরকার না পড়ে। এটা যা যা চেক করে:
+  //   ১. Capacitor bridge নিজেই কাজ করছে কিনা (App.getInfo() — LocalNotifications-এর
+  //      সাথে সম্পর্কহীন একটা আলাদা প্লাগইন, যদি এটাও hang করে তাহলে বোঝা যাবে সমস্যা
+  //      পুরো bridge-এ, শুধু এক প্লাগইনে না)
+  //   ২. _getLocalNotif() কোন পথে যাচ্ছে (sync proxy নাকি dynamic import) ও কতক্ষণে
+  //   ৩. checkPermissions(), getPending()
+  //   ৪. minimal payload schedule() বনাম full payload (largeBody/summaryText সহ)
+  //      schedule() — দুটো আলাদা ID দিয়ে, যাতে largeBody/summaryText আসল সমস্যা কিনা ধরা পড়ে
+  //   ৫. ৬ সেকেন্ড পর getDeliveredNotifications() দিয়ে OS আসলেই দেখিয়েছিল কিনা কনফার্ম
+  //   ৬. পুরো সময়ে JS main-thread ফ্রিজ হয়েছিল কিনা (heartbeat)
+  //   ৭. একই সময়ে একাধিক sendTestNotif/diagnostic কল ওভারল্যাপ করছে কিনা (concurrency guard)
+  //   ৮. কোনো ধরা-না-পড়া JS error/promise rejection ব্যাকগ্রাউন্ডে ঘটেছে কিনা
+  // সব ফলাফল একটামাত্র রিপোর্টে — এটা copy/screenshot করে পাঠালেই আসল কারণ নিশ্চিতভাবে বোঝা যাবে।
+  const runFullDiagnostic = async () => {
+    if (window.__diagRunning) {
+      window.alert("⚠️ একটা ডায়াগনস্টিক ইতিমধ্যে চলছে — সেটা শেষ হওয়া পর্যন্ত অপেক্ষা করুন।");
+      return;
+    }
+    window.__diagRunning = true;
+    window.__notifCallDepth = (window.__notifCallDepth || 0) + 1;
+    const myDepth = window.__notifCallDepth;
+
+    const t0 = Date.now();
+    const report = [];
+    const log = (msg) => { report.push(`[+${Date.now() - t0}ms] ${msg}`); };
+
+    window.__diagErrors = [];
+    const errHandler = (e) => { try { window.__diagErrors.push(`window.error: ${e.message}`); } catch {} };
+    const rejHandler = (e) => { try { window.__diagErrors.push(`unhandledrejection: ${e.reason?.message || e.reason}`); } catch {} };
+    window.addEventListener("error", errHandler);
+    window.addEventListener("unhandledrejection", rejHandler);
+
+    const withT = (p, ms) => {
+      let timer;
+      const to = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`${ms / 1000}s টাইমআউট`)), ms); });
+      return Promise.race([p, to]).finally(() => clearTimeout(timer));
+    };
+
+    log(`🩺 ডায়াগনস্টিক শুরু — concurrent depth=${myDepth}${myDepth > 1 ? " ⚠️ একাধিক কল একসাথে চলছে, ফলাফল অবিশ্বাস্য হতে পারে!" : ""}`);
+    log(`env: isNativePlatform=${window.Capacitor?.isNativePlatform?.()}, Plugins.LocalNotifications sync আছে=${!!window.Capacitor?.Plugins?.LocalNotifications}`);
+    if (window.performance?.memory) {
+      const m = window.performance.memory;
+      log(`JS heap: ${(m.usedJSHeapSize / 1048576).toFixed(1)}MB ব্যবহৃত / ${(m.jsHeapSizeLimit / 1048576).toFixed(1)}MB সীমা`);
+    }
+
+    // ১. bridge sanity — সম্পূর্ণ আলাদা প্লাগইন
+    try {
+      const s = Date.now();
+      await withT(window.Capacitor.Plugins.App.getInfo(), 5000);
+      log(`✅ App.getInfo() — ${Date.now() - s}ms — Capacitor bridge সচল`);
+    } catch (e) { log(`❌ App.getInfo() ব্যর্থ (${e.message}) — পুরো bridge-ই সমস্যায় থাকতে পারে!`); }
+
+    // ২. প্লাগইন resolve
+    let LN = null;
+    try {
+      const s = Date.now();
+      LN = await withT(Notif._getLocalNotif(), 5000);
+      log(`✅ _getLocalNotif() — ${Date.now() - s}ms`);
+    } catch (e) { log(`❌ _getLocalNotif() ব্যর্থ (${e.message})`); }
+
+    if (LN) {
+      // ৩. checkPermissions
+      try {
+        const s = Date.now();
+        const r = await withT(LN.checkPermissions(), 5000);
+        log(`✅ checkPermissions() — ${Date.now() - s}ms — ${JSON.stringify(r)}`);
+      } catch (e) { log(`❌ checkPermissions() ব্যর্থ (${e.message})`); }
+
+      // ৪. getPending (আগে)
+      try {
+        const s = Date.now();
+        const r = await withT(LN.getPending(), 5000);
+        log(`✅ getPending() — ${Date.now() - s}ms — ${r?.notifications?.length || 0}টা pending আছে (আগে থেকেই)`);
+      } catch (e) { log(`❌ getPending() ব্যর্থ (${e.message})`); }
+
+      // ৫. minimal payload schedule (ডিবাগ ৫ স্টাইল)
+      const minId = 8000 + (Date.now() % 900);
+      try {
+        const s = Date.now();
+        await withT(LN.schedule({ notifications: [{ id: minId, title: "ডায়াগনস্টিক (minimal)", body: "minimal payload টেস্ট", schedule: { at: new Date(Date.now() + 4000), allowWhileIdle: true } }] }), 5000);
+        log(`✅ schedule() minimal payload — ${Date.now() - s}ms — id=${minId}`);
+      } catch (e) { log(`❌ schedule() minimal payload ব্যর্থ (${e.message}) — id=${minId}`); }
+
+      // ৬. full payload schedule (largeBody/summaryText সহ, আসল কনটেন্ট)
+      const fullId = 8900 + (Date.now() % 900);
+      try {
+        const sum = buildSummary();
+        const { body, largeBody } = buildNotifContent(sum, "\n\n(ডায়াগনস্টিক)");
+        const s = Date.now();
+        await withT(LN.schedule({ notifications: [{ id: fullId, title: "ডায়াগনস্টিক (full)", body, largeBody, summaryText: "ডায়াগনস্টিক টেস্ট", schedule: { at: new Date(Date.now() + 4000), allowWhileIdle: true } }] }), 5000);
+        log(`✅ schedule() full payload (largeBody/summaryText সহ) — ${Date.now() - s}ms — id=${fullId}`);
+      } catch (e) { log(`❌ schedule() full payload ব্যর্থ (${e.message}) — id=${fullId}`); }
+
+      // ৭. অপেক্ষা করে OS কনফার্মেশন
+      log("৬ সেকেন্ড অপেক্ষা করা হচ্ছে (schedule fire হওয়ার জন্য)...");
+      await new Promise(r => setTimeout(r, 6000));
+      try {
+        const s = Date.now();
+        const r = await withT(LN.getDeliveredNotifications(), 5000);
+        const ids = (r?.notifications || []).map(n => n.id);
+        log(`✅ getDeliveredNotifications() — ${Date.now() - s}ms — delivered: [${ids.join(",")}]`);
+        log(`   → minimal(id=${minId}): ${ids.includes(minId) ? "✅ OS ট্রেতে দেখিয়েছে" : "❌ দেখায়নি"}`);
+        log(`   → full(id=${fullId}): ${ids.includes(fullId) ? "✅ OS ট্রেতে দেখিয়েছে" : "❌ দেখায়নি"}`);
+      } catch (e) { log(`❌ getDeliveredNotifications() ব্যর্থ (${e.message})`); }
+    } else {
+      log("⏭️ LN পাওয়া যায়নি — permission/schedule/delivered টেস্ট বাদ দেওয়া হলো");
+    }
+
+    // ৮. heartbeat + error capture + concurrency সারাংশ
+    log(`💓 ${getHeartbeatReport(30000)}`);
+    log(window.__diagErrors.length ? `⚠️ ক্যাপচার করা error: ${window.__diagErrors.join(" | ")}` : "✅ কোনো unhandled JS error/rejection ধরা পড়েনি");
+    log(`concurrent call depth শেষে=${window.__notifCallDepth} (শুরুতে ছিল ${myDepth})`);
+
+    window.removeEventListener("error", errHandler);
+    window.removeEventListener("unhandledrejection", rejHandler);
+    window.__notifCallDepth = Math.max(0, window.__notifCallDepth - 1);
+    window.__diagRunning = false;
+
+    const full = report.join("\n");
+    window.__fullDiagnosticReport = full;
+    window.alert("🩺 সম্পূর্ণ ডায়াগনস্টিক রিপোর্ট:\n\n" + full);
   };
 
   return (
@@ -22684,6 +22811,10 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
             style={{ width:"100%", background:"linear-gradient(135deg,#8b5cf6,#6d28d9,#4f46e5)", color:"#fff", border:"none", borderRadius:12, padding:"10px 0", fontWeight:900, fontSize:13, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", justifyContent:"center", gap:7, boxShadow:"0 4px 16px #7c3aed55" }}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
             টেস্ট নোটিফিকেশন পাঠান
+          </button>
+          <button onClick={runFullDiagnostic}
+            style={{ width:"100%", marginTop:8, background:"linear-gradient(135deg,#f59e0b,#dc2626)", color:"#fff", border:"none", borderRadius:12, padding:"11px 0", fontWeight:900, fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>
+            🩺 সম্পূর্ণ ডায়াগনস্টিক রিপোর্ট (একবারে সব টেস্ট, ~১৫ সেকেন্ড)
           </button>
           {/* 🔴 সাময়িক ডিবাগ বাটন — কোনো async/native কল নেই, শুধু sync alert().
               এটাতে চাপ দিলে যদি popup না আসে, বুঝতে হবে সমস্যা touch/rendering
