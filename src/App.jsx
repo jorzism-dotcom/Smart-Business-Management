@@ -5219,12 +5219,18 @@ function useStaffPermissionGuard(fssReady, loaded, setCurrentUser, setUsers) {
 
     // অ্যাপ প্রথম খোলার সময়ও একবার সার্ভার থেকে ঝালিয়ে নেওয়া — যাতে গত রাতে
     // অ্যাপ বন্ধ থাকা অবস্থায় হওয়া permission পরিবর্তনও সাথে সাথে ধরা পড়ে।
-    forceRefresh();
+    // 🔴 ফিক্স: এটা আগে mount-এই সাথে সাথে চলত — কিন্তু ঠিক তখনই boot-time
+    // two-wave IndexedDB লোডিং ও অন্যান্য effect-ও একসাথে চলছে থাকে, তাই
+    // বাড়তি নেটওয়ার্ক/CPU কাজ যোগ করলে অ্যাপ চালু হওয়ার মুহূর্তে (যেখানে
+    // ইউজার ইতিমধ্যে "নিজে থেকে কেঁপে ওঠা"-র মতো অস্থিরতা লক্ষ্য করেছেন)
+    // আরও চাপ পড়ে। ৪ সেকেন্ড দেরি করে বাকি boot কাজ থিতিয়ে যাওয়ার সুযোগ দেওয়া হলো।
+    const bootTimer = setTimeout(forceRefresh, 4000);
 
     return () => {
       document.removeEventListener("visibilitychange", onVisible);
       document.removeEventListener("online", forceRefresh);
       clearInterval(heartbeat);
+      clearTimeout(bootTimer);
       if (appListenerHandle) appListenerHandle.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -10217,15 +10223,25 @@ function SmartBusinessMgmt() {
   useEffect(() => { if (loaded) setBackupNeeded(true); }, [suppliers, purchaseOrders, stockMovements, cashLogs, expenses, returns, auditLogs, quotations, supplierPayments, paymentInvoices, loaded]);
 
   // 🖥️ Fix black screen on app resume/minimize (Capacitor WebView repaint bug)
+  // 🔴 ফিক্স: visibilitychange ও Capacitor resume — দুটো ইভেন্টই একসাথে/কাছাকাছি
+  // সময়ে fire করতে পারে (বিশেষত অ্যাপ ঠিক চালু হওয়ার মুহূর্তে WebView যখন
+  // repaint/resize events পাঠাতে থাকে), ফলে একাধিক opacity-toggle ওভারল্যাপ
+  // করে চোখে "কাঁপুনি/শেক"-এর মতো লাগতে পারত। এখন একটা ছোট debounce দিয়ে
+  // একাধিক কাছাকাছি-সময়ের ট্রিগারকে একটাতেই মিলিয়ে দেওয়া হয়।
   useEffect(() => {
+    let debounceTimer = null;
     const repaint = () => {
-      if (document.visibilityState === "visible") {
-        // Force a repaint by briefly toggling a CSS property
-        try {
-          document.body.style.opacity = "0.99";
-          requestAnimationFrame(() => { document.body.style.opacity = ""; });
-        } catch {}
-      }
+      if (debounceTimer) return; // ইতিমধ্যে একটা repaint শিডিউল করা আছে — আবার লাগবে না
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        if (document.visibilityState === "visible") {
+          // Force a repaint by briefly toggling a CSS property
+          try {
+            document.body.style.opacity = "0.99";
+            requestAnimationFrame(() => { document.body.style.opacity = ""; });
+          } catch {}
+        }
+      }, 250);
     };
     document.addEventListener("visibilitychange", repaint);
     // Also handle Capacitor resume event
@@ -10236,7 +10252,7 @@ function SmartBusinessMgmt() {
         }).catch(() => {});
       } catch {}
     }
-    return () => document.removeEventListener("visibilitychange", repaint);
+    return () => { document.removeEventListener("visibilitychange", repaint); if (debounceTimer) clearTimeout(debounceTimer); };
   }, []);
 
   // 🔴 ফিক্স (নোটিফিকেশন বন্ধ হয়ে যাওয়া): এখানে আগে একটা পুরনো/ডুপ্লিকেট
@@ -15239,7 +15255,7 @@ function InventorySection({ T, S, products, setDashModal, shopName, setInvModal,
                 animation: expiredBatches.length > 0 ? "cardBlinkRed 0.85s ease-in-out infinite" : "fadeUp 0.3s ease both",
                 cursor:"pointer", position:"relative", overflow:"hidden",
               }}
-              onClick={() => expiredBatches.length > 0 && setInvModal('expired')}>
+              onClick={() => setInvModal('expired')}>
               <div style={{ position:"absolute", bottom:-20, right:-20, width:70, height:70, borderRadius:"50%", background: DT.dark ? "radial-gradient(circle,#ef44441a 0%,transparent 70%)" : "rgba(255,255,255,0.10)" }} />
               <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:8 }}>
                 <div style={{ background: DT.dark ? "#ef444418" : "rgba(255,255,255,0.22)", border: DT.dark ? "1px solid #ef444433" : "1px solid rgba(255,255,255,0.3)", borderRadius:9, padding:"5px 7px" }}>
@@ -15263,7 +15279,7 @@ function InventorySection({ T, S, products, setDashModal, shopName, setInvModal,
                 animation: nearExpiryBatches.length > 0 ? "cardBlinkAmber 0.85s ease-in-out infinite" : "fadeUp 0.3s ease both",
                 cursor:"pointer", position:"relative", overflow:"hidden",
               }}
-              onClick={() => nearExpiryBatches.length > 0 && setInvModal('near-expiry')}>
+              onClick={() => setInvModal('near-expiry')}>
               <div style={{ position:"absolute", bottom:-20, right:-20, width:70, height:70, borderRadius:"50%", background: DT.dark ? "radial-gradient(circle,#f59e0b1a 0%,transparent 70%)" : "rgba(255,255,255,0.10)" }} />
               <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:8 }}>
                 <div style={{ background: DT.dark ? "#f59e0b18" : "rgba(255,255,255,0.22)", border: DT.dark ? "1px solid #f59e0b33" : "1px solid rgba(255,255,255,0.3)", borderRadius:9, padding:"5px 7px" }}>
@@ -15888,6 +15904,14 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
   const [voidConfirm, setVoidConfirm] = useState(null);
   // ── মেয়াদোত্তীর্ণ পণ্য → দোকান থেকে সরালে অ্যাপ থেকেও সরানোর ব্যবস্থা ──────────
   const [expRemoveConfirm, setExpRemoveConfirm] = useState(null); // { product, batch }
+  const [expRemoveSubmitting, setExpRemoveSubmitting] = useState(false);
+  // 🔴 ফিক্স: touchscreen-এ দ্রুত ডাবল-ট্যাপ করলে (বা কোনো কারণে দুইবার ইভেন্ট
+  // fire করলে) removeExpiredBatch() দুইবার চলে একই ব্যাচের জন্য দুইটা আলাদা
+  // stockMovement (source: "expired_removal") রেকর্ড তৈরি করে ফেলত — ফলে
+  // মাসিক মেয়াদোত্তীর্ণ হিসাবে সংখ্যা/মূল্য দ্বিগুণ (ভুলভাবে "বেশি পণ্য সরানো
+  // হয়েছে") দেখাত, যদিও বাস্তবে দোকান/স্টকে একবারই সরানো হয়েছিল। এই ref দিয়ে
+  // একই ব্যাচের জন্য কয়েক সেকেন্ডের মধ্যে দ্বিতীয়বার কল ব্লক করা হয়।
+  const expRemoveInFlight = useRef(new Set());
   const [expRemoveToast,   setExpRemoveToast]   = useState(null);
   // মাসিক মেয়াদোত্তীর্ণ হিসাব — নির্দিষ্ট মাসের জন্য (Firestore থাকলে) সম্পূর্ণ ইতিহাস আনা হয়, নাহলে লোকাল stockMovements থেকে
   const [expMonthlyFetch, setExpMonthlyFetch] = useState({ key: null, rows: null });
@@ -15909,6 +15933,10 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
 
   // দোকান থেকে সরানো হয়েছে → অ্যাপ থেকেও ব্যাচ/স্টক সরানো + স্টক-মুভমেন্ট লগ (মাসিক হিসাবের উৎস)
   const removeExpiredBatch = (product, batch) => {
+    const batchKey = `${product.id}::${batch.batchNo || ""}::${batch.expiryDate || ""}`;
+    if (expRemoveInFlight.current.has(batchKey)) return; // ইতিমধ্যে প্রসেস হচ্ছে/হয়েছে — দ্বিতীয়বার আটকানো
+    expRemoveInFlight.current.add(batchKey);
+    setTimeout(() => expRemoveInFlight.current.delete(batchKey), 8000); // ৮ সেকেন্ড পর lock ছেড়ে দাও
     const qty   = batch.qty || 0;
     const value = Math.round(qty * (batch.costPrice || 0) * 100) / 100;
     const dateKey = todayEn(); // GMT+6 (BD) অনুযায়ী আজকের dateKey
@@ -16691,13 +16719,14 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
             পণ্যটি দোকান থেকে সরিয়ে ফেলে থাকলে নিশ্চিত করুন — এই ব্যাচ স্টক থেকে স্থায়ীভাবে বাদ যাবে এবং মাসিক মেয়াদোত্তীর্ণ হিসাবে যোগ হবে। এই কাজ ফিরিয়ে নেওয়া যাবে না।
           </div>
           <div style={{ display:"flex", gap:10 }}>
-            <button onClick={() => setExpRemoveConfirm(null)}
-              style={{ flex:1, background:"#ffffff18", border:"1px solid #ffffff33", borderRadius:12, padding:"13px", color:"#fff", fontWeight:800, fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>
+            <button onClick={() => setExpRemoveConfirm(null)} disabled={expRemoveSubmitting}
+              style={{ flex:1, background:"#ffffff18", border:"1px solid #ffffff33", borderRadius:12, padding:"13px", color:"#fff", fontWeight:800, fontSize:13, cursor: expRemoveSubmitting ? "default" : "pointer", fontFamily:"inherit", opacity: expRemoveSubmitting ? 0.5 : 1 }}>
               বাতিল
             </button>
-            <button onClick={() => removeExpiredBatch(product, batch)}
-              style={{ flex:1, background:"linear-gradient(135deg,#dc2626,#ef4444)", border:"none", borderRadius:12, padding:"13px", color:"#fff", fontWeight:900, fontSize:13, cursor:"pointer", fontFamily:"inherit", boxShadow:"0 4px 14px rgba(239,68,68,0.4)" }}>
-              ✅ নিশ্চিত, সরান
+            <button disabled={expRemoveSubmitting}
+              onClick={() => { if (expRemoveSubmitting) return; setExpRemoveSubmitting(true); removeExpiredBatch(product, batch); }}
+              style={{ flex:1, background:"linear-gradient(135deg,#dc2626,#ef4444)", border:"none", borderRadius:12, padding:"13px", color:"#fff", fontWeight:900, fontSize:13, cursor: expRemoveSubmitting ? "default" : "pointer", fontFamily:"inherit", boxShadow:"0 4px 14px rgba(239,68,68,0.4)", opacity: expRemoveSubmitting ? 0.6 : 1 }}>
+              {expRemoveSubmitting ? "⏳ সরানো হচ্ছে..." : "✅ নিশ্চিত, সরান"}
             </button>
           </div>
         </div>
@@ -16872,7 +16901,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
                       {currentUser?.role !== "staff" && (
                         <td style={{ padding:"9px 6px", textAlign:"center", borderBottom:"1px solid #f1f5f9" }}>
                           <button
-                            onClick={() => setExpRemoveConfirm({ product: p, batch: b })}
+                            onClick={() => { setExpRemoveSubmitting(false); setExpRemoveConfirm({ product: p, batch: b }); }}
                             title={`দোকান থেকে সরিয়ে ফেলেছেন? অ্যাপ থেকেও সরান ${b.batchNo ? `(${b.batchNo})` : ""}`}
                             style={{ display:"flex", alignItems:"center", justifyContent:"center", width:26, height:26, background:"#ef444414", border:"1px solid #ef444440", borderRadius:8, color:"#dc2626", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>
                             🗑️
@@ -16988,7 +17017,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
                       <div style={{ marginTop:8, display:"flex", flexDirection:"column", gap:5 }}>
                         {expBatches.map((b, bi) => (
                           <button key={bi}
-                            onClick={() => setExpRemoveConfirm({ product: p, batch: b })}
+                            onClick={() => { setExpRemoveSubmitting(false); setExpRemoveConfirm({ product: p, batch: b }); }}
                             style={{ display:"flex", alignItems:"center", justifyContent:"space-between", background:"#ef444414", border:"1px solid #ef444440", borderRadius:10, padding:"7px 10px", color:"#f87171", fontSize:11, fontWeight:800, cursor:"pointer", fontFamily:"inherit" }}>
                             <span>🗑️ দোকান থেকে সরানো হয়েছে — অ্যাপ থেকেও সরান {b.batchNo ? `(${b.batchNo})` : ""}</span>
                             <span>{b.qty}{p.unit||""} · ৳{fmt(Math.round((b.qty||0)*(b.costPrice||0)))}</span>
