@@ -2431,22 +2431,31 @@ const getHeartbeatReport = (windowMs = 15000) => {
 const Notif = {
   _localNotif: null,
   _importFailed: false,
+  // 🎯 আসল root cause পাওয়া গেছে (সম্পূর্ণ ডায়াগনস্টিক রিপোর্ট থেকে):
+  //   unhandledrejection: "LocalNotifications.then()" is not implemented on android
+  // ব্যাখ্যা: window.Capacitor.Plugins.LocalNotifications একটা Proxy — এর যেকোনো
+  // প্রপার্টি অ্যাক্সেসকেই এটা native মেথড কল হিসেবে ধরে নেয়। এই ফাংশনটা যখন async
+  // হিসেবে সরাসরি সেই Proxy অবজেক্টটা `return` করত, তখন JS-এর নিজস্ব async/await
+  // মেকানিজম রিটার্ন-করা ভ্যালুতে thenable কিনা যাচাই করতে `.then` প্রপার্টি অ্যাক্সেস
+  // করে — আর সেটাই Proxy-কে বিভ্রান্ত করে "then" নামে একটা (অস্তিত্বহীন) native মেথড
+  // কল ট্রিগার করে দেয়, যেটা Android কখনো resolve/reject করে না। ফলে এই ফাংশনের
+  // নিজের promise-ই কখনো settle হতো না — এটাই এতদিনের সব "plugin hang" এর আসল কারণ।
+  // ফিক্স: Proxy-টাকে একটা প্লেইন অবজেক্টে মুড়ে রিটার্ন করা হচ্ছে ({ plugin }), যাতে
+  // await/Promise.resolve() কখনো Proxy-র `.then`-এ হাত না দেয়।
   async _getLocalNotif() {
     if (Notif._localNotif) {
       try { window.__notifLog?.push?.(`[+?ms] _getLocalNotif(): cache hit`); } catch {}
-      return Notif._localNotif;
+      return { plugin: Notif._localNotif };
     }
     // ১. আগে registered global plugin চেক করি (build এ ESM import bundle না হলেও এটা কাজ করতে পারে)
     if (window.Capacitor?.Plugins?.LocalNotifications) {
       try { window.__notifLog?.push?.(`[+?ms] _getLocalNotif(): window.Capacitor.Plugins.LocalNotifications থেকে সরাসরি পাওয়া গেছে (sync path)`); } catch {}
       Notif._localNotif = window.Capacitor.Plugins.LocalNotifications;
-      return Notif._localNotif;
+      return { plugin: Notif._localNotif };
     }
     // 🔴 ফিক্স — window.Capacitor.Plugins.LocalNotifications ওই মুহূর্তে undefined থাকলে
     // আগে সরাসরি dynamic import("@capacitor/local-notifications") চেষ্টা হতো, কোনো
-    // timeout guard ছাড়াই — টাইমিং লগে দেখা গেছে ঠিক এখানেই send() কখনো কখনো চিরকাল
-    // আটকে থাকে (এমনকি schedule() পর্যন্ত পৌঁছানোরও আগে)। এখন এই dynamic import-ও
-    // ৩ সেকেন্ডের মধ্যে সাড়া না দিলে স্পষ্ট error থ্রো করবে, নিঃশব্দে hang করবে না।
+    // timeout guard ছাড়াই — timeout guard যোগ করা আছে, hang করলে স্পষ্ট error থ্রো করবে।
     try { window.__notifLog?.push?.(`[+?ms] _getLocalNotif(): window.Capacitor.Plugins.LocalNotifications পাওয়া যায়নি — dynamic import() চেষ্টা হচ্ছে`); } catch {}
     if (!Notif._importFailed) {
       try {
@@ -2456,7 +2465,7 @@ const Notif = {
         ]);
         try { window.__notifLog?.push?.(`[+?ms] _getLocalNotif(): dynamic import() সফল`); } catch {}
         Notif._localNotif = LocalNotifications;
-        return LocalNotifications;
+        return { plugin: LocalNotifications };
       } catch (e) {
         Notif._importFailed = true;
         try { window.__notifLog?.push?.(`[+?ms] _getLocalNotif(): dynamic import() ব্যর্থ/timeout — ${e?.message || e}`); } catch {}
@@ -2479,7 +2488,7 @@ const Notif = {
     };
     if (info.isNative) {
       try {
-        const LocalNotifications = await Notif._getLocalNotif();
+        const { plugin: LocalNotifications } = await Notif._getLocalNotif();
         const r = await LocalNotifications.checkPermissions();
         info.capacitorCheckResult = r;
       } catch(e) {
@@ -2499,7 +2508,7 @@ const Notif = {
   // null রিটার্ন করে (মানে জানা যাচ্ছে না, ধরে নিচ্ছি সমস্যা নেই)।
   async checkExactAlarmPermission() {
     try {
-      const LocalNotifications = await Notif._getLocalNotif();
+      const { plugin: LocalNotifications } = await Notif._getLocalNotif();
       if (typeof LocalNotifications.checkExactNotificationSetting !== "function") return null;
       const r = await LocalNotifications.checkExactNotificationSetting();
       // ডকুমেন্টেশন অনুযায়ী রিটার্ন { exact_alarm: "granted" | "denied" }
@@ -2513,7 +2522,7 @@ const Notif = {
   // ব্যবহারকারীকে সরাসরি Android-এর "Exact Alarm" সেটিংস স্ক্রিনে পাঠানো
   async openExactAlarmSettings() {
     try {
-      const LocalNotifications = await Notif._getLocalNotif();
+      const { plugin: LocalNotifications } = await Notif._getLocalNotif();
       if (typeof LocalNotifications.changeExactNotificationSetting !== "function") return false;
       await LocalNotifications.changeExactNotificationSetting();
       return true;
@@ -2527,7 +2536,7 @@ const Notif = {
   async checkPermission() {
     if (window.Capacitor?.isNativePlatform()) {
       try {
-        const LocalNotifications = await Notif._getLocalNotif();
+        const { plugin: LocalNotifications } = await Notif._getLocalNotif();
         const { display } = await LocalNotifications.checkPermissions();
         return display === "granted";
       } catch(e) {
@@ -2547,7 +2556,7 @@ const Notif = {
   async requestPermission() {
     if (window.Capacitor?.isNativePlatform()) {
       try {
-        const LocalNotifications = await Notif._getLocalNotif();
+        const { plugin: LocalNotifications } = await Notif._getLocalNotif();
         // আগে চেক করি, ইতিমধ্যে দেওয়া থাকলে আবার চাওয়ার দরকার নেই
         const existing = await LocalNotifications.checkPermissions();
         if (existing.display === "granted") return true;
@@ -2575,7 +2584,7 @@ const Notif = {
   async getPending() {
     try {
       if (window.Capacitor?.isNativePlatform()) {
-        const LocalNotifications = await Notif._getLocalNotif();
+        const { plugin: LocalNotifications } = await Notif._getLocalNotif();
         const { notifications } = await LocalNotifications.getPending();
         return notifications || [];
       }
@@ -2600,7 +2609,7 @@ const Notif = {
     const notifLog = (msg) => { try { window.__notifLog.push(`[+${Date.now() - _t0}ms] ${msg}`); } catch {} };
     if (window.Capacitor?.isNativePlatform()) {
       notifLog("native platform — _getLocalNotif() কল করা হচ্ছে");
-      const LocalNotifications = await Notif._getLocalNotif();
+      const { plugin: LocalNotifications } = await Notif._getLocalNotif();
       notifLog("_getLocalNotif() সাড়া দিয়েছে");
       let schedule;
       if (repeatDailyAt) {
@@ -9891,7 +9900,7 @@ function SmartBusinessMgmt() {
     (async () => {
       try {
         if (!window.Capacitor?.isNativePlatform()) return;
-        const LocalNotifications = await Notif._getLocalNotif();
+        const { plugin: LocalNotifications } = await Notif._getLocalNotif();
         if (!LocalNotifications) return;
 
         const cancelIds = Array.from({ length: NOTIF_MAX_TIMES }, (_, i) => ({ id: NOTIF_ID_BASE + i }));
@@ -22408,7 +22417,7 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
   const cancelAllScheduled = async () => {
     try {
       if (window.Capacitor?.isNativePlatform()) {
-        const LocalNotifications = await Notif._getLocalNotif();
+        const { plugin: LocalNotifications } = await Notif._getLocalNotif();
         // 🔴 ফিক্স — এই কলে আগে কোনো timeout guard ছিল না। এই প্লাগইনের অন্য সব native
         // কল (schedule/checkPermissions/getPending) এই ডিভাইসে hang করতে প্রমাণিত, তাই
         // cancel()-ও একই ঝুঁকিতে থাকতে পারে — hang করলে এই কলটাই পুরো rescheduleAll-কে
@@ -22615,7 +22624,8 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
     let LN = null;
     try {
       const s = Date.now();
-      LN = await withT(Notif._getLocalNotif(), 5000);
+      const r = await withT(Notif._getLocalNotif(), 5000);
+      LN = r.plugin;
       log(`✅ _getLocalNotif() — ${Date.now() - s}ms`);
     } catch (e) { log(`❌ _getLocalNotif() ব্যর্থ (${e.message})`); }
 
