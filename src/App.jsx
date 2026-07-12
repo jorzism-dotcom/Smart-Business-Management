@@ -3,7 +3,7 @@ import ReactDOM from "react-dom";
 import { initializeApp, getApps, deleteApp } from "firebase/app";
 import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
 import {
-  getFirestore, doc, getDoc, updateDoc, setDoc, deleteDoc,
+  getFirestore, doc, getDoc, getDocFromServer, updateDoc, setDoc, deleteDoc,
   collection, onSnapshot, getDocs, enableIndexedDbPersistence,
   query, where, orderBy, limit, startAfter, increment, runTransaction,
   writeBatch,
@@ -4749,6 +4749,27 @@ const FSS = {
     return unsub;
   },
 
+  // 🔴 ফিক্স: Android/Capacitor WebView-তে অ্যাপ দীর্ঘক্ষণ background-এ থাকলে
+  // onSnapshot listener-এর underlying network connection নীরবে মরে যায় —
+  // Firestore SDK নিজে থেকে reconnect করলেও কখনো কখনো foreground-এ ফেরার পর
+  // (App resume/visibilitychange) সেই listener stale/cache-bound থেকে যায়,
+  // ফলে অ্যাডমিন Firestore-এ permission বদলালেও স্টাফের ডিভাইস তা দেখতে পায় না
+  // (UI বলে "সিঙ্ক হয়েছে" কিন্তু আসলে cache-এর পুরনো ডেটা দেখাচ্ছে)।
+  // এই হেল্পার একটামাত্র ডকুমেন্ট সরাসরি সার্ভার থেকে (cache এড়িয়ে) পড়ে —
+  // পুরো users collection re-fetch করলে useFSSCollection-এর local→remote
+  // push effect নতুন array reference দেখে অকারণে সব রেকর্ড আবার Firestore-এ
+  // write করত (echo loop) — একটামাত্র ডকুমেন্ট পড়ে সরাসরি currentUser-এ বসালে
+  // সেই সমস্যা এড়ানো যায়।
+  async forceRefreshDoc(name, id) {
+    if (!this._db || !id) return null;
+    try {
+      const snap = await getDocFromServer(doc(this._db, name, String(id)));
+      return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+    } catch (e) {
+      return null; // অফলাইন বা নেটওয়ার্ক নেই — onSnapshot cache দিয়ে কাজ চলতে থাকুক
+    }
+  },
+
   subscribeSettings(callback) {
     if (!this._db) return () => {};
     this.unsubscribe("__settings");
@@ -5129,6 +5150,108 @@ function useFSSCollection(name, value, setValue, ready, opts = {}) {
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, ready]);
+}
+
+// ─── 🛡️ useStaffPermissionGuard ─────────────────────────────────────────────
+// স্বয়ংসম্পূর্ণ (self-contained) সেফটি-নেট: onSnapshot listener কোনো কারণে
+// silently মরে গেলেও (Android/Capacitor WebView-তে দীর্ঘক্ষণ background থাকার
+// পর প্রায়ই ঘটে) স্টাফের ডিভাইস যেন সবসময়, যেকোনো পরিস্থিতিতে, একটা না একটা
+// পথে সার্ভারের আসল permission ডেটা পেয়ে যায় — তার জন্য একাধিক স্বাধীন ট্রিগার:
+//   ১. onSnapshot (App()-এর useFSSCollection("users",...) — নিয়মিত/primary)
+//   ২. app resume / visibilitychange (ফোন lock খুলে অ্যাপে ফেরার মুহূর্তে)
+//   ৩. window "online" (নেট বিচ্ছিন্ন হয়ে আবার ফেরার মুহূর্তে)
+//   ৪. পর্যায়ক্রমিক heartbeat, প্রতি ৯০ সেকেন্ডে — উপরের কোনো ইভেন্টই যদি না
+//      ফায়ার করে (edge case), তাহলেও এটাই চূড়ান্ত সেফটি-নেট।
+// এই hook-টি ইচ্ছাকৃতভাবে App() কম্পোনেন্টের বাইরে, module-level এ রাখা হয়েছে —
+// যাতে ভবিষ্যতে App()-এর ভেতরে অন্য ফিচার নিয়ে কাজ করার সময় ভুলবশত এই
+// safety-net কোড স্পর্শ/নষ্ট না হয়। App()-এ শুধু একটা লাইনে কল হয়।
+function useStaffPermissionGuard(fssReady, loaded, setCurrentUser, setUsers) {
+  const lastRunRef = useRef(0);
+  useEffect(() => {
+    if (!loaded) return;
+    const forceRefresh = async () => {
+      const cu = useAppStore.getState().currentUser;
+      if (!cu || cu.role !== "staff") return;
+      if (!fssReady || !FSS._db) return;
+      const now = Date.now();
+      if (now - lastRunRef.current < 3000) return; // debounce — একসাথে একাধিক ট্রিগার একবারই কাজ করবে
+      lastRunRef.current = now;
+      const fresh = await FSS.forceRefreshDoc("users", cu.id);
+      if (!fresh) return; // অফলাইন/নেটওয়ার্ক নেই বা ডকুমেন্ট নেই — যা আছে তাই থাকুক, পরের ট্রিগারে আবার চেষ্টা হবে
+      setCurrentUser(prev => {
+        if (!prev || prev.role !== "staff" || prev.id !== fresh.id) return prev;
+        if (
+          JSON.stringify(fresh.tempPermissions || []) === JSON.stringify(prev.tempPermissions || []) &&
+          !!fresh.canAddProduct === !!prev.canAddProduct
+        ) return prev;
+        return { ...prev, tempPermissions: fresh.tempPermissions || [], canAddProduct: !!fresh.canAddProduct };
+      });
+      // অন্য admin-facing UI (যেমন StaffMgmtModule) যাতেও আপডেটেড ডেটা দেখায়,
+      // সেজন্য local users array-ও একইসাথে patch করা হয় — কিন্তু ডেটা সত্যিই
+      // ভিন্ন হলে তবেই, নাহলে useFSSCollection-এর local→remote push effect
+      // অকারণে একই ডেটা আবার Firestore-এ write করবে (echo)।
+      setUsers(prevUsers => {
+        const list = prevUsers || [];
+        const existing = list.find(u => u.id === fresh.id);
+        if (existing && JSON.stringify(existing) === JSON.stringify({ ...existing, ...fresh })) return list;
+        return list.map(u => (u.id === fresh.id ? { ...u, ...fresh } : u));
+      });
+    };
+
+    const onVisible = () => { if (document.visibilityState === "visible") forceRefresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    document.addEventListener("online", forceRefresh);
+
+    let appListenerHandle = null;
+    if (typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.()) {
+      import("@capacitor/app").then(({ App }) => {
+        appListenerHandle = App.addListener("resume", forceRefresh);
+      }).catch(() => {});
+    }
+
+    // চূড়ান্ত সেফটি-নেট — শুধু app visible থাকা অবস্থায়, প্রতি ৯০ সেকেন্ডে একবার।
+    // ব্যাটারি/নেটওয়ার্ক খরচ নগণ্য (একটা মাত্র ডকুমেন্ট read), কিন্তু নিশ্চিত করে
+    // যে কোনো এজ-কেসেও (কোনো resume/online ইভেন্ট না ফায়ার করলেও) স্টাফ কখনো
+    // ৯০ সেকেন্ডের বেশি stale permission নিয়ে থাকবে না।
+    const heartbeat = setInterval(() => {
+      if (document.visibilityState === "visible") forceRefresh();
+    }, 90000);
+
+    // অ্যাপ প্রথম খোলার সময়ও একবার সার্ভার থেকে ঝালিয়ে নেওয়া — যাতে গত রাতে
+    // অ্যাপ বন্ধ থাকা অবস্থায় হওয়া permission পরিবর্তনও সাথে সাথে ধরা পড়ে।
+    forceRefresh();
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("online", forceRefresh);
+      clearInterval(heartbeat);
+      if (appListenerHandle) appListenerHandle.remove();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, fssReady]);
+}
+
+// ─── 🛡️ verifyPermissionSync ────────────────────────────────────────────────
+// অ্যাডমিন-সাইড রাইট-কনফার্মেশন: শুধু local state বদলে "হয়েছে" টোস্ট দেখিয়ে
+// সন্তুষ্ট না থেকে, কিছুক্ষণ পর সরাসরি সার্ভার থেকে (cache এড়িয়ে) পড়ে সত্যিই
+// নিশ্চিত হয় যে পরিবর্তনটা Firestore-এ পৌঁছেছে কিনা। না পৌঁছালে নিজে থেকেই
+// আবার write-এর চেষ্টা করে (সর্বোচ্চ ৩ বার), এবং শেষ পর্যন্ত ব্যর্থ হলে
+// অ্যাডমিনকে স্পষ্টভাবে জানায় — যাতে "সিঙ্ক হয়েছে মনে হচ্ছিল কিন্তু আসলে হয়নি"
+// এই ক্লাসের বাগ ভবিষ্যতে আর কখনো নীরবে না ঘটে।
+async function verifyPermissionSync(userId, checkFn, buildRecord, showToast, label) {
+  if (!FSS._db) return; // Firestore সংযুক্ত না থাকলে (অফলাইন মোডে চলছে) — যাচাইয়ের প্রশ্নই নেই
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await new Promise(r => setTimeout(r, 1200));
+    const fresh = await FSS.forceRefreshDoc("users", userId);
+    if (fresh && checkFn(fresh)) {
+      if (attempt > 0) showToast?.(`✅ ${label} — Firestore-এ কনফার্ম হয়েছে`, "#22c55e");
+      return;
+    }
+    const rec = buildRecord();
+    if (rec) await FSS.setRecord("users", userId, rec); // আবার write করার চেষ্টা
+  }
+  showToast?.(`⚠️ ${label} — Firestore-এ এখনো কনফার্ম হয়নি (নেট/Rules চেক করুন)`, "#ef4444");
+  try { logErrorToCentral?.("permission-verify:" + userId, new Error("verify failed after retries")); } catch {}
 }
 
 // ─── useFSSSettings — shopName/smsTemplates/smsGateway ↔ firestore/settings/main ─
@@ -9930,6 +10053,12 @@ function SmartBusinessMgmt() {
       return { ...prev, tempPermissions: updated.tempPermissions || [], canAddProduct: !!updated.canAddProduct };
     });
   }, [users, loaded]);
+
+  // 🛡️ স্টাফ পারমিশন সিঙ্ক গার্ড — সম্পূর্ণ স্বয়ংসম্পূর্ণ (isolated) hook, নিচে
+  // module-level এ সংজ্ঞায়িত (useFSSCollection-এর পাশে)। ভবিষ্যতে App()-এর
+  // অন্য কোনো অংশে কোড পরিবর্তন হলেও এই একটি লাইনের বাইরে এটা স্পর্শ হওয়ার
+  // কোনো কারণ নেই — critical safety logic ইচ্ছাকৃতভাবে আলাদা রাখা হয়েছে।
+  useStaffPermissionGuard(fssReady, loaded, setCurrentUser, setUsers);
 
 
   useEffect(() => { if (loaded) { debouncedSave(SK.customers, customers, 1500); setBackupNeeded(true); } }, [customers, loaded]);
@@ -23591,11 +23720,18 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast })
                   {activePurchasePerm ? (
                     <button style={{ background:"#ef444415", border:"1px solid #ef444433", color:"#ef4444", borderRadius:7, padding:"4px 10px", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}
                       onClick={() => {
-                        setUsers(prev => prev.map(x => x.id === u.id ? {
-                          ...x,
-                          tempPermissions: (x.tempPermissions||[]).filter(p => p.key !== "purchase_entry")
-                        } : x));
+                        const updatedUser = { ...u, tempPermissions: (u.tempPermissions||[]).filter(p => p.key !== "purchase_entry") };
+                        setUsers(prev => prev.map(x => x.id === u.id ? updatedUser : x));
                         showToast(`${u.name}-এর ক্রয় এন্ট্রি অনুমতি বাতিল হয়েছে`, "#ef4444");
+                        // 🛡️ সার্ভারে সত্যিই পৌঁছেছে কিনা নিশ্চিত করা — নাহলে চুপচাপ ব্যর্থ হয়ে
+                        // স্টাফ আগের মতোই ক্রয় এন্ট্রি করতে পারবে (আগের যে বাগ হয়েছিল)
+                        verifyPermissionSync(
+                          u.id,
+                          (fresh) => !((fresh.tempPermissions || []).some(p => p.key === "purchase_entry")),
+                          () => updatedUser,
+                          showToast,
+                          `${u.name}-এর ক্রয় এন্ট্রি অনুমতি বাতিল`
+                        );
                       }}>
                       ✕ ক্রয় এন্ট্রি বাতিল
                     </button>
@@ -23603,14 +23739,22 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast })
                     <StaffCustomTimePicker
                       T={T} staffName={u.name}
                       onGrant={(expiresAt, label) => {
-                        setUsers(prev => prev.map(x => x.id === u.id ? {
-                          ...x,
+                        const updatedUser = {
+                          ...u,
                           tempPermissions: [
-                            ...((x.tempPermissions||[]).filter(p => p.key !== "purchase_entry")),
+                            ...((u.tempPermissions||[]).filter(p => p.key !== "purchase_entry")),
                             { key:"purchase_entry", expiresAt }
                           ]
-                        } : x));
+                        };
+                        setUsers(prev => prev.map(x => x.id === u.id ? updatedUser : x));
                         showToast(`${u.name}-কে ${label} ক্রয় এন্ট্রির অনুমতি দেওয়া হয়েছে`, "#22c55e");
+                        verifyPermissionSync(
+                          u.id,
+                          (fresh) => (fresh.tempPermissions || []).some(p => p.key === "purchase_entry" && p.expiresAt === expiresAt),
+                          () => updatedUser,
+                          showToast,
+                          `${u.name}-এর ক্রয় এন্ট্রি অনুমতি প্রদান`
+                        );
                       }}
                     />
                   )}
@@ -23628,8 +23772,16 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast })
                   }}
                   onClick={() => {
                     const next = !u.canAddProduct;
-                    setUsers(prev => prev.map(x => x.id === u.id ? { ...x, canAddProduct: next } : x));
+                    const updatedUser = { ...u, canAddProduct: next };
+                    setUsers(prev => prev.map(x => x.id === u.id ? updatedUser : x));
                     showToast(next ? `${u.name}-কে নতুন পণ্য যোগের অনুমতি দেওয়া হয়েছে` : `${u.name}-এর পণ্য যোগের অনুমতি বাতিল হয়েছে`, next ? "#22c55e" : "#ef4444");
+                    verifyPermissionSync(
+                      u.id,
+                      (fresh) => !!fresh.canAddProduct === next,
+                      () => updatedUser,
+                      showToast,
+                      `${u.name}-এর পণ্য যোগ অনুমতি`
+                    );
                   }}>
                   {u.canAddProduct ? "✕ পণ্য যোগ অনুমতি বাতিল করুন" : "✓ নতুন পণ্য যোগের অনুমতি দিন"}
                 </button>
