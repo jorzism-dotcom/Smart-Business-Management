@@ -11283,6 +11283,9 @@ function SmartBusinessMgmt() {
               expenses={expenses}
               cashFlow={cashFlow}
               fssReady={fssReady}
+              suppliers={suppliers}
+              setSuppliers={setSuppliers}
+              showToast={showToast}
               onGoToPurchaseEntry={() => { setDashModal({ type: "purchase-entry" }); }}
             />
           </ErrorBoundary>
@@ -14096,14 +14099,15 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
                         const lineDisc = Math.min(Math.max(parseFloat(item.itemDiscount) || 0, 0), lineSubtotal);
                         const mode = itemDiscMode[item.productId] || "pct";
                         const pctDisplay = lineSubtotal > 0 ? Math.round((lineDisc / lineSubtotal) * 10000) / 100 : 0;
+                        const lineNet = lineSubtotal - lineDisc;
                         return (
                           <div key={item.productId} style={{
                             display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8,
                             padding: "10px 8px",
-                            margin: "0 -8px",
+                            marginBottom: _idx < visibleItems.length - 1 ? 8 : 0,
                             borderRadius: 8,
                             background: _idx % 2 === 1 ? T.cardAlt : "transparent",
-                            borderBottom: _idx < visibleItems.length - 1 ? `2px solid ${T.border}` : "none",
+                            border: `1.5px solid ${T.border}`,
                           }}>
                             <div style={{ minWidth: 0, flex: 1 }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -14145,10 +14149,18 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
                               </div>
                             </div>
                             <div style={{ textAlign: "right", flexShrink: 0 }}>
-                              <div style={{ color: T.text, fontSize: 12, fontWeight: 700 }}>৳{fmt(lineSubtotal)}</div>
-                              <div style={{ color: T.sub, fontSize: 9.5 }}>@৳{fmt(item.price)}</div>
-                              {lineDisc > 0 && (
-                                <div style={{ color: "#22c55e", fontSize: 9.5, fontWeight: 700 }}>− ৳{fmt(lineDisc)}{pctDisplay > 0 ? ` (${pctDisplay}%)` : ""}</div>
+                              {lineDisc > 0 ? (
+                                <>
+                                  <div style={{ color: T.sub, fontSize: 10.5, textDecoration: "line-through" }}>৳{fmt(lineSubtotal)}</div>
+                                  <div style={{ color: T.sub, fontSize: 9.5 }}>@৳{fmt(item.price)}</div>
+                                  <div style={{ color: "#22c55e", fontSize: 9.5, fontWeight: 700 }}>− ৳{fmt(lineDisc)}{pctDisplay > 0 ? ` (${pctDisplay}%)` : ""}</div>
+                                  <div style={{ color: "#22c55e", fontSize: 13, fontWeight: 900, marginTop: 1 }}>= ৳{fmt(lineNet)}</div>
+                                </>
+                              ) : (
+                                <>
+                                  <div style={{ color: T.text, fontSize: 12, fontWeight: 700 }}>৳{fmt(lineSubtotal)}</div>
+                                  <div style={{ color: T.sub, fontSize: 9.5 }}>@৳{fmt(item.price)}</div>
+                                </>
                               )}
                             </div>
                           </div>
@@ -15628,12 +15640,15 @@ function DashPurchaseEntryModal({ T, S, products, setProducts, setStockMovements
 }
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
-function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTotal, todayInvs, setTab, txns, dashModal, setDashModal, invModal, setInvModal, cashModal, setCashModal, invoices, paymentInvoices, shopName, todayCashSale, todayProfit, products, purchaseOrders, voidInvoice, currentUser, onGoToPurchaseEntry, setProducts, setStockMovements, setPurchaseOrders, cashLogs, setCashLogs, reorderAlerts = [], expenses = [], cashFlow = null, fssReady = false }) {
+function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTotal, todayInvs, setTab, txns, dashModal, setDashModal, invModal, setInvModal, cashModal, setCashModal, invoices, paymentInvoices, shopName, todayCashSale, todayProfit, products, purchaseOrders, voidInvoice, currentUser, onGoToPurchaseEntry, setProducts, setStockMovements, setPurchaseOrders, cashLogs, setCashLogs, reorderAlerts = [], expenses = [], cashFlow = null, fssReady = false, suppliers = [], setSuppliers = () => {}, showToast = () => {} }) {
   const [viewInv,    setViewInv]    = useState(null);
   const [viewPayInv, setViewPayInv] = useState(null);
   const [listDate,   setListDate]   = useState(() => todayEn()); // YYYY-MM-DD
   // invModal is lifted to parent (SmartBusinessMgmt) for back-button support
   const [orderQtys,  setOrderQtys]  = useState({});
+  const [orderCosts, setOrderCosts] = useState({});
+  const [supplierPhoneInput, setSupplierPhoneInput] = useState("");
+  const [showPhoneEdit, setShowPhoneEdit] = useState(false);
   const [voidConfirm, setVoidConfirm] = useState(null);
   // product-profit-loss মডালের accordion state — Rules of Hooks: top-level এ রাখতে হবে
   const [expandedKeys, setExpandedKeys] = useState({});
@@ -15768,8 +15783,17 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
 
   // invModal 'order' থেকে বের হলে orderQtys রিসেট করো
   React.useEffect(() => {
-    if (invModal !== 'order') setOrderQtys({});
+    if (invModal !== 'order') { setOrderQtys({}); setOrderCosts({}); }
   }, [invModal]);
+  // সাপ্লায়ার ডিটেইলে ঢুকলে সেই সাপ্লায়ারের সেভ করা ফোন নম্বর ইনপুটে বসিয়ে দাও
+  React.useEffect(() => {
+    if (invModal && invModal.startsWith('order:supplier:')) {
+      const supName = invModal.replace('order:supplier:', '');
+      const rec = suppliers.find(s => s.name === supName);
+      setSupplierPhoneInput(rec?.phone || "");
+      setShowPhoneEdit(false);
+    }
+  }, [invModal, suppliers]);
   // ড্যাশমোডাল বন্ধ হলে (ফিরুন বাটন/ফোনের ব্যাক/নেভিগেশন হোম) ভেতরের ইনভয়েস-ভিউও বন্ধ হবে
   React.useEffect(() => {
     if (!dashModal) {
@@ -16623,16 +16647,103 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
       return urgB - urgA;
     });
 
+    // 🆕 সাপ্লায়ারের সেভ করা ফোন/WhatsApp নম্বর — real `suppliers` কালেকশন থেকে
+    const supplierPhone = (supName) => (suppliers.find(s => s.name === supName)?.phone || "").trim();
+    const saveSupplierPhone = (supName, phone) => {
+      const clean = (phone || "").trim();
+      setSuppliers(prev => {
+        const exists = prev.find(s => s.name === supName);
+        if (exists) return prev.map(s => s.name === supName ? { ...s, phone: clean } : s);
+        return [...prev, { id: "sup_" + Date.now(), name: supName, phone: clean, createdAt: new Date().toISOString() }];
+      });
+      showToast(clean ? "📞 ফোন নম্বর সেভ হয়েছে" : "ফোন নম্বর মুছে ফেলা হয়েছে", "#22c55e");
+      setShowPhoneEdit(false);
+    };
+
+    // 🆕 পেন্ডিং (পাঠানো কিন্তু এখনো রিসিভ হয়নি) ক্রয় অর্ডার
+    const pendingPOs = (purchaseOrders || []).filter(po => po._type === "po" && po.status === "sent")
+      .sort((a,b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+
     const buildOrderHtml = (items, qtys, supName) => {
       const orderedItems = items.filter(p => (qtys[p.id]||0) > 0);
       const displayItems = orderedItems.length > 0 ? orderedItems : items;
       const rows = displayItems.map((p, i) => `<tr><td class="serial">${i+1}</td><td>${p.name}</td><td class="num">${p.stock||0}${p.unit||""}</td><td class="num">${qtys[p.id]||0}</td></tr>`).join('');
       return buildPdfHtml(`<div class="section">${supName?`<h2>সাপ্লায়ার: ${supName}</h2>`:""}<table><thead><tr><th class="serial">#</th><th>পণ্যের নাম</th><th class="num">বর্তমান স্টক</th><th class="num">অর্ডার পরিমাণ</th></tr></thead><tbody>${rows}</tbody><tfoot><tr class="total-row"><td class="serial"></td><td colspan="2"><b>মোট পণ্য</b></td><td class="num">${displayItems.length}</td></tr></tfoot></table></div>`, shopName, `ক্রয় অর্ডার${supName?` — ${supName}`:""} — ${new Date().toLocaleDateString('en-US')}`);
     };
-    const sendWhatsApp = (items, qtys, supName) => {
-      const lines = items.map((p,i) => `${i+1}. ${p.name} — অর্ডার: ${qtys[p.id]||0} (স্টক: ${p.stock||0})`).join('\n');
-      window.open(`https://wa.me/?text=${encodeURIComponent(`ক্রয় অর্ডার${supName?` — ${supName}`:""}\n${shopName} · ${new Date().toLocaleDateString('en-US')}\n\n${lines}`)}`, '_blank');
+    const sendWhatsApp = (items, qtys, supName, phone) => {
+      const lines = items.filter(p=>(qtys[p.id]||0)>0).map((p,i) => `${i+1}. ${p.name} — অর্ডার: ${qtys[p.id]||0} (স্টক: ${p.stock||0})`).join('\n');
+      const target = (phone || "").replace(/[^0-9]/g, "");
+      const base = target ? `https://wa.me/${target}` : `https://wa.me/`;
+      window.open(`${base}?text=${encodeURIComponent(`ক্রয় অর্ডার${supName?` — ${supName}`:""}\n${shopName} · ${new Date().toLocaleDateString('en-US')}\n\n${lines}`)}`, '_blank');
     };
+
+    // 🆕 অর্ডার সেভ+ট্র্যাক — purchaseOrders-এ status:"sent" রেকর্ড তৈরি করে, orderQtys রিসেট করে
+    const savePOEntry = (items, qtys, supName) => {
+      const orderedItems = items.filter(p => (qtys[p.id]||0) > 0);
+      if (orderedItems.length === 0) return null;
+      const now = new Date().toISOString();
+      const entry = {
+        id: "po_" + Date.now(), _type: "po", status: "sent",
+        supplier: supName, supplierPhone: supplierPhone(supName),
+        items: orderedItems.map(p => ({
+          productId: p.id, name: p.name, qty: qtys[p.id], unit: p.unit || "",
+          stockAtOrder: p.stock || 0,
+          costPrice: parseFloat(orderCosts[p.id]) || p.costPrice || 0,
+        })),
+        totalQty: orderedItems.reduce((s,p) => s + (qtys[p.id]||0), 0),
+        createdAt: now, dateKey: now.split("T")[0], receivedAt: null,
+      };
+      setPurchaseOrders(prev => [entry, ...prev]);
+      setOrderQtys(q => { const n = { ...q }; orderedItems.forEach(p => delete n[p.id]); return n; });
+      setOrderCosts(c => { const n = { ...c }; orderedItems.forEach(p => delete n[p.id]); return n; });
+      showToast(`✅ ${supName} — ${entry.items.length}টি পণ্যের অর্ডার সেভ হয়েছে`, "#a78bfa");
+      return entry;
+    };
+
+    // 🆕 রিসিভ করুন — PO-এর প্রতিটি আইটেমের জন্য batch/stock/stockMovement তৈরি করে (DashPurchaseEntryModal-এর savePE লজিকের সাথে সামঞ্জস্যপূর্ণ)
+    const receiveOrder = (po) => {
+      if (!window.confirm(`"${po.supplier}"-এর ${po.items.length}টি পণ্যের অর্ডার রিসিভ করলে স্টক ও ব্যাচ সয়ংক্রিয়ভাবে আপডেট হবে। নিশ্চিত?`)) return;
+      const now = new Date().toISOString();
+      const dateKey = now.split("T")[0];
+      const newPEEntries = [];
+      const movements = [];
+      setProducts(prevProducts => {
+        let updated = prevProducts;
+        po.items.forEach(item => {
+          const prod = updated.find(p => p.id === item.productId);
+          if (!prod) return;
+          const oldStock = prod.stock || 0;
+          const oldCost  = prod.costPrice || 0;
+          const unitCost = item.costPrice || oldCost || 0;
+          const qty = item.qty || 0;
+          const newStock = oldStock + qty;
+          const newCostPrice = oldStock + qty > 0 ? (oldStock*oldCost + qty*unitCost)/(oldStock+qty) : unitCost;
+          const batchNo = calcNextBatch(item.productId, updated, purchaseOrders);
+          const newBatch = { batchNo, qty, costPrice: unitCost, sellPrice: prod.price||0, expiryDate:"", supplier: po.supplier, note:`ক্রয় অর্ডার #${po.id.slice(-6)} থেকে রিসিভ`, at: now, isFreeStock:false };
+          updated = updated.map(p => p.id === item.productId
+            ? { ...p, stock:newStock, costPrice: Math.round(newCostPrice*10000)/10000, lastUpdated: now, batches:[...(p.batches||[]), newBatch] }
+            : p);
+          newPEEntries.push({
+            id: "pe_" + Date.now() + "_" + item.productId, _type: "pe",
+            productId: item.productId, productName: item.name,
+            qty, unitCost, unitSell: prod.price||0, totalCost: qty*unitCost,
+            expiryDate: "", batch: batchNo, supplier: po.supplier,
+            note: `ক্রয় অর্ডার #${po.id.slice(-6)} থেকে রিসিভ`, isFreeStock:false,
+            at: now, dateKey, unit: prod.unit || "",
+          });
+          movements.push(pushStockMovement({
+            id: "sm_" + Date.now() + "_" + item.productId, productId: item.productId,
+            productName: item.name, stock:newStock, prevStock:oldStock, delta:qty,
+            at: now, dateKey, source: "purchase",
+          }));
+        });
+        return updated;
+      });
+      setStockMovements(prev => [...movements, ...prev]);
+      setPurchaseOrders(prev => [...newPEEntries, ...prev.map(p => p.id === po.id ? { ...p, status: "received", receivedAt: now } : p)]);
+      showToast(`✅ "${po.supplier}"-এর অর্ডার রিসিভ হয়েছে, স্টক আপডেট হয়েছে`, "#22c55e");
+    };
+
 
     // ── সাপ্লায়ার ডিটেইল: ক্রয় অর্ডার তৈরি ──
     if (isOrderSupplierDetail) {
@@ -16659,6 +16770,27 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
                 <div style={{ background:"linear-gradient(135deg,#1fd15e22,#1fd15e11)", border:"1px solid #1fd15e44", borderRadius:10, padding:"4px 10px", color:"#1fd15e", fontWeight:800, fontSize:12 }}>
                   {supOrderedCount}টি সিলেক্ট
                 </div>
+              )}
+            </div>
+            {/* 🆕 সাপ্লায়ারের WhatsApp/ফোন নম্বর — একবার সেভ করলে পরে সরাসরি সেই নম্বরে পাঠানো যাবে */}
+            <div style={{ marginTop:8 }}>
+              {showPhoneEdit ? (
+                <div style={{ display:"flex", gap:6 }}>
+                  <input
+                    type="tel" inputMode="tel" placeholder="যেমন: 01712345678"
+                    value={supplierPhoneInput} onChange={e=>setSupplierPhoneInput(e.target.value)}
+                    autoFocus
+                    style={{ flex:1, background:"#0a1f12", border:"1px solid #1fd15e44", borderRadius:8, padding:"6px 10px", color:"#e2e8f0", fontSize:12.5, fontFamily:"inherit" }} />
+                  <button onClick={()=>saveSupplierPhone(selectedOrderSupplier, supplierPhoneInput)}
+                    style={{ background:"#1fd15e", border:"none", borderRadius:8, color:"#04170b", fontWeight:800, fontSize:12, padding:"0 12px", cursor:"pointer", fontFamily:"inherit" }}>✓ সেভ</button>
+                  <button onClick={()=>setShowPhoneEdit(false)}
+                    style={{ background:"none", border:`1px solid ${T.border||"#334155"}`, borderRadius:8, color:"#64748b", fontSize:12, padding:"0 10px", cursor:"pointer", fontFamily:"inherit" }}>✕</button>
+                </div>
+              ) : (
+                <button onClick={()=>setShowPhoneEdit(true)}
+                  style={{ background:"none", border:"none", color: supplierPhoneInput ? "#22c55e" : "#64748b", fontSize:12, fontWeight:700, padding:0, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", gap:5 }}>
+                  📞 {supplierPhoneInput || "ফোন/WhatsApp নম্বর যোগ করুন"}
+                </button>
               )}
             </div>
           </div>
@@ -16697,6 +16829,18 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
                         <div style={{ marginLeft:"auto", background:"linear-gradient(135deg,#7c3aed,#5b21b6)", border:"1px solid #a78bfa55", borderRadius:12, padding:"10px 22px", color:"#fff", fontWeight:900, fontSize:20, minWidth:72, textAlign:"center", boxShadow:"0 4px 16px #7c3aed55", letterSpacing:1, flexShrink:0, lineHeight:1 }}>{qty}</div>
                       )}
                     </div>
+                    {/* 🆕 ক্রয়মূল্য — রিসিভ করার সময় সঠিক ব্যাচ কস্ট বসানোর জন্য, ডিফল্ট আগের ক্রয়মূল্য */}
+                    {isOrdered && (
+                      <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:8 }} onClick={e=>e.stopPropagation()}>
+                        <span style={{ color:"#64748b", fontSize:11, fontWeight:700 }}>ক্রয়মূল্য/একক:</span>
+                        <span style={{ color:"#64748b", fontSize:12 }}>৳</span>
+                        <input
+                          type="number" inputMode="decimal" placeholder={String(p.costPrice||0)}
+                          value={orderCosts[p.id] ?? ""}
+                          onChange={e=>setOrderCosts(c=>({...c,[p.id]:e.target.value}))}
+                          style={{ width:64, background:"#0a1f12", border:"1px solid #7c3aed44", borderRadius:6, padding:"3px 6px", color:"#e2e8f0", fontSize:12, fontFamily:"inherit" }} />
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -16706,12 +16850,22 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
           {/* STICKY BOTTOM */}
           <div style={{ position:"sticky", bottom:0, zIndex:50, background:"linear-gradient(0deg,#020d06 70%,transparent)", padding:"10px 14px 14px" }}>
             <div style={{ display:"flex", gap:10 }}>
-              <button onClick={()=>{ openPrintWindow(buildOrderHtml(supProducts, orderQtys, selectedOrderSupplier)); }}
+              <button onClick={()=>{
+                  if (supOrderedCount === 0) { showToast("কমপক্ষে ১টি পণ্যে পরিমাণ দিন", "#ef4444"); return; }
+                  const html = buildOrderHtml(supProducts, orderQtys, selectedOrderSupplier);
+                  savePOEntry(supProducts, orderQtys, selectedOrderSupplier);
+                  openPrintWindow(html);
+                }}
                 style={{ flex:1, background:"linear-gradient(135deg,#0369a1,#0ea5e9)", border:"none", borderRadius:14, color:"#fff", fontWeight:800, fontSize:15, padding:"13px 0", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8, fontFamily:"inherit", boxShadow:"0 2px 12px #0ea5e933" }}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
                 প্রিন্ট
               </button>
-              <button onClick={()=>sendWhatsApp(supProducts, orderQtys, selectedOrderSupplier)}
+              <button onClick={()=>{
+                  if (supOrderedCount === 0) { showToast("কমপক্ষে ১টি পণ্যে পরিমাণ দিন", "#ef4444"); return; }
+                  const phone = supplierPhone(selectedOrderSupplier);
+                  savePOEntry(supProducts, orderQtys, selectedOrderSupplier);
+                  sendWhatsApp(supProducts, orderQtys, selectedOrderSupplier, phone);
+                }}
                 style={{ flex:1, background:"linear-gradient(135deg,#15803d,#22c55e)", border:"none", borderRadius:14, color:"#fff", fontWeight:800, fontSize:15, padding:"13px 0", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8, fontFamily:"inherit", boxShadow:"0 2px 12px #22c55e33" }}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/></svg>
                 WhatsApp
@@ -16732,6 +16886,33 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
         </div>
 
         {uniqueItems.length === 0 && <div style={{ color:"#64748b", textAlign:"center", marginTop:40, fontSize:14 }}>কোনো পণ্য নেই</div>}
+
+        {/* 🆕 পেন্ডিং ক্রয় অর্ডার — পাঠানো হয়েছে কিন্তু এখনো রিসিভ হয়নি */}
+        {pendingPOs.length > 0 && (
+          <div style={{ marginBottom:16 }}>
+            <div style={{ color:"#f59e0b", fontWeight:800, fontSize:13, marginBottom:8, display:"flex", alignItems:"center", gap:6 }}>
+              ⏳ পেন্ডিং ক্রয় অর্ডার <span style={{ background:"#f59e0b22", borderRadius:8, padding:"1px 8px", fontSize:11 }}>{pendingPOs.length}টি</span>
+            </div>
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              {pendingPOs.map(po => (
+                <div key={po.id} style={{ background:"linear-gradient(135deg,#f59e0b0d,#071a0f)", border:"1px solid #f59e0b33", borderRadius:14, padding:"12px 14px" }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8 }}>
+                    <div>
+                      <div style={{ color:"#e2e8f0", fontWeight:800, fontSize:13.5 }}>{po.supplier}</div>
+                      <div style={{ color:"#64748b", fontSize:11, marginTop:2 }}>
+                        {po.items.length}টি পণ্য · {po.totalQty}টি আইটেম · {new Date(po.createdAt).toLocaleDateString('en-US')}
+                      </div>
+                    </div>
+                    <button onClick={()=>receiveOrder(po)}
+                      style={{ background:"linear-gradient(135deg,#15803d,#22c55e)", border:"none", borderRadius:10, color:"#fff", fontWeight:800, fontSize:12, padding:"7px 14px", cursor:"pointer", fontFamily:"inherit", flexShrink:0, whiteSpace:"nowrap" }}>
+                      ✅ রিসিভ করুন
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
           {orderSupplierList.map(sup => {
@@ -18968,28 +19149,27 @@ function InvoiceReceipt({ T, S, inv, customer, type = "buyer" }) {
           {customer?.address && <div><b style={{ color: T.text }}>ঠিকানা:</b> {customer.address}</div>}
         </div>
         <div style={S.dashed} />
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={{ color: T.sub, fontSize: 11, textAlign: "left", paddingBottom: 8, width: 24 }}>#</th>
-              <th style={{ color: T.sub, fontSize: 11, textAlign: "left", paddingBottom: 8 }}>পণ্য</th>
-              <th style={{ color: T.sub, fontSize: 11, textAlign: "right", paddingBottom: 8 }}>পরিমাণ</th>
-              <th style={{ color: T.sub, fontSize: 11, textAlign: "right", paddingBottom: 8 }}>দাম</th>
-              <th style={{ color: T.sub, fontSize: 11, textAlign: "right", paddingBottom: 8 }}>মোট</th>
-            </tr>
-          </thead>
-          <tbody>
-            {inv.items.map((item, idx) => (
-              <tr key={item.productId || item.id}>
-                <td style={{ color: T.sub, fontSize: 11, padding: "5px 0", borderBottom: `1px solid ${T.border}33` }}>{idx+1}</td>
-                <td style={{ color: T.text, fontSize: 12, padding: "5px 0", borderBottom: `1px solid ${T.border}33` }}>{item.name}</td>
-                <td style={{ color: T.text, fontSize: 12, padding: "5px 0", borderBottom: `1px solid ${T.border}33`, textAlign: "right" }}>{item.qty}</td>
-                <td style={{ color: T.text, fontSize: 12, padding: "5px 0", borderBottom: `1px solid ${T.border}33`, textAlign: "right" }}>৳{item.price}</td>
-                <td style={{ color: T.text, fontSize: 12, padding: "5px 0", borderBottom: `1px solid ${T.border}33`, textAlign: "right" }}>৳{fmt(item.qty * item.price)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div style={{ display: "flex", fontSize: 11, color: T.sub, padding: "0 8px 6px" }}>
+          <div style={{ width: 20 }}>#</div>
+          <div style={{ flex: 1 }}>পণ্য</div>
+          <div style={{ width: 46, textAlign: "right" }}>পরিমাণ</div>
+          <div style={{ width: 54, textAlign: "right" }}>দাম</div>
+          <div style={{ width: 60, textAlign: "right" }}>মোট</div>
+        </div>
+        {inv.items.map((item, idx) => (
+          <div key={item.productId || item.id} style={{
+            display: "flex", alignItems: "center", padding: "7px 8px",
+            border: `1.5px solid ${T.border}`, borderRadius: 8,
+            marginBottom: idx < inv.items.length - 1 ? 6 : 0,
+            background: idx % 2 === 1 ? T.cardAlt : "transparent",
+          }}>
+            <div style={{ width: 20, color: T.sub, fontSize: 11 }}>{idx+1}</div>
+            <div style={{ flex: 1, color: T.text, fontSize: 12, paddingRight: 4 }}>{item.name}</div>
+            <div style={{ width: 46, color: T.text, fontSize: 12, textAlign: "right" }}>{item.qty}</div>
+            <div style={{ width: 54, color: T.text, fontSize: 12, textAlign: "right" }}>৳{item.price}</div>
+            <div style={{ width: 60, color: T.text, fontSize: 12, fontWeight: 700, textAlign: "right" }}>৳{fmt(item.qty * item.price)}</div>
+          </div>
+        ))}
         <div style={S.dashed} />
         {((inv.discount||0) > 0 || (inv.extraCharge||0) > 0) && (
           <>
