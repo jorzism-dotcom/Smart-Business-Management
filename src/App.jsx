@@ -9590,6 +9590,11 @@ function SmartBusinessMgmt() {
       showToast?.("স্টাফ অ্যাকাউন্টে এই পেজ অ্যাক্সেস নেই", "error");
       return;
     }
+    // "এক্সপেন্স ট্রেকার" শুধু Admin রোল অ্যাক্সেস করতে পারবে
+    if (newTab === "expense" && currentUser?.role !== "admin" && currentUser?.role !== "owner") {
+      showToast?.("এই পেজ শুধু Admin অ্যাক্সেস করতে পারবে", "error");
+      return;
+    }
     if (tab === "invoice" && newTab !== "invoice") {
       _set("invoiceKey", (k) => k + 1);
       _set("preselectedCust",  null);
@@ -11155,7 +11160,7 @@ function SmartBusinessMgmt() {
       { id: "customers", label: "কাস্টমার", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" },
       { id: "invoice",   label: "ইনভয়েস",  icon: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6" },
       { id: "products",  label: "পণ্য",     icon: "M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4zM3 6h18" },
-      { id: "expense",  label: "খরচ",      icon: "M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" },
+      { id: "expense",  label: "এক্সপেন্স ট্রেকার", icon: "M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" },
       { id: "returns",  label: "ইনভয়েস হিস্ট্রি", icon: "M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8M12 7v5l4 2" },
       { id: "supplier",  label: "সাপ্লায়ার", icon: "M19 21V5a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v16m14 0h2m-2 0H5m14 0a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2m14 0V5M5 21V5m0 0a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2M9 7h6M9 11h6m-6 4h6" },
       { id: "ai",       label: "AI",       icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM8 11a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm8 0a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm-4 6c-2.5 0-4.7-1.3-6-3.3h12c-1.3 2-3.5 3.3-6 3.3z" },
@@ -11165,9 +11170,12 @@ function SmartBusinessMgmt() {
       { id: "settings",  label: "সেটিং",   icon: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" },
     ];
     // Staff cannot see sms/ai/দৈনিক সারসংক্ষেপ/অডিট ট্রেইল/স্টাফ ব্যবস্থাপনা (settings এখন দেখবে — শুধু theme+font)
-    return isStaff ? all.filter(n => !["sms", "ai", "dailySummary", "auditTrail", "staffMgmt"].includes(n.id)) : all;
+    let visible = isStaff ? all.filter(n => !["sms", "ai", "dailySummary", "auditTrail", "staffMgmt"].includes(n.id)) : all;
+    // "এক্সপেন্স ট্রেকার" শুধু Admin রোল দেখতে পাবে — অন্য কোনো রোল (staff/অজানা) দেখবে না
+    if (currentUser?.role !== "admin" && currentUser?.role !== "owner") visible = visible.filter(n => n.id !== "expense");
+    return visible;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isStaff]);
+  }, [isStaff, currentUser?.role]);
 
   // ── ফোনে বাটন কম রাখতে: শুধু হোম/কাস্টমার/ইনভয়েস/পণ্য নিচে থাকবে,
   // বাকি মডিউল "অন্যান্য" চাপলে সাইড থেকে খুলবে ──────────────────────────
@@ -11761,6 +11769,7 @@ function SmartBusinessMgmt() {
               currentUser={currentUser}
               invoices={invoices}
               products={products}
+              shopName={shopName}
             />
           </ErrorBoundary>
         )}
@@ -17332,7 +17341,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
       ...[...criticalStock].sort((a,b)=>(a.stock||0)-(b.stock||0)),
       ...allStock.filter(p=>!criticalStock.find(c=>c.id===p.id)).sort((a,b)=>(a.stock||0)-(b.stock||0)),
     ];
-    const allSelectedItems = products.filter(p => (orderQtysAll[p.id]||0) > 0);
+    const allSelectedItems = products.filter(p => Object.prototype.hasOwnProperty.call(orderQtysAll, p.id));
 
     // 🆕 একবার কনফার্মে একটাই ইউনিফাইড রেকর্ড (সাপ্লায়ার-গ্রুপড নয়) — প্রতিটি আইটেমে নিজস্ব সাপ্লায়ার সংরক্ষিত থাকে
     const savePOFromSelection = (items, qtys) => {
@@ -17467,7 +17476,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
                 <div style={{ width:52, height:52, borderRadius:16, background:"linear-gradient(135deg,#a78bfa33,#f472b633)", border:"1px solid #a78bfa55", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:24 }}>📋</div>
                 <div style={{ flex:1 }}>
                   <div style={{ color:"#f1f5f9", fontWeight:900, fontSize:16 }}>ক্রয় অর্ডার দেখুন</div>
-                  <div style={{ color:"#94a3b8", fontSize:12, marginTop:3 }}>দৈনিক ও মাসওয়াইজ অর্ডার হিস্টোরি</div>
+                  <div style={{ color:"#94a3b8", fontSize:12, marginTop:3 }}>দৈনিক অর্ডার হিস্টোরি</div>
                 </div>
                 {todayCount > 0 && <div style={{ background:"linear-gradient(135deg,#a78bfa,#7c3aed)", borderRadius:10, padding:"3px 9px", color:"#fff", fontWeight:800, fontSize:11, flexShrink:0 }}>{todayCount} আজ</div>}
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 18 15 12 9 6"/></svg>
@@ -17606,16 +17615,16 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
               <div style={{ background:"#fff", borderRadius:12, overflow:"hidden", boxShadow:"0 1px 4px rgba(0,0,0,0.08)" }}>
                 <div style={{ display:"flex", alignItems:"center", background:PRINT.thBg, padding:"10px 12px", gap:8 }}>
                   <div style={{ width:24, color:PRINT.thText, fontWeight:700, fontSize:12, textAlign:"center", flexShrink:0 }}>#</div>
-                  <div style={{ flex:1.3, color:PRINT.thText, fontWeight:700, fontSize:12 }}>পণ্যের নাম</div>
+                  <div style={{ flex:1, color:PRINT.thText, fontWeight:700, fontSize:12 }}>পণ্যের নাম</div>
                   <div style={{ flex:1, color:PRINT.thText, fontWeight:700, fontSize:12 }}>সাপ্লায়ার</div>
-                  <div style={{ width:56, color:PRINT.thText, fontWeight:700, fontSize:12, textAlign:"right" }}>পরিমাণ</div>
+                  <div style={{ flex:1, color:PRINT.thText, fontWeight:700, fontSize:12, textAlign:"right" }}>অর্ডার পরিমাণ</div>
                 </div>
                 {items.map((it, i) => (
                   <div key={it.productId} style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 12px", borderBottom: i<items.length-1?`1px solid ${PRINT.rowBorder}`:"none", background: i%2===1 ? PRINT.rowEven : "#fff" }}>
                     <div style={{ width:24, color:PRINT.serial, fontWeight:700, fontSize:12.5, textAlign:"center", flexShrink:0 }}>{i+1}</div>
-                    <div style={{ flex:1.3, minWidth:0, color:PRINT.textDark, fontWeight:700, fontSize:13 }}>{it.name}{it.unit?<span style={{ color:PRINT.textMuted, fontSize:11 }}> ({it.unit})</span>:null}</div>
+                    <div style={{ flex:1, minWidth:0, color:PRINT.textDark, fontWeight:700, fontSize:13 }}>{it.name}{it.unit?<span style={{ color:PRINT.textMuted, fontSize:11 }}> ({it.unit})</span>:null}</div>
                     <div style={{ flex:1, minWidth:0, color:PRINT.textDark, fontSize:12.5 }}>{it.supplier}</div>
-                    <div style={{ width:56, color:PRINT.textDark, fontWeight:800, fontSize:13.5, textAlign:"right" }}>{it.qty}</div>
+                    <div style={{ flex:1, color:PRINT.textDark, fontWeight:800, fontSize:13.5, textAlign:"right" }}>{it.qty}</div>
                   </div>
                 ))}
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 12px", background:PRINT.totalBg, borderTop:`2px solid ${PRINT.totalBorder}` }}>
@@ -22601,55 +22610,44 @@ const EXPENSE_CATEGORIES = [
   { id: "অন্যান্য",   icon: "📦", color: "#94a3b8" },
 ];
 
-function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUser, invoices = [], products = [] }) {
-  const [showForm,    setShowForm]    = React.useState(false);
-  const [editId,      setEditId]      = React.useState(null);
-  const [filterCat,   setFilterCat]   = React.useState("সব");
-  const [filterRange, setFilterRange] = React.useState("month"); // today | week | month | all
-  const [form,        setForm]        = React.useState({
+function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUser, invoices = [], products = [], shopName }) {
+  const [showForm,  setShowForm]  = React.useState(false);
+  const [editId,    setEditId]    = React.useState(null);
+  const [viewMode,  setViewMode]  = React.useState("day"); // day | month
+  const [navDate,   setNavDate]   = React.useState(_dateKeyOf(new Date()));   // YYYY-MM-DD
+  const [navMonth,  setNavMonth]  = React.useState(_monthKeyOf(new Date()));  // YYYY-MM
+  const [form,      setForm]      = React.useState({
     category: "অন্যান্য", amount: "", note: "", date: _dateKeyOf(new Date()),
   });
 
   const fmt = n => fmtMoney(n);
-  const todayKey = _dateKeyOf(new Date());
+  const todayKey    = _dateKeyOf(new Date());
+  const monthKeyNow = _monthKeyOf(new Date());
 
-  // ── Date range filter ────────────────────────────────────────────────────────
-  const filtered = useMemo(() => {
-    const now = new Date();
-    let from = "";
-    if (filterRange === "today") from = todayKey;
-    else if (filterRange === "week") from = _dateKeyOf(new Date(now - 7 * 86400000));
-    else if (filterRange === "month") from = _monthKeyOf(now); // "2026-06"
+  const MONTH_NAMES_BN = ["জানুয়ারি","ফেব্রুয়ারি","মার্চ","এপ্রিল","মে","জুন","জুলাই","আগস্ট","সেপ্টেম্বর","অক্টোবর","নভেম্বর","ডিসেম্বর"];
+  const dayLabel      = (dk) => { const d = new Date(dk); if (isNaN(d.getTime())) return dk; return `${d.getDate()} ${MONTH_NAMES_BN[d.getMonth()]}, ${d.getFullYear()}`; };
+  const monthLabelBn  = (mk) => { const [y, m] = (mk || "").split("-"); return m ? `${MONTH_NAMES_BN[parseInt(m, 10) - 1]} ${y}` : mk; };
 
-    let list = filterRange === "all" ? [...expenses]
-      : filterRange === "month"
-        ? expenses.filter(e => (e.date || "").startsWith(from))
-        : expenses.filter(e => (e.date || "") >= from);
+  // ── আজ ও এই মাসের সারসংক্ষেপ — সবসময় প্রকৃত আজ/চলতি মাস দেখাবে, নেভিগেটর নির্বিশেষে ──
+  const todayAmt = useMemo(() => expenses.filter(e => e.date === todayKey).reduce((s, e) => s + (e.amount || 0), 0), [expenses, todayKey]);
+  const monthAmt = useMemo(() => expenses.filter(e => (e.date || "").startsWith(monthKeyNow)).reduce((s, e) => s + (e.amount || 0), 0), [expenses, monthKeyNow]);
 
-    if (filterCat !== "সব") list = list.filter(e => e.category === filterCat);
-    return list.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-  }, [expenses, filterRange, filterCat, todayKey]);
+  // ── নেভিগেটরে নির্বাচিত দিন/মাসের খরচ লিস্ট ──
+  const navList = useMemo(() => {
+    const list = viewMode === "day"
+      ? expenses.filter(e => e.date === navDate)
+      : expenses.filter(e => (e.date || "").startsWith(navMonth));
+    return [...list].sort((a, b) => (a.date || "").localeCompare(b.date || "") || (a.createdAt || "").localeCompare(b.createdAt || ""));
+  }, [expenses, viewMode, navDate, navMonth]);
+  const navTotal = useMemo(() => navList.reduce((s, e) => s + (e.amount || 0), 0), [navList]);
 
-  // ── Summary stats ───────────────────────────────────────────────────────────
-  const stats = useMemo(() => {
-    const total    = filtered.reduce((s, e) => s + (e.amount || 0), 0);
-    const todayAmt = expenses.filter(e => e.date === todayKey).reduce((s, e) => s + (e.amount || 0), 0);
-    const monthKey = _monthKeyOf(new Date());
-    const monthAmt = expenses.filter(e => (e.date || "").startsWith(monthKey)).reduce((s, e) => s + (e.amount || 0), 0);
-    const byCat    = {};
-    filtered.forEach(e => { byCat[e.category] = (byCat[e.category] || 0) + (e.amount || 0); });
-
-    // P&L: এই মাসের revenue - COGS - expense
-    const prodMap   = new Map(products.map(p => [p.id, p]));
-    const monthInvs = invoices.filter(i => (i.dateKey || "").startsWith(monthKey));
-    const revenue   = monthInvs.reduce((s, i) => s + (i.total || 0), 0);
-    const cogs      = monthInvs.reduce((s, inv) => s + (inv.items || []).reduce((c, it) => {
-      const p = prodMap.get(it.productId); return c + (p?.costPrice || 0) * (it.qty || 1);
-    }, 0), 0);
-    const netProfit = revenue - cogs - monthAmt;
-
-    return { total, todayAmt, monthAmt, byCat, revenue, cogs, netProfit };
-  }, [filtered, expenses, invoices, products, todayKey]);
+  // ── নেভিগেশন হ্যান্ডলার ──
+  const shiftDay = useCallback((delta) => {
+    setNavDate(prev => { const d = new Date(prev); d.setDate(d.getDate() + delta); return _dateKeyOf(d); });
+  }, []);
+  const shiftMonth = useCallback((delta) => {
+    setNavMonth(prev => { const [y, m] = prev.split("-").map(Number); const d = new Date(y, (m - 1) + delta, 1); return _monthKeyOf(d); });
+  }, []);
 
   // ── Save expense ─────────────────────────────────────────────────────────────
   const saveExpense = useCallback(() => {
@@ -22697,69 +22695,97 @@ function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUs
     setEditId(e.id); setShowForm(true);
   }, [todayKey]);
 
-  const rangeLabels = { today: "আজ", week: "৭ দিন", month: "এই মাস", all: "সব" };
+  // ── প্রিন্ট — নির্বাচিত দিন/মাসের খরচের বিস্তারিত তালিকা ──
+  const handlePrint = useCallback(() => {
+    const label = viewMode === "day" ? dayLabel(navDate) : monthLabelBn(navMonth);
+    const rowsHtml = navList.map((e, i) => {
+      const catInfo = EXPENSE_CATEGORIES.find(c => c.id === e.category) || { icon: "📦" };
+      return `<tr><td class="serial">${i + 1}</td><td>${catInfo.icon} ${e.category}</td><td>${e.note || ""}</td>${viewMode === "month" ? `<td>${e.date || ""}</td>` : ""}<td class="num">৳${fmt(e.amount)}</td></tr>`;
+    }).join("");
+    const content = `
+      <div class="section">
+        <h3>খরচের বিস্তারিত — ${label}</h3>
+        <table>
+          <thead><tr><th class="serial">#</th><th>ক্যাটাগরি</th><th>বিবরণ</th>${viewMode === "month" ? "<th>তারিখ</th>" : ""}<th class="num">পরিমাণ</th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+          <tfoot><tr class="total-row"><td class="serial"></td><td colspan="${viewMode === "month" ? 2 : 1}"><b>মোট (${navList.length}টি)</b></td>${viewMode === "month" ? "<td></td>" : ""}<td class="num"><b>৳${fmt(navTotal)}</b></td></tr></tfoot>
+        </table>
+      </div>`;
+    const html = buildPdfHtml(content, shopName || "SBM", `খরচের হিসাব — ${label}`);
+    openPrintWindow(html);
+  }, [viewMode, navDate, navMonth, navList, navTotal, shopName]);
 
   return (
     <div style={{ ...S.page, paddingBottom: 100 }}>
 
-      {/* ── Header ── */}
-      <div style={{ ...S.header, marginBottom: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 4, height: 22, borderRadius: 2, background: "linear-gradient(180deg,#f59e0b,#ef4444)" }} />
-          <span style={{ ...S.headerTitle, fontSize: 17 }}>💸 খরচ ব্যবস্থাপনা</span>
+      {/* ── Header — মিডল-এলাইনড, বোল্ড ও বড় ── */}
+      <div style={{ textAlign: "center", marginBottom: 14 }}>
+        <span style={{ ...S.headerTitle, fontSize: 20, fontWeight: 900 }}>💸 খরচ ব্যবস্থাপনা</span>
+      </div>
+
+      {/* ── দিন/মাস নেভিগেটর + প্রিন্ট ── */}
+      <div className="qc-gradient-card" style={{ ...S.card, padding: "10px 12px", marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "center", gap: 6, marginBottom: 10 }}>
+          {[["day", "দিন"], ["month", "মাস"]].map(([key, label]) => (
+            <button key={key} onClick={() => setViewMode(key)}
+              style={{ padding: "5px 18px", borderRadius: 16, border: `1.5px solid ${viewMode === key ? "#f59e0b" : T.border}`,
+                background: viewMode === key ? "#f59e0b22" : "transparent",
+                color: viewMode === key ? "#f59e0b" : T.sub,
+                fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+              {label}
+            </button>
+          ))}
         </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+          <button onClick={() => viewMode === "day" ? shiftDay(-1) : shiftMonth(-1)}
+            style={{ background: T.border, border: "none", borderRadius: 8, width: 32, height: 32, flexShrink: 0,
+              color: T.text, fontSize: 17, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>‹</button>
+
+          <div style={{ position: "relative", flex: 1, textAlign: "center" }}>
+            <div style={{ color: T.text, fontWeight: 800, fontSize: 13.5 }}>
+              📅 {viewMode === "day" ? dayLabel(navDate) : monthLabelBn(navMonth)}
+            </div>
+            <input
+              type={viewMode === "day" ? "date" : "month"}
+              value={viewMode === "day" ? navDate : navMonth}
+              onChange={e => { if (!e.target.value) return; viewMode === "day" ? setNavDate(e.target.value) : setNavMonth(e.target.value); }}
+              style={{ position: "absolute", inset: 0, opacity: 0, width: "100%", height: "100%", cursor: "pointer", border: "none" }}
+            />
+          </div>
+
+          <button onClick={() => viewMode === "day" ? shiftDay(1) : shiftMonth(1)}
+            style={{ background: T.border, border: "none", borderRadius: 8, width: 32, height: 32, flexShrink: 0,
+              color: T.text, fontSize: 17, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>›</button>
+
+          <button onClick={handlePrint} title="প্রিন্ট"
+            style={{ background: "#3b82f622", border: "1px solid #3b82f644", borderRadius: 8, width: 34, height: 32, flexShrink: 0,
+              color: "#3b82f6", fontSize: 15, cursor: "pointer", fontFamily: "inherit" }}>🖨️</button>
+        </div>
+      </div>
+
+      {/* ── আজকের খরচ / এই মাসের খরচ কার্ড ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+        <div className="qc-gradient-card" style={{ ...S.card, padding: "12px 14px" }}>
+          <div style={{ fontSize: 20, marginBottom: 4 }}>📅</div>
+          <div style={{ color: "#f59e0b", fontWeight: 900, fontSize: 15 }}>৳{fmt(todayAmt)}</div>
+          <div style={{ color: T.sub, fontSize: 11, marginTop: 2 }}>আজকের খরচ</div>
+        </div>
+        <div className="qc-gradient-card" style={{ ...S.card, padding: "12px 14px" }}>
+          <div style={{ fontSize: 20, marginBottom: 4 }}>📆</div>
+          <div style={{ color: "#ef4444", fontWeight: 900, fontSize: 15 }}>৳{fmt(monthAmt)}</div>
+          <div style={{ color: T.sub, fontSize: 11, marginTop: 2 }}>এই মাসের খরচ</div>
+        </div>
+      </div>
+
+      {/* ── + নতুন খরচ — মিডল-এলাইনড ── */}
+      <div style={{ display: "flex", justifyContent: "center", marginBottom: 14 }}>
         <button
           onClick={() => { setShowForm(v => !v); setEditId(null); setForm({ category: "অন্যান্য", amount: "", note: "", date: todayKey }); }}
-          style={{ ...S.addBtn, width: "auto", padding: "8px 16px", margin: 0, display: "flex", alignItems: "center", gap: 6, background: "linear-gradient(135deg,#f59e0b,#d97706)" }}>
+          style={{ ...S.addBtn, width: "auto", padding: "10px 24px", margin: 0, display: "flex", alignItems: "center", gap: 6,
+            background: "linear-gradient(135deg,#f59e0b,#d97706)" }}>
           <IcPlus /><span style={{ fontSize: 13, fontWeight: 800 }}>নতুন খরচ</span>
         </button>
       </div>
-
-      {/* ── Summary cards ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, margin: "14px 0 10px" }}>
-        {[
-          { label: "আজকের খরচ", value: `৳${fmt(stats.todayAmt)}`, icon: "📅", color: "#f59e0b" },
-          { label: "এই মাসের খরচ", value: `৳${fmt(stats.monthAmt)}`, icon: "📆", color: "#ef4444" },
-          { label: "এই মাসের রাজস্ব", value: `৳${fmt(stats.revenue)}`, icon: "💰", color: "#22c55e" },
-          { label: "নেট লাভ (মাস)", value: `৳${fmt(stats.netProfit)}`,
-            icon: stats.netProfit >= 0 ? "📈" : "📉",
-            color: stats.netProfit >= 0 ? "#22c55e" : "#ef4444" },
-        ].map(card => (
-          <div key={card.label} className="qc-gradient-card" style={{ ...S.card, padding: "12px 14px" }}>
-            <div style={{ fontSize: 20, marginBottom: 4 }}>{card.icon}</div>
-            <div style={{ color: card.color, fontWeight: 900, fontSize: 15 }}>{card.value}</div>
-            <div style={{ color: T.sub, fontSize: 11, marginTop: 2 }}>{card.label}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* ── P&L mini bar ── */}
-      {stats.revenue > 0 && (
-        <div className="qc-gradient-card" style={{ ...S.card, padding: "12px 14px", marginBottom: 10 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-            <span style={{ color: T.sub, fontSize: 12, fontWeight: 700 }}>📊 এই মাসের P&L সারসংক্ষেপ</span>
-            <span style={{ color: stats.netProfit >= 0 ? "#22c55e" : "#ef4444", fontSize: 12, fontWeight: 900 }}>
-              {stats.netProfit >= 0 ? "লাভজনক ✓" : "লোকসান ✗"}
-            </span>
-          </div>
-          {[
-            { label: "মোট রাজস্ব", value: stats.revenue, color: "#22c55e", pct: 100 },
-            { label: "পণ্যের ক্রয়মূল্য (COGS)", value: stats.cogs, color: "#f59e0b", pct: stats.revenue > 0 ? (stats.cogs / stats.revenue) * 100 : 0 },
-            { label: "মোট খরচ", value: stats.monthAmt, color: "#ef4444", pct: stats.revenue > 0 ? (stats.monthAmt / stats.revenue) * 100 : 0 },
-            { label: "নেট লাভ", value: stats.netProfit, color: stats.netProfit >= 0 ? "#22c55e" : "#ef4444", pct: stats.revenue > 0 ? Math.abs(stats.netProfit / stats.revenue) * 100 : 0 },
-          ].map(row => (
-            <div key={row.label} style={{ marginBottom: 6 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                <span style={{ color: T.sub, fontSize: 11 }}>{row.label}</span>
-                <span style={{ color: row.color, fontWeight: 800, fontSize: 12 }}>৳{fmt(Math.abs(row.value))}</span>
-              </div>
-              <div style={{ height: 4, borderRadius: 4, background: T.border, overflow: "hidden" }}>
-                <div style={{ height: "100%", width: `${Math.min(row.pct, 100)}%`, background: row.color, borderRadius: 4, transition: "width 0.6s ease" }} />
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* ── Add/Edit Form ── */}
       {showForm && (
@@ -22831,109 +22857,54 @@ function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUs
         </div>
       )}
 
-      {/* ── Category breakdown ── */}
-      {Object.keys(stats.byCat).length > 0 && (
-        <div className="qc-gradient-card" style={{ ...S.card, marginBottom: 10, padding: "12px 14px" }}>
-          <div style={{ color: T.sub, fontSize: 12, fontWeight: 700, marginBottom: 8 }}>ক্যাটাগরি অনুযায়ী</div>
-          {Object.entries(stats.byCat).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => {
-            const catInfo = EXPENSE_CATEGORIES.find(c => c.id === cat) || { icon: "📦", color: "#94a3b8" };
-            const pct = stats.total > 0 ? (amt / stats.total) * 100 : 0;
-            return (
-              <div key={cat} style={{ marginBottom: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, alignItems: "center" }}>
-                  <span style={{ color: T.text, fontSize: 12, fontWeight: 700 }}>{catInfo.icon} {cat}</span>
-                  <span style={{ color: catInfo.color, fontWeight: 900, fontSize: 12 }}>৳{fmt(amt)} <span style={{ color: T.sub, fontWeight: 400 }}>({Math.round(pct)}%)</span></span>
-                </div>
-                <div style={{ height: 5, borderRadius: 5, background: T.border }}>
-                  <div style={{ height: "100%", width: `${pct}%`, background: catInfo.color, borderRadius: 5, transition: "width 0.5s ease" }} />
-                </div>
-              </div>
-            );
-          })}
+      {/* ── নির্বাচিত দিন/মাসের খরচের বিস্তারিত লিস্ট — P&L কার্ডের স্টাইলে ── */}
+      <div className="qc-gradient-card" style={{ ...S.card, padding: "12px 14px", marginBottom: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <span style={{ color: T.sub, fontSize: 12, fontWeight: 700 }}>
+            🧾 {viewMode === "day" ? dayLabel(navDate) : monthLabelBn(navMonth)} — খরচের বিস্তারিত
+          </span>
+          <span style={{ color: "#ef4444", fontSize: 13, fontWeight: 900 }}>৳{fmt(navTotal)}</span>
         </div>
-      )}
 
-      {/* ── Filter row ── */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
-        {/* Date range */}
-        {Object.entries(rangeLabels).map(([key, label]) => (
-          <button key={key} onClick={() => setFilterRange(key)}
-            style={{ padding: "6px 12px", borderRadius: 20, border: `1.5px solid ${filterRange === key ? "#f59e0b" : T.border}`,
-              background: filterRange === key ? "#f59e0b22" : T.card,
-              color: filterRange === key ? "#f59e0b" : T.sub,
-              fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-            {label}
-          </button>
-        ))}
-        <div style={{ width: "100%", height: 0 }} />
-        {/* Category filter */}
-        {["সব", ...EXPENSE_CATEGORIES.map(c => c.id)].map(cat => (
-          <button key={cat} onClick={() => setFilterCat(cat)}
-            style={{ padding: "5px 10px", borderRadius: 16, border: `1px solid ${filterCat === cat ? T.accent : T.border}`,
-              background: filterCat === cat ? T.accent + "22" : "transparent",
-              color: filterCat === cat ? T.accent : T.sub,
-              fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-            {cat === "সব" ? "সব ক্যাটাগরি" : EXPENSE_CATEGORIES.find(c => c.id === cat)?.icon + " " + cat}
-          </button>
-        ))}
-      </div>
-
-      {/* ── Expense List ── */}
-      {filtered.length === 0 ? (
-        <div style={S.empty}>
-          <div style={{ fontSize: 36, marginBottom: 10 }}>💸</div>
-          <div style={{ color: T.text, fontWeight: 700, marginBottom: 4 }}>কোনো খরচ নেই</div>
-          <div style={{ color: T.sub, fontSize: 13 }}>উপরের "নতুন খরচ" বাটন দিয়ে যোগ করুন</div>
-        </div>
-      ) : (
-        <Virtuoso
-          style={{ height: "calc(100dvh - 520px)", minHeight: 200 }}
-          data={filtered}
-          itemContent={(_, e) => {
+        {navList.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "22px 0" }}>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>💸</div>
+            <div style={{ color: T.sub, fontSize: 12.5 }}>এই {viewMode === "day" ? "দিনে" : "মাসে"} কোনো খরচ নেই</div>
+          </div>
+        ) : (
+          navList.map((e, i) => {
             const catInfo = EXPENSE_CATEGORIES.find(c => c.id === e.category) || { icon: "📦", color: "#94a3b8" };
-            const isToday = e.date === todayKey;
             return (
-              <div style={{ paddingBottom: 8 }}>
-                <div className="qc-gradient-card list-item" style={{ ...S.card, padding: "12px 14px",
-                  borderLeft: `3px solid ${catInfo.color}`, marginBottom: 0 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                        <span style={{ fontSize: 18 }}>{catInfo.icon}</span>
-                        <span style={{ color: catInfo.color, fontWeight: 800, fontSize: 13 }}>{e.category}</span>
-                        {isToday && <span style={{ background: "#22c55e22", color: "#22c55e", fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 8 }}>আজ</span>}
+              <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                padding: "9px 0", borderBottom: i < navList.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+                  <span style={{ color: T.sub, fontSize: 11, fontWeight: 700, width: 18, flexShrink: 0 }}>{i + 1}.</span>
+                  <span style={{ fontSize: 16, flexShrink: 0 }}>{catInfo.icon}</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ color: catInfo.color, fontWeight: 700, fontSize: 12.5 }}>{e.category}</div>
+                    {(e.note || viewMode === "month") && (
+                      <div style={{ color: T.sub, fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {e.note}{e.note && viewMode === "month" ? " · " : ""}{viewMode === "month" ? e.date : ""}
                       </div>
-                      {e.note ? <div style={{ color: T.sub, fontSize: 12, marginBottom: 3 }}>{e.note}</div> : null}
-                      <div style={{ color: T.sub, fontSize: 11 }}>
-                        {e.date} · {e.addedBy || "মালিক"}
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <div style={{ color: "#ef4444", fontWeight: 900, fontSize: 16 }}>৳{fmt(e.amount)}</div>
-                      {(currentUser?.role !== "staff") && (
-                        <div style={{ display: "flex", gap: 4 }}>
-                          <button onClick={() => startEdit(e)}
-                            style={{ background: T.border, border: "none", borderRadius: 8, padding: "6px 8px", cursor: "pointer", color: T.sub, fontFamily: "inherit" }}>✏️</button>
-                          <button onClick={() => deleteExpense(e.id)}
-                            style={{ background: "#ef444415", border: "none", borderRadius: 8, padding: "6px 8px", cursor: "pointer", color: "#ef4444", fontFamily: "inherit" }}>🗑️</button>
-                        </div>
-                      )}
-                    </div>
+                    )}
                   </div>
                 </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                  <div style={{ color: "#ef4444", fontWeight: 900, fontSize: 13.5 }}>৳{fmt(e.amount)}</div>
+                  {(currentUser?.role !== "staff") && (
+                    <div style={{ display: "flex", gap: 3 }}>
+                      <button onClick={() => startEdit(e)}
+                        style={{ background: T.border, border: "none", borderRadius: 6, padding: "4px 6px", cursor: "pointer", color: T.sub, fontFamily: "inherit", fontSize: 11 }}>✏️</button>
+                      <button onClick={() => deleteExpense(e.id)}
+                        style={{ background: "#ef444415", border: "none", borderRadius: 6, padding: "4px 6px", cursor: "pointer", color: "#ef4444", fontFamily: "inherit", fontSize: 11 }}>🗑️</button>
+                    </div>
+                  )}
+                </div>
               </div>
             );
-          }}
-        />
-      )}
-
-      {/* ── Total row ── */}
-      {filtered.length > 0 && (
-        <div style={{ ...S.card, marginTop: 8, padding: "12px 16px", display: "flex", justifyContent: "space-between", background: "#ef444415", border: "1px solid #ef444430", borderRadius: 12 }}>
-          <span style={{ color: T.sub, fontWeight: 700, fontSize: 13 }}>মোট ({filtered.length}টি খরচ)</span>
-          <span style={{ color: "#ef4444", fontWeight: 900, fontSize: 16 }}>৳{fmt(stats.total)}</span>
-        </div>
-      )}
+          })
+        )}
+      </div>
     </div>
   );
 }
