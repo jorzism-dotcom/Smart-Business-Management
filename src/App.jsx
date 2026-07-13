@@ -7960,6 +7960,180 @@ const MemoLoginScreen      = React.memo(LoginScreen);
 //  ✗ ভয়েস বাটন (ডেকোরেটিভ ছিল, কাজ করত না)
 // ════════════════════════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════════════════
+// 📊 KPI স্ট্যাটস হুক — AI ড্যাশবোর্ড ও "দৈনিক সারসংক্ষেপ" পেজ উভয় জায়গায় ব্যবহৃত।
+// একই হিসাব একই জায়গা থেকে আসে বলে দুই পেজের সংখ্যা সবসময় একে অপরের সাথে মিলবে।
+// ══════════════════════════════════════════════════════════════════════════
+function useKpiStats({ customers, invoices, products, txns, expenses = [], cashLogs = [], purchaseOrders = [], stockMovements = [] }) {
+  return React.useMemo(() => {
+    const fmt = n => { if (!n && n !== 0) return "০"; return fmtMoney(n); };
+    const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
+
+    const now = new Date();
+    const todayKey = _dateKeyOf(now);
+
+    const { y: _bdY, m: _bdM, day: _bdD } = _bdParts(now);
+    const monthStartKey = `${_bdY}-${String(_bdM + 1).padStart(2, "0")}-01`;
+    const _prevBdY = _bdM === 0 ? _bdY - 1 : _bdY, _prevBdM = _bdM === 0 ? 11 : _bdM - 1;
+    const prevMonthStartKey = `${_prevBdY}-${String(_prevBdM + 1).padStart(2, "0")}-01`;
+    const currentMonthNameEn = MONTH_NAMES_EN[_bdM];
+    const daysElapsedInMonth = _bdD;
+
+    const invAll = (invoices || []).filter(i => !i.isSelfUse && i.status !== "voided");
+    const selfUseInvs = (invoices || []).filter(i => i.isSelfUse);
+    const custAll = customers || [];
+    const prodAll = products || [];
+    const txnAll = txns || [];
+
+    const todayInvs = invAll.filter(i => i.dateKey === todayKey || (i.date && i.date.startsWith(todayKey)));
+    const monthInvs = invAll.filter(i => (i.dateKey || i.date || "") >= monthStartKey);
+    const prevMonthInvs = invAll.filter(i => (i.dateKey || i.date || "") >= prevMonthStartKey && (i.dateKey || i.date || "") < monthStartKey);
+
+    const todaySale = todayInvs.reduce((s, i) => s + (i.total || 0), 0);
+    const monthSale = monthInvs.reduce((s, i) => s + (i.total || 0), 0);
+    const prevMonthSale = prevMonthInvs.reduce((s, i) => s + (i.total || 0), 0);
+    const growthPct = prevMonthSale > 0 ? Math.round(((monthSale - prevMonthSale) / prevMonthSale) * 100) : null;
+
+    const prodMap = new Map(prodAll.map(p => [p.id, p]));
+    const calcProfit = (invList) => calcProfitTotal(invList, prodMap);
+
+    const todayProfit = calcProfit(todayInvs);
+    const monthProfit = calcProfit(monthInvs);
+    const monthMargin = pct(monthProfit, monthSale);
+    const totalBaki = custAll.reduce((s, c) => s + (c.balance || 0), 0);
+    const bakiCustomers = custAll.filter(c => (c.balance || 0) > 0).length;
+    const stockValue = prodAll.reduce((s, p) => s + (p.costPrice || p.price || 0) * (p.stock || 0), 0);
+    const lowStockItems = prodAll.filter(p => (p.stock || 0) > 0 && (p.stock || 0) <= (p.minStockAlert || 5));
+
+    const currentMonthKeyForExp = monthStartKey.slice(0, 7);
+    const monthExpiredRemovals = (stockMovements || []).filter(mv =>
+      mv.source === "expired_removal" &&
+      (mv.monthKey || (mv.dateKey ? mv.dateKey.slice(0, 7) : "")) === currentMonthKeyForExp
+    );
+    const monthExpiredValue = monthExpiredRemovals.reduce((s, r) => s + (r.value || 0), 0);
+    const monthExpiredCount = monthExpiredRemovals.length;
+
+    const monthSelfUseCost = selfUseInvs
+      .filter(i => (i.dateKey || i.date || "") >= monthStartKey)
+      .reduce((s, inv) => s + (inv.items || []).reduce((cs, it) => {
+        const p = prodMap.get(it.productId);
+        const cp = it.costPrice || p?.costPrice || 0;
+        return cs + cp * (it.qty || 1);
+      }, 0), 0);
+
+    const todaySelfUseInvs = selfUseInvs.filter(i => i.dateKey === todayKey || (i.date && i.date.startsWith(todayKey)));
+    const selfUseCostOf = (invList) => invList.reduce((s, inv) => s + (inv.items || []).reduce((cs, it) => {
+      const p = prodMap.get(it.productId);
+      const cp = it.costPrice || p?.costPrice || 0;
+      return cs + cp * (it.qty || 1);
+    }, 0), 0);
+    const todaySelfUseCost = selfUseCostOf(todaySelfUseInvs);
+
+    const todayCashSale = todayInvs.reduce((s, i) => {
+      if (i.payType === "cash") return s + (i.total || 0);
+      if (i.payType === "partial") return s + Math.min(i.paidAmount || 0, i.total || 0);
+      return s;
+    }, 0);
+    const todayCashProfit = calcProfit(todayInvs.filter(i => i.payType === "cash" || i.payType === "partial"));
+
+    const todayKeyEn = todayEn();
+    const _voidedIds = new Set((invoices || []).filter(i => i.status === "voided").map(i => i.id));
+    const todayBakiIncurred = txnAll.filter(t => t.dateKey === todayKeyEn && t.type === "baki" && t.invoiceId && !_voidedIds.has(t.invoiceId)).reduce((s, t) => s + (t.amount || 0), 0);
+    const todayJoma = txnAll.filter(t => t.dateKey === todayKeyEn && t.type === "joma" && t.source !== "partial-sale" && t.source !== "void-reversal" && t.source !== "cash-sale").reduce((s, t) => s + (t.amount || 0), 0);
+
+    const cashLogsAll = cashLogs || [];
+    const openingCashToday = cashLogsAll.filter(c => c.type === "opening" && c.dateKey === todayKeyEn).reduce((s, c) => s + (c.amount || 0), 0);
+    const withdrawalToday = cashLogsAll.filter(c => c.type === "withdrawal" && c.dateKey === todayKeyEn).reduce((s, c) => s + (c.amount || 0), 0);
+
+    const purchaseOrdersAll = (purchaseOrders || []).filter(p => p._type === "pe");
+    const todayPurchases = purchaseOrdersAll.filter(p => p.dateKey === todayKey);
+    const todayPurchaseCost = todayPurchases.reduce((s, p) => s + (p.totalCost || 0), 0);
+    const todayPurchaseCount = todayPurchases.length;
+    const monthPurchaseCost = purchaseOrdersAll.filter(p => (p.dateKey || "") >= monthStartKey).reduce((s, p) => s + (p.totalCost || 0), 0);
+
+    const currentCashDrawer = openingCashToday + todayCashSale + todayJoma - withdrawalToday - todayPurchaseCost;
+
+    const todayExpense = (expenses || []).filter(e => (e.dateKey || e.date) === todayKey).reduce((s, e) => s + (e.amount || 0), 0);
+    const monthExpense = (expenses || []).filter(e => (e.dateKey || e.date || "") >= monthStartKey).reduce((s, e) => s + (e.amount || 0), 0);
+
+    return {
+      fmt, pct, currentMonthNameEn, daysElapsedInMonth, growthPct,
+      todaySale, todayInvs, todayCashSale, todayCashProfit, todayBakiIncurred,
+      todayProfit, totalBaki, bakiCustomers, todayJoma, todaySelfUseCost, monthSelfUseCost,
+      openingCashToday, withdrawalToday, currentCashDrawer, todayPurchaseCost, todayPurchaseCount,
+      monthPurchaseCost, todayExpense, monthExpense, monthSale, monthProfit, monthMargin,
+      stockValue, lowStockItems, monthExpiredValue, monthExpiredCount,
+    };
+  }, [customers, invoices, products, txns, expenses, cashLogs, purchaseOrders, stockMovements]);
+}
+
+// ── ২০টি KPI কার্ডের গ্রিড — AI ড্যাশবোর্ড ও "দৈনিক সারসংক্ষেপ" উভয় জায়গায় হুবহু একই ──
+function KpiCardsGrid({ T, stats }) {
+  const { fmt, pct, currentMonthNameEn, daysElapsedInMonth, growthPct,
+    todaySale, todayInvs, todayCashSale, todayCashProfit, todayBakiIncurred,
+    todayProfit, totalBaki, bakiCustomers, todayJoma, todaySelfUseCost, monthSelfUseCost,
+    openingCashToday, withdrawalToday, currentCashDrawer, todayPurchaseCost, todayPurchaseCount,
+    monthPurchaseCost, todayExpense, monthExpense, monthSale, monthProfit, monthMargin,
+    stockValue, lowStockItems, monthExpiredValue, monthExpiredCount } = stats;
+
+  const items = [
+    { icon: "💰", val: `৳${fmt(todaySale)}`, label: "আজকের বিক্রয়", sub: `${todayInvs.length}টি ইনভয়েস`, color: "#22c55e" },
+    { icon: "💵", val: `৳${fmt(todayCashSale)}`, label: "আজকের নগদ বিক্রয়", sub: "নগদ+আংশিক", color: "#16a34a" },
+    { icon: "🟢", val: `৳${fmt(todayCashProfit)}`, label: "আজকের নগদ বিক্রয়ে লাভ", sub: `মার্জিন ${pct(todayCashProfit, todayCashSale)}%`, color: "#22c55e" },
+    { icon: "📌", val: `৳${fmt(todayBakiIncurred)}`, label: "আজকের বাকি", sub: "নতুন বাকি বিক্রয়", color: "#f97316" },
+    { icon: "⚡", val: `৳${fmt(todayProfit)}`, label: "আজকের লাভ", sub: `মার্জিন ${pct(todayProfit, todaySale)}%`, color: "#f59e0b" },
+    { icon: "🔴", val: `৳${fmt(totalBaki)}`, label: "মোট বাকি", sub: `${bakiCustomers}জনের কাছে`, color: "#ef4444" },
+    { icon: "📥", val: `৳${fmt(todayJoma)}`, label: "আজকের বাকি আদায়", sub: "আজ সংগৃহীত", color: "#3b82f6" },
+    { icon: "🏠", val: `৳${fmt(todaySelfUseCost)}`, label: "আজকের নিজের ব্যবহার", sub: "আজ", color: "#a78bfa" },
+    { icon: "🏡", val: `৳${fmt(monthSelfUseCost)}`, label: `এই মাসের নিজের ব্যবহার (${currentMonthNameEn})`, sub: `১–${daysElapsedInMonth} ${currentMonthNameEn}`, color: "#a78bfa" },
+    { icon: "🪙", val: `৳${fmt(openingCashToday)}`, label: "আজকের ওপেনিং ক্যাশ", sub: "দোকান খোলার সময়", color: "#0ea5e9" },
+    { icon: "🏧", val: `৳${fmt(withdrawalToday)}`, label: "আজকের উইথড্রয়াল", sub: "আজকের", color: "#f43f5e" },
+    { icon: "🏦", val: `৳${fmt(currentCashDrawer)}`, label: "ক্যাশড্রয়ার", sub: "বর্তমান ক্যাশ", color: "#0ea5e9" },
+    { icon: "🛒", val: `৳${fmt(todayPurchaseCost)}`, label: "আজকের ক্রয়", sub: `${todayPurchaseCount}টি এন্ট্রি`, color: "#8b5cf6" },
+    { icon: "📦", val: `৳${fmt(monthPurchaseCost)}`, label: `এই মাসের ক্রয় (${currentMonthNameEn})`, sub: `১–${daysElapsedInMonth} ${currentMonthNameEn}`, color: "#8b5cf6" },
+    { icon: "🧾", val: `৳${fmt(todayExpense)}`, label: "আজকের খরচ", sub: "মোট খরচ", color: "#ef4444" },
+    { icon: "🧮", val: `৳${fmt(monthExpense)}`, label: `এই মাসের খরচ (${currentMonthNameEn})`, sub: `১–${daysElapsedInMonth} ${currentMonthNameEn}`, color: "#ef4444" },
+    { icon: "📈", val: `৳${fmt(monthSale)}`, label: `এই মাসের বিক্রয় (${currentMonthNameEn})`, sub: growthPct !== null ? `${growthPct > 0 ? "▲" : "▼"} ${Math.abs(growthPct)}%` : currentMonthNameEn, color: "#3b82f6" },
+    { icon: "💎", val: `৳${fmt(monthProfit)}`, label: `এই মাসে লাভ (${currentMonthNameEn})`, sub: `মার্জিন ${monthMargin}%`, color: monthMargin >= 15 ? "#22c55e" : monthMargin >= 8 ? "#f59e0b" : "#ef4444" },
+    { icon: "📦", val: `৳${fmt(stockValue)}`, label: "স্টক মূল্য", sub: `কম স্টক ${lowStockItems.length}টি`, color: "#ec4899" },
+    { icon: "⏳", val: `৳${fmt(monthExpiredValue)}`, label: `এই মাসের মেয়াদোত্তীর্ণ পণ্যের মূল্য (${currentMonthNameEn})`, sub: `${monthExpiredCount}টি ব্যাচ সরানো হয়েছে`, color: "#dc2626" },
+  ];
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 6 }}>
+      {items.map((item, i) => (
+        <div key={i} style={{
+          background: `linear-gradient(160deg,${T.card},${item.color}0c)`, borderRadius: 8, padding: "5px 5px",
+          border: `1px solid ${item.color}33`,
+          boxShadow: `0 0 8px ${item.color}10`,
+          position: "relative", overflow: "hidden", minWidth: 0,
+        }}>
+          <div style={{ display:"flex", alignItems:"center", gap: 3, marginBottom: 2 }}>
+            <span style={{
+              fontSize: 8.5, width: 13, height: 13, borderRadius: 4, flexShrink: 0,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              background: `${item.color}22`, border: `1px solid ${item.color}44`,
+            }}>{item.icon}</span>
+            <div style={{
+              color: T.text, fontWeight: 800, fontSize: 7.3, opacity: 0.8,
+              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+            }}>{item.label}</div>
+          </div>
+          <div style={{
+            color: item.color, fontWeight: 900, fontSize: 10.5,
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+            textShadow: `0 0 10px ${item.color}55`,
+          }}>{item.val}</div>
+          <div style={{
+            color: T.sub, fontSize: 6.8, marginTop: 1,
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          }}>{item.sub}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AIPage_({ T, S, customers, invoices, products, txns, paymentInvoices, shopName, anthropicKey, expenses = [], cashLogs = [], purchaseOrders = [], stockMovements = [] }) {
   const [aiTab, setAiTab] = React.useState("dashboard");
   const [chatMessages, setChatMessages] = React.useState([]);
@@ -11160,11 +11334,11 @@ function SmartBusinessMgmt() {
       { id: "customers", label: "কাস্টমার", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" },
       { id: "invoice",   label: "ইনভয়েস",  icon: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6" },
       { id: "products",  label: "পণ্য",     icon: "M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4zM3 6h18" },
+      { id: "dailySummary", label: "দৈনিক সারসংক্ষেপ", icon: "M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0" },
       { id: "expense",  label: "এক্সপেন্স ট্রেকার", icon: "M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" },
       { id: "returns",  label: "ইনভয়েস হিস্ট্রি", icon: "M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8M12 7v5l4 2" },
       { id: "supplier",  label: "সাপ্লায়ার", icon: "M19 21V5a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v16m14 0h2m-2 0H5m14 0a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2m14 0V5M5 21V5m0 0a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2M9 7h6M9 11h6m-6 4h6" },
       { id: "ai",       label: "AI",       icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM8 11a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm8 0a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm-4 6c-2.5 0-4.7-1.3-6-3.3h12c-1.3 2-3.5 3.3-6 3.3z" },
-      { id: "dailySummary", label: "দৈনিক সারসংক্ষেপ", icon: "M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0" },
       { id: "auditTrail",   label: "অডিট ট্রেইল",       icon: "M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z" },
       { id: "staffMgmt",    label: "স্টাফ ব্যবস্থাপনা", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" },
       { id: "settings",  label: "সেটিং",   icon: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" },
@@ -11892,6 +12066,8 @@ function SmartBusinessMgmt() {
               cashLogs={cashLogs}
               products={products}
               purchaseOrders={purchaseOrders}
+              expenses={expenses}
+              stockMovements={stockMovements}
             />
           </ErrorBoundary>
         )}
@@ -22550,6 +22726,40 @@ function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUs
     category: "অন্যান্য", amount: "", note: "", date: _dateKeyOf(new Date()),
   });
 
+  // ── কাস্টম (ইউজার-তৈরি) খরচ ক্যাটাগরি — ডিভাইসে সেভ থাকে ──────────────────────
+  const [customCategories,   setCustomCategories]   = React.useState([]);
+  const [showCustomCatInput, setShowCustomCatInput] = React.useState(false);
+  const [customCatInput,     setCustomCatInput]      = React.useState("");
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const raw = await getStorage("expense_custom_categories");
+        if (raw) setCustomCategories(JSON.parse(raw));
+      } catch {}
+    })();
+  }, []);
+
+  const allCategories = useMemo(() => [...EXPENSE_CATEGORIES, ...customCategories], [customCategories]);
+
+  const addCustomCategory = useCallback(() => {
+    const name = customCatInput.trim();
+    if (!name) return;
+    const already = allCategories.some(c => c.id === name);
+    if (already) {
+      setForm(f => ({ ...f, category: name }));
+      setShowCustomCatInput(false); setCustomCatInput("");
+      showToast("এই ক্যাটাগরি আগে থেকেই আছে, নির্বাচন করা হলো", "#f59e0b");
+      return;
+    }
+    const next = [...customCategories, { id: name, icon: "🏷️", color: "#a855f7" }];
+    setCustomCategories(next);
+    setStorage("expense_custom_categories", JSON.stringify(next));
+    setForm(f => ({ ...f, category: name }));
+    setShowCustomCatInput(false); setCustomCatInput("");
+    showToast("নতুন ক্যাটাগরি যোগ হয়েছে ✓", "#22c55e");
+  }, [customCatInput, customCategories, allCategories, showToast]);
+
   const fmt = n => fmtMoney(n);
   const todayKey    = _dateKeyOf(new Date());
   const monthKeyNow = _monthKeyOf(new Date());
@@ -22629,7 +22839,7 @@ function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUs
   const handlePrint = useCallback(() => {
     const label = viewMode === "day" ? dayLabel(navDate) : monthLabelBn(navMonth);
     const rowsHtml = navList.map((e, i) => {
-      const catInfo = EXPENSE_CATEGORIES.find(c => c.id === e.category) || { icon: "📦" };
+      const catInfo = allCategories.find(c => c.id === e.category) || { icon: "📦" };
       return `<tr><td class="serial">${i + 1}</td><td>${catInfo.icon} ${e.category}</td><td>${e.note || ""}</td>${viewMode === "month" ? `<td>${e.date || ""}</td>` : ""}<td class="num">৳${fmt(e.amount)}</td></tr>`;
     }).join("");
     const content = `
@@ -22729,7 +22939,7 @@ function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUs
           <div style={{ marginBottom: 12 }}>
             <div style={{ color: T.sub, fontSize: 12, fontWeight: 700, marginBottom: 6 }}>ক্যাটাগরি</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {EXPENSE_CATEGORIES.map(cat => (
+              {allCategories.map(cat => (
                 <button key={cat.id}
                   onClick={() => setForm(f => ({ ...f, category: cat.id }))}
                   style={{ padding: "6px 12px", borderRadius: 20, border: `1.5px solid ${form.category === cat.id ? cat.color : T.border}`,
@@ -22740,7 +22950,40 @@ function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUs
                   {cat.icon} {cat.id}
                 </button>
               ))}
+              {!showCustomCatInput && (
+                <button
+                  onClick={() => setShowCustomCatInput(true)}
+                  style={{ padding: "6px 12px", borderRadius: 20, border: `1.5px dashed ${T.sub}`,
+                    background: "transparent", color: T.sub,
+                    fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                  ➕ কাস্টম ক্যাটাগরি
+                </button>
+              )}
             </div>
+
+            {/* কাস্টম ক্যাটাগরি তৈরির ইনপুট */}
+            {showCustomCatInput && (
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <input
+                  autoFocus
+                  placeholder="নতুন ক্যাটাগরির নাম লিখুন"
+                  value={customCatInput}
+                  onChange={e => setCustomCatInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") addCustomCategory(); if (e.key === "Escape") { setShowCustomCatInput(false); setCustomCatInput(""); } }}
+                  style={{ ...S.input, marginTop: 0, flex: 1, fontSize: 13 }}
+                />
+                <button onClick={addCustomCategory}
+                  style={{ background: "#22c55e", border: "none", borderRadius: 10, padding: "0 16px", color: "#fff",
+                    fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                  ✓ যোগ
+                </button>
+                <button onClick={() => { setShowCustomCatInput(false); setCustomCatInput(""); }}
+                  style={{ background: T.border, border: "none", borderRadius: 10, padding: "0 14px", color: T.sub,
+                    fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                  ✕
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Amount + Date row */}
@@ -22803,48 +23046,71 @@ function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUs
             <div style={{ color: T.sub, fontSize: 12.5 }}>এই {viewMode === "day" ? "দিনে" : "মাসে"} কোনো খরচ নেই</div>
           </div>
         ) : (<>
-          {viewMode === "month" && (
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, paddingBottom: 4, borderBottom: `1px solid ${T.border}`, marginBottom: 2 }}>
-              <div style={{ width: 64, textAlign: "center", color: T.sub, fontSize: 9.5, fontWeight: 800 }}>তারিখ</div>
-              <div style={{ width: 66, textAlign: "right", color: T.sub, fontSize: 9.5, fontWeight: 800 }}>পরিমাণ</div>
-            </div>
-          )}
-          {navList.map((e, i) => {
-            const catInfo = EXPENSE_CATEGORIES.find(c => c.id === e.category) || { icon: "📦", color: "#94a3b8" };
-            return (
-              <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
-                padding: "9px 0", borderBottom: i < navList.length - 1 ? `1px solid ${T.border}` : "none", gap: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
-                  <span style={{ color: T.sub, fontSize: 11, fontWeight: 700, width: 18, flexShrink: 0 }}>{i + 1}.</span>
-                  <span style={{ fontSize: 16, flexShrink: 0 }}>{catInfo.icon}</span>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ color: catInfo.color, fontWeight: 700, fontSize: 12.5 }}>{e.category}</div>
-                    {e.note && (
-                      <div style={{ color: T.sub, fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {e.note}
+          {(() => {
+            // ── কলাম গ্রিড — "খরচ", "তারিখ" (শুধু মাস-ভিউ), "পরিমাণ", "ইডিট" সব সময় একই প্রস্থে,
+            // ফলে কনটেন্টের দৈর্ঘ্য যাই হোক না কেন সারিগুলো একে অপরের সাথে নিখুঁতভাবে এলাইন থাকবে।
+            const showEdit  = currentUser?.role !== "staff";
+            const gridCols  = [
+              "22px",                                   // ক্রমিক নম্বর
+              "1fr",                                     // খরচ (আইকন + ক্যাটাগরি + বিবরণ)
+              ...(viewMode === "month" ? ["58px"] : []), // তারিখ
+              "70px",                                    // পরিমাণ
+              ...(showEdit ? ["54px"] : []),              // ইডিট
+            ].join(" ");
+
+            return (<>
+              {/* ── কলাম হেডার ── */}
+              <div style={{ display: "grid", gridTemplateColumns: gridCols, gap: 6, alignItems: "center",
+                paddingBottom: 6, borderBottom: `1px solid ${T.border}`, marginBottom: 4 }}>
+                <div />
+                <div style={{ color: T.sub, fontSize: 9.5, fontWeight: 800 }}>খরচ</div>
+                {viewMode === "month" && (
+                  <div style={{ textAlign: "center", color: T.sub, fontSize: 9.5, fontWeight: 800 }}>তারিখ</div>
+                )}
+                <div style={{ textAlign: "right", color: T.sub, fontSize: 9.5, fontWeight: 800 }}>পরিমাণ</div>
+                {showEdit && (
+                  <div style={{ textAlign: "center", color: T.sub, fontSize: 9.5, fontWeight: 800 }}>ইডিট</div>
+                )}
+              </div>
+
+              {navList.map((e, i) => {
+                const catInfo = allCategories.find(c => c.id === e.category) || { icon: "📦", color: "#94a3b8" };
+                return (
+                  <div key={e.id} style={{ display: "grid", gridTemplateColumns: gridCols, gap: 6, alignItems: "center",
+                    padding: "9px 0", borderBottom: i < navList.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                    <span style={{ color: T.sub, fontSize: 11, fontWeight: 700 }}>{i + 1}.</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                      <span style={{ fontSize: 16, flexShrink: 0 }}>{catInfo.icon}</span>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ color: catInfo.color, fontWeight: 700, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {e.category}
+                        </div>
+                        {e.note && (
+                          <div style={{ color: T.sub, fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            ({e.note})
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    {viewMode === "month" && (
+                      <div style={{ textAlign: "center", background: T.bg, border: `1px solid ${T.border}`, borderRadius: 8, padding: "3px 2px" }}>
+                        <div style={{ color: T.sub, fontSize: 10.5, fontWeight: 700 }}>{(e.date || "").slice(5) || "—"}</div>
+                      </div>
+                    )}
+                    <div style={{ color: "#ef4444", fontWeight: 900, fontSize: 13.5, textAlign: "right" }}>৳{fmt(e.amount)}</div>
+                    {showEdit && (
+                      <div style={{ display: "flex", gap: 3, justifyContent: "center" }}>
+                        <button onClick={() => startEdit(e)}
+                          style={{ background: T.border, border: "none", borderRadius: 6, padding: "4px 5px", cursor: "pointer", color: T.sub, fontFamily: "inherit", fontSize: 11 }}>✏️</button>
+                        <button onClick={() => deleteExpense(e.id)}
+                          style={{ background: "#ef444415", border: "none", borderRadius: 6, padding: "4px 5px", cursor: "pointer", color: "#ef4444", fontFamily: "inherit", fontSize: 11 }}>🗑️</button>
                       </div>
                     )}
                   </div>
-                </div>
-                {viewMode === "month" && (
-                  <div style={{ flexShrink: 0, width: 64, textAlign: "center", background: T.bg, border: `1px solid ${T.border}`, borderRadius: 8, padding: "3px 2px" }}>
-                    <div style={{ color: T.sub, fontSize: 10.5, fontWeight: 700 }}>{(e.date || "").slice(5) || "—"}</div>
-                  </div>
-                )}
-                <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                  <div style={{ color: "#ef4444", fontWeight: 900, fontSize: 13.5 }}>৳{fmt(e.amount)}</div>
-                  {(currentUser?.role !== "staff") && (
-                    <div style={{ display: "flex", gap: 3 }}>
-                      <button onClick={() => startEdit(e)}
-                        style={{ background: T.border, border: "none", borderRadius: 6, padding: "4px 6px", cursor: "pointer", color: T.sub, fontFamily: "inherit", fontSize: 11 }}>✏️</button>
-                      <button onClick={() => deleteExpense(e.id)}
-                        style={{ background: "#ef444415", border: "none", borderRadius: 6, padding: "4px 6px", cursor: "pointer", color: "#ef4444", fontFamily: "inherit", fontSize: 11 }}>🗑️</button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+                );
+              })}
+            </>);
+          })()}
         </>)}
       </div>
     </div>
@@ -23685,8 +23951,11 @@ function StaffCustomTimePicker({ T, staffName, onGrant }) {
 // ══════════════════════════════════════════════════════════════════════════
 // 📊 দৈনিক সারসংক্ষেপ — Settings থেকে সরিয়ে আলাদা মডিউল হিসেবে
 // ══════════════════════════════════════════════════════════════════════════
-function DailySummaryModule({ T, S, currentUser, shopName, showToast, customers = [], invoices = [], txns = [], cashLogs = [], products = [], purchaseOrders = [] }) {
+function DailySummaryModule({ T, S, currentUser, shopName, showToast, customers = [], invoices = [], txns = [], cashLogs = [], products = [], purchaseOrders = [], expenses = [], stockMovements = [] }) {
   const [showDailyCard, setShowDailyCard] = useState(true);
+  const [showKpiSection, setShowKpiSection] = useState(true);
+
+  const kpiStats = useKpiStats({ customers, invoices, products, txns, expenses, cashLogs, purchaseOrders, stockMovements });
 
   if (currentUser?.role === "staff") {
     return (
@@ -23700,14 +23969,27 @@ function DailySummaryModule({ T, S, currentUser, shopName, showToast, customers 
 
   return (
     <div style={{ ...S.page, paddingBottom: 100 }}>
-      <div style={{ ...S.header, marginBottom: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 4, height: 22, borderRadius: 2, background: "linear-gradient(180deg,#8b5cf6,#6366f1)" }} />
-          <span style={{ ...S.headerTitle, fontSize: 17 }}>📊 দৈনিক সারসংক্ষেপ</span>
-        </div>
+      {/* ── Header — মিডল-এলাইনড, বড় ও বোল্ড, T.text দিয়ে যেকোনো থিমে স্পষ্ট দেখাবে ── */}
+      <div style={{ textAlign: "center", marginBottom: 16 }}>
+        <span style={{ color: T.text, fontWeight: 900, fontSize: 24, letterSpacing: 0.3 }}>📊 দৈনিক সারসংক্ষেপ</span>
       </div>
 
-      <div className="qc-gradient-card" style={{ ...S.card, marginTop: 14 }}>
+      {/* ── AI ড্যাশবোর্ডের ২০টি KPI কার্ড হুবহু — নোটিফিকেশন সময়সূচি কার্ডের উপরে ── */}
+      <div className="qc-gradient-card" style={{ ...S.card, marginBottom: 12 }}>
+        <div onClick={() => setShowKpiSection(v => !v)} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer", userSelect:"none", marginBottom: showKpiSection ? 12 : 0 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+            <span style={{ fontSize:18 }}>📈</span>
+            <div>
+              <div style={{ color: T.text, fontWeight: 900, fontSize: 14 }}>ব্যবসার সারসংক্ষেপ</div>
+              <div style={{ color: T.sub, fontSize: 11, marginTop: 2 }}>বিক্রয়, লাভ, খরচ ও স্টকের ২০টি কার্ড</div>
+            </div>
+          </div>
+          <span style={{ color: T.sub, fontSize: 12 }}>{showKpiSection ? "▲" : "▼"}</span>
+        </div>
+        {showKpiSection && <KpiCardsGrid T={T} stats={kpiStats} />}
+      </div>
+
+      <div className="qc-gradient-card" style={{ ...S.card }}>
         <div onClick={() => setShowDailyCard(v => !v)} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer", userSelect:"none" }}>
           <div>
             <div style={{ color: T.text, fontWeight: 700, fontSize: 14, display:"flex", alignItems:"center", gap:8 }}>
