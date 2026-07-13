@@ -17348,13 +17348,22 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
 
     const monthLabelPO = (mk) => { const [y,m] = (mk||"").split("-"); return m ? `${MONTH_NAMES_BN[parseInt(m,10)-1]} ${y}` : mk; };
     const dayLabelPO = (dk) => { const d = new Date(dk); if (isNaN(d.getTime())) return dk; return `${d.getDate()} ${MONTH_NAMES_BN[d.getMonth()]}, ${d.getFullYear()}`; };
+    // 🆕 দিন পাল্টানোর হেল্পার (ডে-নেভিগেটরের জন্য) — dateKey (YYYY-MM-DD) থেকে ±delta দিন
+    const shiftDayKey = (dk, delta) => {
+      const [y, m, d] = (dk || "").split("-").map(Number);
+      if (!y) return dk;
+      const dt = new Date(y, (m || 1) - 1, d || 1);
+      dt.setDate(dt.getDate() + delta);
+      return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+    };
     const mergeItemsForDay = (dateKey) => {
       const merged = {};
       allPOOrders.filter(r => r.dateKey === dateKey).forEach(r => resolvedItems(r).forEach(it => {
         if (!merged[it.productId]) merged[it.productId] = { ...it };
         else merged[it.productId].qty += (it.qty||0);
       }));
-      return Object.values(merged);
+      // একই সাপ্লায়ারের পণ্যগুলো পাশাপাশি দেখানোর জন্য সাপ্লায়ার অনুযায়ী গ্রুপ করে সাজানো
+      return Object.values(merged).sort((a, b) => (a.supplier || "").localeCompare(b.supplier || "", "bn"));
     };
     const buildDayOrderHtml = (dateKey) => {
       const items = mergeItemsForDay(dateKey);
@@ -17437,7 +17446,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
               </div>
             </div>
 
-            <div className="tap-card" onClick={()=>setInvModal('order:view')}
+            <div className="tap-card" onClick={()=>setInvModal(`order:view:day:${todayKeyPO}`)}
               style={{ position:"relative", background:FUT.card, backdropFilter:"blur(14px)", WebkitBackdropFilter:"blur(14px)", border:`1.5px solid ${FUT.accent}55`, borderRadius:20, padding:"20px", cursor:"pointer", overflow:"hidden" }}>
               <div style={{ position:"absolute", top:-30, right:-30, width:120, height:120, borderRadius:"50%", background:"radial-gradient(circle,#a78bfa33,transparent 70%)" }}/>
               <div style={{ display:"flex", alignItems:"center", gap:14, position:"relative" }}>
@@ -17509,27 +17518,36 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
           </div>
           <div style={{ flex:1, overflowY:"auto", padding:"12px 14px 16px" }}>
             {reviewItems.length === 0 && <div style={{ color:"#64748b", textAlign:"center", marginTop:40, fontSize:14 }}>কোনো পণ্য সিলেক্ট করা হয়নি</div>}
-            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-              {reviewItems.map((p) => (
-                <div key={p.id} style={{ background:FUT.card, backdropFilter:"blur(10px)", WebkitBackdropFilter:"blur(10px)", border:`1px solid ${FUT.accent2}33`, borderRadius:16, padding:"12px 14px" }}>
-                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
-                    <div style={{ minWidth:0, flex:1 }}>
-                      <div style={{ color:"#f1f5f9", fontWeight:800, fontSize:13.5 }}>{p.name}{p.unit?<span style={{ color:"#64748b", fontSize:11 }}> ({p.unit})</span>:null}</div>
-                      <div style={{ color:"#94a3b8", fontSize:11, marginTop:3, display:"flex", alignItems:"center", gap:4 }}><span style={{ fontSize:11 }}>🏭</span>{supplierOf(p)}</div>
-                      <div style={{ color:"#5b6b8c", fontSize:10.5, marginTop:1 }}>বর্তমান স্টক: {p.stock||0}</div>
-                    </div>
-                    <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
-                      <input type="number" inputMode="numeric" min="0" value={orderQtysAll[p.id] || ""} placeholder="0"
-                        onChange={(e)=>{ const v = parseInt(e.target.value,10); setOrderQtysAll(q=>({...q,[p.id]: (isNaN(v)||v<0) ? 0 : v})); }}
-                        onClick={(e)=>e.target.select()}
-                        style={{ width:60, background:"#ffffff0d", border:`1px solid ${FUT.accent2}55`, borderRadius:10, color:FUT.accent2, fontSize:15, fontWeight:900, padding:"8px 4px", textAlign:"center", fontFamily:"inherit" }} />
-                      <button onClick={()=>setOrderQtysAll(q=>{ const n={...q}; delete n[p.id]; return n; })}
-                        style={{ background:"linear-gradient(135deg,#fb718522,#fb718510)", border:"1px solid #fb718544", borderRadius:10, color:"#fb7185", fontSize:15, fontWeight:800, padding:"7px 10px", cursor:"pointer", fontFamily:"inherit" }}>✕</button>
-                    </div>
-                  </div>
+            {reviewItems.length > 0 && (
+              // 🆕 প্রিন্ট/PDF আউটপুটের মতো টেবিল-স্টাইল লেআউট — # | পণ্যের নাম+সাপ্লায়ার | অর্ডার পরিমাণ(এডিটেবল) | বাদ দিন
+              <div style={{ background:FUT.card, backdropFilter:"blur(10px)", WebkitBackdropFilter:"blur(10px)", border:`1px solid ${FUT.accent2}33`, borderRadius:16, overflow:"hidden" }}>
+                <div style={{ display:"flex", alignItems:"center", background:"linear-gradient(135deg,#0e3a52,#0a2740)", borderBottom:`1px solid ${FUT.accent2}44`, padding:"9px 12px", gap:8 }}>
+                  <div style={{ width:22, color:FUT.accent2, fontWeight:800, fontSize:11, flexShrink:0 }}>#</div>
+                  <div style={{ flex:1, color:FUT.accent2, fontWeight:800, fontSize:11.5 }}>পণ্যের নাম / সাপ্লায়ার</div>
+                  <div style={{ width:76, color:FUT.accent2, fontWeight:800, fontSize:11, textAlign:"center", flexShrink:0 }}>পরিমাণ</div>
+                  <div style={{ width:34, flexShrink:0 }}></div>
                 </div>
-              ))}
-            </div>
+                {reviewItems.map((p, i) => (
+                  <div key={p.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 12px", borderBottom: i<reviewItems.length-1 ? "1px solid #ffffff0f" : "none", background: i%2===1 ? "#ffffff05" : "transparent" }}>
+                    <div style={{ width:22, color:"#64748b", fontWeight:700, fontSize:12, flexShrink:0 }}>{i+1}</div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ color:"#f1f5f9", fontWeight:800, fontSize:13 }}>{p.name}{p.unit?<span style={{ color:"#64748b", fontSize:10.5 }}> ({p.unit})</span>:null}</div>
+                      <div style={{ color:"#94a3b8", fontSize:10.5, marginTop:2, display:"flex", alignItems:"center", gap:4 }}><span style={{ fontSize:10.5 }}>🏭</span>{supplierOf(p)}<span style={{ color:"#5b6b8c" }}> · স্টক {p.stock||0}</span></div>
+                    </div>
+                    <input type="number" inputMode="numeric" min="0" value={orderQtysAll[p.id] || ""} placeholder="0"
+                      onChange={(e)=>{ const v = parseInt(e.target.value,10); setOrderQtysAll(q=>({...q,[p.id]: (isNaN(v)||v<0) ? 0 : v})); }}
+                      onClick={(e)=>e.target.select()}
+                      style={{ width:66, flexShrink:0, background:"#ffffff0d", border:`1px solid ${FUT.accent2}55`, borderRadius:10, color:FUT.accent2, fontSize:14.5, fontWeight:900, padding:"7px 4px", textAlign:"center", fontFamily:"inherit" }} />
+                    <button onClick={()=>setOrderQtysAll(q=>{ const n={...q}; delete n[p.id]; return n; })}
+                      style={{ width:30, height:30, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", background:"linear-gradient(135deg,#fb718522,#fb718510)", border:"1px solid #fb718544", borderRadius:9, color:"#fb7185", fontSize:14, fontWeight:800, padding:0, cursor:"pointer", fontFamily:"inherit" }}>✕</button>
+                  </div>
+                ))}
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"9px 12px", background:"#0891b214", borderTop:`1px solid ${FUT.accent2}33` }}>
+                  <span style={{ color:FUT.accent2, fontWeight:800, fontSize:11.5 }}>মোট পণ্য</span>
+                  <span style={{ color:"#f1f5f9", fontWeight:900, fontSize:13 }}>{reviewItems.length}</span>
+                </div>
+              </div>
+            )}
           </div>
           <div style={{ position:"sticky", bottom:0, zIndex:50, background:"linear-gradient(0deg,#050414 85%,transparent)", padding:"10px 14px 14px" }}>
             <button disabled={reviewItems.length===0} onClick={doConfirm}
@@ -17626,68 +17644,56 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
       );
     }
 
-    // ═══ দিনের ডিটেইলস পেজ — প্রিন্ট/WhatsApp এখানে ═══════════════════════════
+    // ═══ দিনের ডিটেইলস পেজ — ডে-নেভিগেটর + প্রিন্ট/WhatsApp এখানে ═══════════════
     if (invModal && invModal.startsWith('order:view:day:')) {
       const dk = invModal.replace('order:view:day:', '');
-      const recs = allPOOrders.filter(r => r.dateKey === dk);
       const items = mergeItemsForDay(dk);
       const totalQty = items.reduce((s,it)=>s+(it.qty||0),0);
-      if (recs.length === 0) { setInvModal('order:view'); return null; }
+      const isTodayDk = dk === todayKeyPO;
+      const navBtnStyle = { width:34, height:34, borderRadius:10, background:"#ffffff0d", border:"1px solid #ffffff18", color:FUT.accent2, fontSize:18, fontWeight:900, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontFamily:"inherit", lineHeight:1 };
       return (
         <div style={{ ...S.page, padding:"0", display:"flex", flexDirection:"column", height:"100%", overflow:"hidden", background:FUT.pageBg }}>
           <div style={{ position:"sticky", top:0, zIndex:50, background:FUT.headBg, borderBottom:`1px solid ${FUT.accent2}33`, padding:"12px 14px 10px", backdropFilter:"blur(12px)", WebkitBackdropFilter:"blur(12px)" }}>
-            <button style={S.textBtn} onClick={() => setInvModal('order:view')}>← ফিরুন</button>
-            <div style={{ color:"#f1f5f9", fontWeight:900, fontSize:16, marginTop:6 }}>🗓️ {dayLabelPO(dk)}</div>
-            <div style={{ color:"#64748b", fontSize:12, marginTop:2 }}>
-              <span style={{ color:FUT.accent2, fontWeight:700 }}>{items.length}</span>টি পণ্য · মোট পরিমাণ {totalQty}
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+              <button style={S.textBtn} onClick={() => setInvModal('order:view')}>← ফিরুন</button>
+              <span style={{ color:"#64748b", fontSize:11.5, fontWeight:700 }}><span style={{ color:FUT.accent2, fontWeight:800 }}>{items.length}</span>টি পণ্য · মোট পরিমাণ {totalQty}</span>
+            </div>
+            {/* 🆕 ডে-নেভিগেটর — আগের/পরের দিনে যেতে */}
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginTop:8 }}>
+              <button onClick={()=>setInvModal(`order:view:day:${shiftDayKey(dk,-1)}`)} style={navBtnStyle}>‹</button>
+              <div style={{ flex:1, textAlign:"center", background:"#00000030", border:`1px solid ${FUT.accent}33`, borderRadius:10, padding:"8px 0", color:"#f1f5f9", fontWeight:800, fontSize:14, display:"flex", alignItems:"center", justifyContent:"center", gap:7 }}>
+                🗓️ {dayLabelPO(dk)}
+                {isTodayDk && <span style={{ background:"#22d3ee22", color:"#22d3ee", fontSize:9.5, fontWeight:800, borderRadius:6, padding:"2px 7px", border:"1px solid #22d3ee44" }}>আজ</span>}
+              </div>
+              <button onClick={()=>setInvModal(`order:view:day:${shiftDayKey(dk,1)}`)} style={navBtnStyle}>›</button>
             </div>
           </div>
 
           <div style={{ flex:1, overflowY:"auto", padding:"14px 14px 16px" }}>
-            <div style={{ background:FUT.card, backdropFilter:"blur(10px)", border:`1px solid ${FUT.accent2}33`, borderRadius:18, overflow:"hidden", marginBottom:16 }}>
-              {items.map((it, i) => (
-                <div key={it.productId} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"11px 14px", borderBottom: i<items.length-1?"1px solid #ffffff0f":"none" }}>
-                  <div style={{ minWidth:0, flex:1 }}>
-                    <div style={{ color:"#f1f5f9", fontWeight:700, fontSize:13 }}>{it.name}{it.unit?` (${it.unit})`:""}</div>
-                    <div style={{ color:"#94a3b8", fontSize:11, marginTop:2, display:"flex", alignItems:"center", gap:4 }}><span style={{ fontSize:11 }}>🏭</span>{it.supplier}</div>
-                  </div>
-                  <div style={{ color:FUT.accent2, fontWeight:900, fontSize:15 }}>{it.qty}</div>
-                </div>
-              ))}
-            </div>
-
-            {recs.length > 1 && (
-              <>
-                <div style={{ color:FUT.accent, fontWeight:800, fontSize:11.5, marginBottom:8, letterSpacing:0.4 }}>এই দিনের এন্ট্রিসমূহ ({recs.length})</div>
-                <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:8 }}>
-                  {recs.map(rec => (
-                    <div key={rec.id} onClick={()=>setInvModal(`order:rec:${rec.id}`)} className="tap-card"
-                      style={{ display:"flex", alignItems:"center", justifyContent:"space-between", background:"#ffffff08", border:"1px solid #ffffff14", borderRadius:12, padding:"10px 12px", cursor:"pointer" }}>
-                      <div>
-                        <div style={{ color:"#f1f5f9", fontWeight:700, fontSize:12.5 }}>{new Date(rec.createdAt).toLocaleTimeString('bn-BD', { hour:'2-digit', minute:'2-digit' })}</div>
-                        <div style={{ color:"#94a3b8", fontSize:11, marginTop:2 }}>{resolvedItems(rec).length}টি পণ্য · দেখুন/এডিট</div>
-                      </div>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={FUT.accent} strokeWidth="2.5" strokeLinecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+            {items.length === 0 ? (
+              <div style={{ color:"#64748b", textAlign:"center", marginTop:50, fontSize:14 }}>এই দিনে কোনো ক্রয় অর্ডার নেই</div>
+            ) : (
+              <div style={{ background:FUT.card, backdropFilter:"blur(10px)", border:`1px solid ${FUT.accent2}33`, borderRadius:18, overflow:"hidden" }}>
+                {items.map((it, i) => (
+                  <div key={it.productId} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"11px 14px", borderBottom: i<items.length-1?"1px solid #ffffff0f":"none" }}>
+                    <div style={{ minWidth:0, flex:1 }}>
+                      <div style={{ color:"#f1f5f9", fontWeight:700, fontSize:13 }}>{it.name}{it.unit?` (${it.unit})`:""}</div>
+                      <div style={{ color:"#94a3b8", fontSize:11, marginTop:2, display:"flex", alignItems:"center", gap:4 }}><span style={{ fontSize:11 }}>🏭</span>{it.supplier}</div>
                     </div>
-                  ))}
-                </div>
-              </>
-            )}
-            {recs.length === 1 && (
-              <button onClick={()=>setInvModal(`order:rec:${recs[0].id}`)}
-                style={{ width:"100%", background:"#ffffff08", border:"1px solid #ffffff14", borderRadius:12, color:"#94a3b8", fontWeight:700, fontSize:12.5, padding:"10px 0", cursor:"pointer", fontFamily:"inherit" }}>
-                ✏️ এডিট/মুছুন
-              </button>
+                    <div style={{ color:FUT.accent2, fontWeight:900, fontSize:15 }}>{it.qty}</div>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
 
           <div style={{ position:"sticky", bottom:0, zIndex:50, background:"linear-gradient(0deg,#050414 88%,transparent)", padding:"10px 14px 14px", display:"flex", gap:10 }}>
-            <button onClick={()=>openPrintWindow(buildDayOrderHtml(dk))}
-              style={{ flex:1, background:"linear-gradient(135deg,#0369a1,#0ea5e9)", border:"none", borderRadius:14, color:"#fff", fontWeight:800, fontSize:13, padding:"12px 0", cursor:"pointer", fontFamily:"inherit" }}>
+            <button disabled={items.length===0} onClick={()=>openPrintWindow(buildDayOrderHtml(dk))}
+              style={{ flex:1, background: items.length===0 ? "#334155" : "linear-gradient(135deg,#0369a1,#0ea5e9)", opacity: items.length===0?0.6:1, border:"none", borderRadius:14, color:"#fff", fontWeight:800, fontSize:13, padding:"12px 0", cursor: items.length===0?"not-allowed":"pointer", fontFamily:"inherit" }}>
               🖨️ প্রিন্ট
             </button>
-            <button onClick={()=>sendDayWhatsApp(dk)}
-              style={{ flex:1, background:"linear-gradient(135deg,#15803d,#22c55e)", border:"none", borderRadius:14, color:"#fff", fontWeight:800, fontSize:13, padding:"12px 0", cursor:"pointer", fontFamily:"inherit" }}>
+            <button disabled={items.length===0} onClick={()=>sendDayWhatsApp(dk)}
+              style={{ flex:1, background: items.length===0 ? "#334155" : "linear-gradient(135deg,#15803d,#22c55e)", opacity: items.length===0?0.6:1, border:"none", borderRadius:14, color:"#fff", fontWeight:800, fontSize:13, padding:"12px 0", cursor: items.length===0?"not-allowed":"pointer", fontFamily:"inherit" }}>
               💬 WhatsApp
             </button>
           </div>
