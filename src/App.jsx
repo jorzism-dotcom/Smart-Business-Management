@@ -10867,9 +10867,21 @@ function SmartBusinessMgmt() {
     })();
     return () => { cancelled = true; };
   }, [detailCId, fssReady]);
-  useFSSCollection("smsLog", smsLog, setSmsLog, fssReady, { onSync: setSyncToast });
-  useFSSCollection("suppliers", suppliers, setSuppliers, fssReady, { onSync: setSyncToast });
-  useFSSCollection("purchaseOrders", purchaseOrders, setPurchaseOrders, fssReady, { onSync: setSyncToast });
+  // 🔴 ফিক্স (products/customers-এর মতোই সুরক্ষা): smsLog-এ প্রতিটা নতুন SMS
+  // পাঠানোর সময় ৯০ দিনের বেশি পুরনো এন্ট্রি লোকালি ছাঁটাই হয় (sendSMS দেখুন) —
+  // এটা নিছক লোকাল স্টোরেজ ম্যানেজমেন্ট, ইউজারের ইচ্ছাকৃত ডিলিট না। syncDeletes
+  // আগে default true থাকায় এই ছাঁটাই সরাসরি Firestore delete-এ পরিণত হতো —
+  // SMS হিস্ট্রি সব ডিভাইস থেকেই স্থায়ীভাবে মুছে যেত। এখন merge-only (bookkeeping
+  // শুধু লোকাল), কোনো auto-delete Firestore-এ যাবে না।
+  useFSSCollection("smsLog", smsLog, setSmsLog, fssReady, { onSync: setSyncToast, syncDeletes: false });
+  // 🔴 ফিক্স (প্রিভেন্টিভ — এখনো কোনো UI-delete নেই এই কালেকশনে, কিন্তু
+  // ভবিষ্যতে যোগ হলে products-এর প্যাটার্নেই সরাসরি FSS.deleteRecord("suppliers", id)
+  // কল করতে হবে; ততক্ষণে stale-cache mass-delete থেকে সুরক্ষিত থাকল)।
+  useFSSCollection("suppliers", suppliers, setSuppliers, fssReady, { onSync: setSyncToast, syncDeletes: false });
+  // 🔴 ফিক্স (products-এর মতোই সুরক্ষা — stale-cache mass-delete ঝুঁকি): এখন
+  // ইচ্ছাকৃত ডিলিট সরাসরি FSS.deleteRecord("purchaseOrders", id) কল করে হয়
+  // (দেখুন deletePOGroup)।
+  useFSSCollection("purchaseOrders", purchaseOrders, setPurchaseOrders, fssReady, { onSync: setSyncToast, syncDeletes: false });
   // ── stockMovements Windowed Sync — শুধু শেষ ৩০ দিনের মুভমেন্ট real-time ──
   // আগে: useFSSCollection("stockMovements"...) → পুরো collection pull (১০ লাখ
   // ইনভয়েসে stockMovements-ও লাখ ছাড়িয়ে যেত)। এখন: শুধু ৩০ দিনের window —
@@ -10919,13 +10931,20 @@ function SmartBusinessMgmt() {
   // 🔴 ফিক্স: expenses-এও একই প্যাটার্ন — auto-delete বন্ধ, ইচ্ছাকৃত ডিলিট এখন
   // সরাসরি FSS.deleteRecord("expenses", id) কল করে (দেখুন Expenses পেজ)।
   useFSSCollection("expenses", expenses, setExpenses, fssReady, { onSync: setSyncToast, syncDeletes: false });
-  useFSSCollection("returns",  returns,  setReturns,  fssReady, { onSync: setSyncToast });
-  useFSSCollection("auditLogs", auditLogs, setAuditLogs, fssReady, { onSync: setSyncToast });
-  useFSSCollection("quotations", quotations, setQuotations, fssReady, { onSync: setSyncToast });
+  // 🔴 ফিক্স (প্রিভেন্টিভ — একই কারণে, দেখুন suppliers-এর কমেন্ট)
+  useFSSCollection("returns",  returns,  setReturns,  fssReady, { onSync: setSyncToast, syncDeletes: false });
+  // 🔴 ফিক্স (products/smsLog-এর মতোই সুরক্ষা): লোকাল auditLogs ২০০০-এ ক্যাপ করা
+  // হয় (setAuditLogs(...).slice(0,2000) দেখুন) — নিছক স্টোরেজ ম্যানেজমেন্ট, তাই
+  // এই ছাঁটাইয়ে Firestore delete পাঠানো ঠিক না (অডিট ট্রেইল সব ডিভাইস থেকে
+  // হারিয়ে যাওয়ার ঝুঁকি)।
+  useFSSCollection("auditLogs", auditLogs, setAuditLogs, fssReady, { onSync: setSyncToast, syncDeletes: false });
+  // 🔴 ফিক্স (প্রিভেন্টিভ — একই কারণে, দেখুন suppliers-এর কমেন্ট)
+  useFSSCollection("quotations", quotations, setQuotations, fssReady, { onSync: setSyncToast, syncDeletes: false });
   // 🔴 ফিক্স: supplierPayments-এও একই প্যাটার্ন — auto-delete বন্ধ, ইচ্ছাকৃত ডিলিট
   // এখন সরাসরি FSS.deleteRecord("supplierPayments", id) কল করে (দেখুন SupplierPayments পেজ)।
   useFSSCollection("supplierPayments", supplierPayments, setSupplierPayments, fssReady, { onSync: setSyncToast, syncDeletes: false });
-  useFSSCollection("paymentInvoices", paymentInvoices, setPaymentInvoices, fssReady, { onSync: setSyncToast });
+  // 🔴 ফিক্স (প্রিভেন্টিভ — একই কারণে, দেখুন suppliers-এর কমেন্ট)
+  useFSSCollection("paymentInvoices", paymentInvoices, setPaymentInvoices, fssReady, { onSync: setSyncToast, syncDeletes: false });
   // 🗑️ Recycle Bin — এখন সব ডিভাইসে সিঙ্ক হয় (আগে শুধু লোকাল ছিল)
   useFSSCollection("deletedProducts", deletedProducts, setDeletedProducts, fssReady, { onSync: setSyncToast });
   useFSSCollection("deletedCustomers", deletedCustomers, setDeletedCustomers, fssReady, { onSync: setSyncToast });
@@ -11460,11 +11479,18 @@ function SmartBusinessMgmt() {
           customers: new Set((deletedCustomers || []).map(r => String(r.id))),
           products:  new Set((deletedProducts  || []).map(r => String(r.id))),
         };
-        let anyChange = false;
+        // 🔴 ফিক্স (redundant mass-write বাগ): আগে `anyChange` লুপের বাইরে একবারই
+        // ডিক্লেয়ার হতো — তাই একটা কালেকশনে (যেমন customers) সত্যিকার merge change
+        // হলে, তার পরের সব কালেকশনও (products, invoices...) unnecessarily সম্পূর্ণ
+        // array আবার Firestore-এ push করত, even যদি সেই নির্দিষ্ট কালেকশনে কিছুই না
+        // বদলে থাকে (প্রতিটা রেকর্ডে আলাদা FSS.setRecord() write — বড় দোকানে হাজার
+        // হাজার অহেতুক write, Firestore billing/ব্যাটারি খরচ বাড়ায়)। এখন প্রতিটা
+        // কালেকশনের জন্য আলাদা flag — একটার change আরেকটাকে প্রভাবিত করবে না।
         COLLECTIONS.forEach(([colName, localArr, setter]) => {
           const driveArr = driveData[colName] || [];
           if (!driveArr.length) { mergedData[colName] = localArr; return; }
 
+          let anyChange = false;
           const tombstones = deletedIdSets[colName];
           const merged = new Map();
           // প্রথমে local state রাখো
@@ -11619,13 +11645,28 @@ function SmartBusinessMgmt() {
   // রিয়েল-টাইম sync হয় — এই timer শুধু বাড়তি safety-net (local file + Google Drive)।
   // অ্যাডমিন ফোন নিজের OAuth token সাইলেন্টলি রিফ্রেশ করে Firestore settings-এ রাখে;
   // স্টাফ ফোন নিজে OAuth না করে সেই token দিয়েই অ্যাডমিনের Drive-এ আপলোড করে।
+  // 🔴 ফিক্স (stale-closure — অটো ব্যাকআপ পুরনো ডেটা সেভ করছিল): নিচের
+  // useEffect-টা শুধু [loaded, firebaseEnabled, firebaseConfig, role] বদলালে
+  // রি-রান হয় (কার্যত অ্যাপ বুট/লগইনে একবারই) — তাই এর ভেতরের runLocalBackup/
+  // runDriveBackup closure-এ থাকা `buildBackupData` রেফারেন্স সেই মুহূর্তের
+  // পুরনোটাই থেকে যেত। buildBackupData নিজে customers/products/invoices...
+  // বদলালেই নতুন রেফারেন্স পায় (useCallback), কিন্তু effect সেই নতুন রেফারেন্স
+  // কখনো দেখত না — ফলে প্রতি ১ মিনিট/৪৫ মিনিটের local file ও Drive সেফটি-নেট
+  // ব্যাকআপ সারাদিন app-boot-টাইমের ডেটাই বারবার লিখত, নতুন সেল/কাস্টমার কখনো
+  // এতে ঢুকত না। LocalStorageSection-এ আগেই ব্যবহৃত ref-প্যাটার্ন (দেখুন
+  // `_latestData = useRef(data)`) এখানেও প্রয়োগ করা হলো — timer-এর রি-সেট
+  // ফ্রিকোয়েন্সি অপরিবর্তিত রেখেই (dependency array বদলায়নি, তাই "data বদলালেই
+  // টাইমার রিসেট" জাতীয় থ্র্যাশিং হবে না) প্রতিটা cycle সবসময় সর্বশেষ ডেটা পড়বে।
+  const _latestBuildBackupData = useRef(buildBackupData);
+  useEffect(() => { _latestBuildBackupData.current = buildBackupData; }, [buildBackupData]);
+
   useEffect(() => {
     if (!loaded || !firebaseEnabled || !firebaseConfig) return;
     const isStaffDevice = currentUser?.role === "staff";
 
     const runLocalBackup = async () => {
       try {
-        const data = await buildBackupData();
+        const data = await _latestBuildBackupData.current(); // সবসময় সর্বশেষ buildBackupData
         // #৯/#১৬ — retention/WORM প্রতি cycle-এ চেক হয় (নিজেরাই দিনে/মাসে
         // একবার idempotent সেভ করে) — delta-skip-এর সাথে সম্পর্কহীন, কারণ
         // এগুলো নির্দিষ্ট ক্যালেন্ডার তারিখ/মাসের প্রতিনিধিত্বমূলক অবস্থা
@@ -11716,7 +11757,7 @@ function SmartBusinessMgmt() {
           }
           return; // token নেই/expired — এই cycle skip, পরের cycle-এ আবার চেষ্টা
         }
-        const data = await buildBackupData();
+        const data = await _latestBuildBackupData.current(); // 🔴 ফিক্স: সবসময় সর্বশেষ ডেটা (দেখুন উপরের stale-closure কমেন্ট)
         // #৪ ডেল্টা সিঙ্ক — "drive" checkpoint GoogleDriveSection-এর নিজস্ব
         // silentBackup timer-এর সাথেও শেয়ার করা (একই Drive ফাইল, তাই দুটো
         // আলাদা টাইমার একই অপরিবর্তিত ডেটা দুইবার আপলোড করবে না)।
@@ -18601,7 +18642,13 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
     const resolvedItems = (rec) => (rec.items||[]).map(it => ({ ...it, supplier: it.supplier || rec.supplier || "অজ্ঞাত" }));
     const recTotalQty = (rec) => resolvedItems(rec).reduce((s,it)=>s+(it.qty||0),0);
     const allPOOrders = (purchaseOrders||[]).filter(p => p._type === "purchase_order");
-    const deletePOGroup = (id) => setPurchaseOrders(prev => (prev||[]).filter(p => p.id !== id));
+    // 🔴 ফিক্স: purchaseOrders এখন syncDeletes:false (দেখুন useFSSCollection("purchaseOrders",...))
+    // — তাই ইচ্ছাকৃত ডিলিট এখন সরাসরি FSS.deleteRecord() কল করে হয়, নাহলে
+    // ডিলিটটা শুধু লোকালেই থাকত, Firestore/অন্য ডিভাইসে কখনো সিঙ্ক হতো না।
+    const deletePOGroup = (id) => {
+      setPurchaseOrders(prev => (prev||[]).filter(p => p.id !== id));
+      if (FSS.isReady()) FSS.deleteRecord("purchaseOrders", id);
+    };
 
     const dayLabelPO = (dk) => { const d = new Date(dk); if (isNaN(d.getTime())) return dk; return `${d.getDate()} ${MONTH_NAMES_BN[d.getMonth()]}, ${d.getFullYear()}`; };
     // 🆕 দিন পাল্টানোর হেল্পার (ডে-নেভিগেটরের জন্য) — dateKey (YYYY-MM-DD) থেকে ±delta দিন
@@ -28955,6 +29002,19 @@ function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken }
   const [statusMsg, setStatusMsg] = useState("");
   const [needAuth, setNeedAuth] = useState(false);
   const autoTimer = useRef(null);
+  // 🔴 ফিক্স (auto-backup timer থ্র্যাশিং): `data` প্রপ প্রতি প্যারেন্ট রেন্ডারেই
+  // নতুন রেফারেন্স পায় (buildManualBackupData() প্রতিবার নতুন object রিটার্ন
+  // করে) — Settings স্ক্রিন সাধারণত ঘন ঘন re-render হয় (যেকোনো global state
+  // বদলে)। আগে auto-backup useEffect-এর dependency array-তে সরাসরি `data`
+  // ছিল, তাই প্রতিবার `data` বদলালেই clearInterval+setInterval হয়ে টাইমার
+  // শূন্য থেকে আবার শুরু হতো — ফলে ব্যবহারিকভাবে পূর্ণ ইন্টারভাল (যেমন ৩০
+  // মিনিট) কখনোই শেষ হওয়ার সুযোগ পেত না, silentBackup প্রায় কখনোই ফায়ার
+  // হতো না। LocalStorageSection-এর `_latestData` প্যাটার্নের মতোই এখন একটা
+  // ref-এ সবসময় সর্বশেষ data রাখা হয় — timer নিজে শুধু autoEnabled/
+  // autoInterval/connected বদলালেই রিসেট হবে, data বদলালে না; কিন্তু ফায়ার
+  // হওয়ার সময় সবসময় ref থেকে সর্বশেষ ডেটাই পড়বে।
+  const _latestData = useRef(data);
+  useEffect(() => { _latestData.current = data; }, [data]);
   // ── Google Drive OAuth via @capacitor/browser + deep link ────────────────
   // Flow:
   // 1. @capacitor/browser দিয়ে Chrome Custom Tab-এ Google OAuth URL খোলো
@@ -28992,7 +29052,9 @@ function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken }
     if (token) { setConnected(true); }
   }, []);
 
-  // Auto-backup timer
+  // Auto-backup timer — 🔴 ফিক্স: dependency array থেকে `data` সরানো হলো,
+  // যাতে data বদলালে টাইমার রিসেট না হয় (উপরের কমেন্ট দেখুন); silentBackup
+  // এখন ref থেকে সবসময় সর্বশেষ data পড়ে।
   useEffect(() => {
     if (autoTimer.current) clearInterval(autoTimer.current);
     if (!autoEnabled || !connected) return;
@@ -29000,10 +29062,11 @@ function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken }
     autoTimer.current = setInterval(() => { silentBackup(); }, ms);
     return () => clearInterval(autoTimer.current);
     // eslint-disable-next-line
-  }, [autoEnabled, autoInterval, connected, data]);
+  }, [autoEnabled, autoInterval, connected]);
 
   const silentBackup = useCallback(async () => {
     try {
+      const data = _latestData.current; // 🔴 ফিক্স: সবসময় সর্বশেষ data (ref থেকে)
       // #৪ ডেল্টা সিঙ্ক — "drive" checkpoint মূল App-এর অটো Drive backup
       // cycle-এর সাথে শেয়ার করা (একই account-এর একই ফাইল), তাই দুটো
       // আলাদা টাইমার একই অপরিবর্তিত ডেটা দুইবার আপলোড করবে না।
@@ -29027,7 +29090,7 @@ function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken }
       setLastSync(now);
       await DeltaSync.markSynced("drive", newHashes);
     } catch {}
-  }, [data, getUsableToken]);
+  }, [getUsableToken]); // 🔴 ফিক্স: data আর সরাসরি dependency না — ref (_latestData) থেকে পড়া হয়
 
   const handleConnect = async () => {
     setSyncing(true);
