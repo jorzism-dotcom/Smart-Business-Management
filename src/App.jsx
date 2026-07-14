@@ -6261,35 +6261,153 @@ function openPrintWindow(htmlContent, onBack) {
   _showPrintOverlay(htmlContent, onBack);
 }
 
-// In-app print overlay (WebView fallback)
+// ── ইন-অ্যাপ প্রিন্ট/PDF প্রিভিউ ওভারলে — আধুনিক, প্রিমিয়াম, ফিউচারিস্টিক ─────────
+// এই একটা ফাংশন সারা অ্যাপের সব openPrintWindow() কলের জন্য ব্যবহৃত হয়, তাই এখানে
+// ডিজাইন/ফিচার ফিক্স করলে অ্যাপের সব প্রিন্ট প্রিভিউ স্ক্রিনে একসাথে প্রয়োগ হয়ে যায়।
 function _showPrintOverlay(htmlContent, onBack) {
   const existing = document.getElementById("__print_overlay__");
   if (existing) existing.remove();
+  // আগের কোনো history-state pushed থাকলে ক্লিন-আপ
+  if (window.__printOverlayPushed__) window.__printOverlayPushed__ = false;
+
+  // ফন্ট-এম্বেড না থাকলে একবার লোড করে নেওয়া (ওভারলের UI-এর জন্য, PDF-এর জন্য নয়)
+  if (!document.getElementById("__print_overlay_font__")) {
+    const link = document.createElement("link");
+    link.id = "__print_overlay_font__";
+    link.rel = "stylesheet";
+    link.href = "https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@500;600;700;800&display=swap";
+    document.head.appendChild(link);
+  }
+  if (!document.getElementById("__print_overlay_style__")) {
+    const style = document.createElement("style");
+    style.id = "__print_overlay_style__";
+    style.textContent = `
+      @keyframes __po_spin__ { to { transform: rotate(360deg); } }
+      @keyframes __po_fadein__ { from { opacity:0; transform:translateY(-6px);} to { opacity:1; transform:translateY(0);} }
+      #__print_overlay__ .__po_btn__ { transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease; }
+      #__print_overlay__ .__po_btn__:active { transform: scale(0.94); }
+      #__print_overlay__ .__po_toast__ { animation: __po_fadein__ 0.25s ease; }
+    `;
+    document.head.appendChild(style);
+  }
+
   const overlay = document.createElement("div");
   overlay.id = "__print_overlay__";
-  overlay.style.cssText = "position:fixed;inset:0;background:#fff;z-index:9999;display:flex;flex-direction:column;";
+  overlay.style.cssText = "position:fixed;inset:0;background:#f1f5f9;z-index:9999;display:flex;flex-direction:column;font-family:'Hind Siliguri','Noto Sans Bengali',sans-serif;";
+
   const toolbar = document.createElement("div");
-  toolbar.style.cssText = "background:#1a1a2e;padding:10px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap;";
-  toolbar.innerHTML = `<button id="__print_back__" style="background:#22c55e;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">← ফিরুন</button>
-    <button id="__print_btn__" style="background:#3b82f6;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">🖨️ Print</button>
-    <button id="__pdf_dl_btn__" style="background:#7c3aed;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">📥 PDF সেভ</button>`;
+  toolbar.style.cssText = "background:radial-gradient(circle at 15% -20%,#3b1a7a55 0%,transparent 45%),radial-gradient(circle at 90% 120%,#0891b255 0%,transparent 45%),linear-gradient(180deg,#0a0620,#0d0826);padding:12px 14px 11px;display:flex;flex-direction:column;gap:10px;flex-shrink:0;box-shadow:0 4px 18px rgba(0,0,0,0.35);position:relative;z-index:2;";
+
+  const topRow = document.createElement("div");
+  topRow.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;";
+  topRow.innerHTML = `
+    <button id="__print_back__" class="__po_btn__" style="display:flex;align-items:center;gap:6px;background:#ffffff12;border:1px solid #ffffff22;color:#e2e8f0;border-radius:11px;padding:8px 13px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      ফিরুন
+    </button>
+    <span style="color:#a78bfa;font-weight:800;font-size:12.5px;letter-spacing:0.3px;display:flex;align-items:center;gap:6px;">📄 প্রিভিউ</span>`;
+
+  const btnRow = document.createElement("div");
+  btnRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;";
+  btnRow.innerHTML = `
+    <button id="__print_btn__" class="__po_btn__" style="display:flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#1e40af,#3b82f6);color:#fff;border:none;border-radius:12px;padding:11px 6px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;box-shadow:0 4px 14px rgba(59,130,246,0.4);">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/></svg>
+      Print
+    </button>
+    <button id="__pdf_share_btn__" class="__po_btn__" style="display:flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#065f46,#22c55e);color:#fff;border:none;border-radius:12px;padding:11px 6px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;box-shadow:0 4px 14px rgba(34,197,94,0.4);">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L7.04 9.81C6.5 9.31 5.79 9 5 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91-1.31-2.92-2.92-2.92z"/></svg>
+      Share
+    </button>
+    <button id="__pdf_dl_btn__" class="__po_btn__" style="display:flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#7c3aed,#a78bfa);color:#fff;border:none;border-radius:12px;padding:11px 6px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;box-shadow:0 4px 14px rgba(124,58,237,0.4);">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+      PDF
+    </button>`;
+
+  toolbar.appendChild(topRow);
+  toolbar.appendChild(btnRow);
+
+  const frameWrap = document.createElement("div");
+  frameWrap.style.cssText = "flex:1;position:relative;overflow:hidden;";
   const frame = document.createElement("iframe");
-  frame.style.cssText = "flex:1;border:none;width:100%;";
+  frame.style.cssText = "border:none;width:100%;height:100%;background:#fff;";
   // srcdoc ব্যবহার: WebView-এ contentDocument.write CORS block করে, srcdoc করে না
   frame.srcdoc = htmlContent;
+  frameWrap.appendChild(frame);
+
+  const toastEl = document.createElement("div");
+  toastEl.id = "__print_toast__";
+  toastEl.className = "__po_toast__";
+  toastEl.style.cssText = "position:absolute;left:14px;right:14px;bottom:14px;background:#0f172aee;color:#f1f5f9;border-radius:12px;padding:10px 14px;font-size:12.5px;font-weight:600;text-align:center;display:none;box-shadow:0 6px 20px rgba(0,0,0,0.35);z-index:5;white-space:pre-line;";
+  frameWrap.appendChild(toastEl);
+
   overlay.appendChild(toolbar);
-  overlay.appendChild(frame);
+  overlay.appendChild(frameWrap);
   document.body.appendChild(overlay);
-  document.getElementById("__print_back__").onclick = () => { overlay.remove(); if (typeof onBack === "function") onBack(); };
+
+  const showToast = (msg, ms = 3200) => {
+    toastEl.textContent = msg;
+    toastEl.style.display = "block";
+    clearTimeout(toastEl.__t);
+    toastEl.__t = setTimeout(() => { toastEl.style.display = "none"; }, ms);
+  };
+
+  // ── ফোনের হার্ডওয়্যার ব্যাক বাটন ফিক্স ──────────────────────────────────────
+  // ওভারলে খোলার সময় একটা history state push করি, যাতে ব্যাক বাটনে চাপলে
+  // WebView/browser ডিফল্ট আচরণ (অ্যাপ থেকে বেরিয়ে যাওয়া) না ঘটে — বরং popstate
+  // ধরে শুধু ওভারলে বন্ধ হয় এবং অ্যাপ ঠিকঠাক ফিরে আসে।
+  window.history.pushState({ printOverlay: true }, "");
+  window.__printOverlayPushed__ = true;
+  const closeOverlay = (fromPopstate) => {
+    overlay.remove();
+    window.removeEventListener("popstate", onPopState);
+    if (window.__printOverlayPushed__ && !fromPopstate) {
+      window.__printOverlayPushed__ = false;
+      window.history.back();
+    } else {
+      window.__printOverlayPushed__ = false;
+    }
+    if (typeof onBack === "function") onBack();
+  };
+  const onPopState = () => closeOverlay(true);
+  window.addEventListener("popstate", onPopState);
+
+  document.getElementById("__print_back__").onclick = () => closeOverlay(false);
   document.getElementById("__print_btn__").onclick = () => { try { frame.contentWindow.print(); } catch {} };
+
   document.getElementById("__pdf_dl_btn__").onclick = async () => {
     const btn = document.getElementById("__pdf_dl_btn__");
-    if (btn) { btn.disabled = true; btn.textContent = "⏳ তৈরি হচ্ছে..."; }
+    const orig = btn.innerHTML;
+    btn.disabled = true;
+    btn.style.opacity = "0.65";
+    btn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" style="animation:__po_spin__ 0.8s linear infinite"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="3" stroke-dasharray="42" stroke-linecap="round"/></svg> তৈরি হচ্ছে`;
     const result = await downloadAsPdf(htmlContent, "SBM_ফাইল_" + Date.now());
-    if (btn) { btn.disabled = false; btn.textContent = "📥 PDF সেভ"; }
-    if (result.msg) alert(result.msg);
+    btn.disabled = false;
+    btn.style.opacity = "1";
+    btn.innerHTML = orig;
+    if (result.msg) showToast(result.msg);
+  };
+
+  // ── শেয়ার বাটন — আসল PDF তৈরি করে Web Share API দিয়ে (সাপোর্টেড হলে WhatsApp
+  // সহ যেকোনো অ্যাপে ফাইল হিসেবে শেয়ার করা যায়); না থাকলে ডাউনলোড করে দেয়
+  document.getElementById("__pdf_share_btn__").onclick = async () => {
+    const btn = document.getElementById("__pdf_share_btn__");
+    const orig = btn.innerHTML;
+    btn.disabled = true;
+    btn.style.opacity = "0.65";
+    btn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" style="animation:__po_spin__ 0.8s linear infinite"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="3" stroke-dasharray="42" stroke-linecap="round"/></svg> তৈরি হচ্ছে`;
+    try {
+      await sharePdfWhatsApp(htmlContent, "SBM_ফাইল");
+      showToast("শেয়ার সিট খোলা হয়েছে ✓ সেখান থেকে WhatsApp বেছে নিন");
+    } catch (e) {
+      showToast("শেয়ার করতে সমস্যা হয়েছে");
+    } finally {
+      btn.disabled = false;
+      btn.style.opacity = "1";
+      btn.innerHTML = orig;
+    }
   };
 }
+
 
 // ── PDF Generation Utilities ──────────────────────────────────────────────────
 // নন-এডিটেবল PDF তৈরি করে শেয়ার/প্রিন্ট করার জন্য
@@ -7109,6 +7227,47 @@ async function shareViaWhatsApp(mobile, message, showToast) {
     console.warn("[WhatsApp] open failed:", e);
     try { window.open(url, "_blank"); } catch {}
   }
+}
+
+// ─── 📇 সংরক্ষিত WhatsApp নম্বর — কাস্টমার/সাপ্লায়ারের জন্য ─────────────────
+// কাস্টমার/সাপ্লায়ারের নামের বিপরীতে WhatsApp নম্বর একবার দিলে ডিভাইসে (localStorage)
+// সংরক্ষিত থাকে — পরেরবার থেকে আর জিজ্ঞেস করা লাগে না, সরাসরি সেই নম্বরে চ্যাট খোলে।
+// কাস্টমারের অফিসিয়াল mobile ফিল্ড থাকলে সবসময় সেটাই আগে ব্যবহার হয়; এই ক্যাশ শুধু
+// তখনই কাজে লাগে যখন mobile ফাঁকা (বিশেষ করে সাপ্লায়ারের ক্ষেত্রে, যাদের কোনো ফোন-ফিল্ড নেই)।
+const WA_CONTACTS_KEY = "sbm_wa_contacts_v1";
+function _loadWaContacts() {
+  try { return JSON.parse(localStorage.getItem(WA_CONTACTS_KEY) || "{}"); } catch { return {}; }
+}
+function _saveWaContacts(obj) {
+  try { localStorage.setItem(WA_CONTACTS_KEY, JSON.stringify(obj)); } catch {}
+}
+function getSavedWhatsappNumber(type, name) {
+  const key = (name || "").trim();
+  if (!key) return "";
+  const all = _loadWaContacts();
+  return all[`${type}:${key}`] || "";
+}
+function saveWhatsappNumber(type, name, number) {
+  const key = (name || "").trim();
+  const num = (number || "").trim();
+  if (!key || !num) return;
+  const all = _loadWaContacts();
+  all[`${type}:${key}`] = num;
+  _saveWaContacts(all);
+}
+// mobile না থাকলে: আগে সংরক্ষিত নম্বর খোঁজে → না পেলে একবার জিজ্ঞেস করে সংরক্ষণ করে →
+// ইউজার বাতিল করলে সাধারণ শেয়ার-শিট খোলে (WhatsApp নিজে কন্টাক্ট বেছে নিতে দেয়)।
+async function shareViaWhatsAppSmart(type, name, mobile, message, showToast) {
+  if (mobile) return shareViaWhatsApp(mobile, message, showToast);
+  const label = type === "supplier" ? "সাপ্লায়ার" : "কাস্টমার";
+  let num = getSavedWhatsappNumber(type, name);
+  if (!num) {
+    const input = window.prompt(`${label} "${name || ""}"-এর WhatsApp নম্বর দিন (একবার দিলে পরেরবার থেকে মনে রাখা হবে):`, "");
+    if (input && input.trim()) { saveWhatsappNumber(type, name, input.trim()); num = input.trim(); }
+  }
+  if (num) return shareViaWhatsApp(num, message, showToast);
+  // নম্বর না দিলে — সাধারণ শেয়ার-শিট (কন্টাক্ট বাছাই WhatsApp-এর হাতে)
+  window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, "_blank");
 }
 
 // বাংলাদেশ সময় (fixed GMT+6, ডিভাইসের টাইমজোন নির্বিশেষে) অনুযায়ী আজকের dateKey।
@@ -13944,7 +14103,7 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
                 msg += `\nনগদ: ৳${fmtMoney(printInv.paidAmount||0)} · বাকি: ৳${fmtMoney(printInv.bakiAmount||0)}`;
               }
               msg += "\nধন্যবাদ।";
-              shareViaWhatsApp(mobile, msg, showToast);
+              shareViaWhatsAppSmart("customer", printInv.customerName, mobile, msg, showToast);
             }}
             style={{ ...S.saveBtn, width: "100%", marginTop: 10, marginBottom: 4,
               background: "linear-gradient(135deg,#22c55e,#16a34a)",
@@ -16166,6 +16325,10 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
   // ── মেয়াদোত্তীর্ণ পণ্য → দোকান থেকে সরালে অ্যাপ থেকেও সরানোর ব্যবস্থা ──────────
   const [expRemoveConfirm, setExpRemoveConfirm] = useState(null); // { product, batch }
   const [expRemoveSubmitting, setExpRemoveSubmitting] = useState(false);
+  const [poDeleteConfirmId, setPoDeleteConfirmId] = useState(null); // 🆕 ক্রয় অর্ডার লিস্টে ইনলাইন ডিলিট কনফার্মেশন
+  // 🔍 সাপ্লায়ার তালিকা পেজে পণ্য/সাপ্লায়ার অটো-সাজেস্ট সার্চ
+  const [supSearchQuery, setSupSearchQuery] = useState("");
+  const [supSearchFocused, setSupSearchFocused] = useState(false);
   // 🔴 ফিক্স: touchscreen-এ দ্রুত ডাবল-ট্যাপ করলে (বা কোনো কারণে দুইবার ইভেন্ট
   // fire করলে) removeExpiredBatch() দুইবার চলে একই ব্যাচের জন্য দুইটা আলাদা
   // stockMovement (source: "expired_removal") রেকর্ড তৈরি করে ফেলত — ফলে
@@ -17323,7 +17486,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/></svg>
                 🖨️ Print
               </button>
-              <button onClick={() => { const lines = supItems.map((p,i)=>`${i+1}. ${p.name} — স্টক: ${p.stock||0}${p.unit||""}`).join("\n"); window.open(`https://wa.me/?text=${encodeURIComponent(`${title} — ${selectedSupplier}\n${shopName}\n\n${lines}`)}`, '_blank'); }}
+              <button onClick={() => { const lines = supItems.map((p,i)=>`${i+1}. ${p.name} — স্টক: ${p.stock||0}${p.unit||""}`).join("\n"); shareViaWhatsAppSmart("supplier", selectedSupplier, "", `${title} — ${selectedSupplier}\n${shopName}\n\n${lines}`); }}
                 style={{ flex:1, background:"linear-gradient(135deg,#065f46,#10b981)", border:"none", borderRadius:12, padding:"10px", color:"#fff", fontWeight:800, fontSize:12, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z"/></svg>
                 📤 WhatsApp
@@ -17398,6 +17561,80 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
         <button style={S.textBtn} onClick={() => setInvModal(null)}>← ড্যাশবোর্ডে ফিরুন</button>
         <div style={{ color:"#e2e8f0", fontWeight:900, fontSize:16, marginBottom:2 }}>{title}</div>
         <div style={{ color:"#64748b", fontSize:12, marginBottom:10 }}>{items.length}টি পণ্য · {supplierList.length}টি সাপ্লায়ার</div>
+
+        {/* 🔍 পণ্য/সাপ্লায়ার সার্চ (অটো-সাজেস্ট সহ) — যেকোনো সাপ্লায়ারের পণ্য খুঁজে বের করুন */}
+        {(() => {
+          const q = supSearchQuery.trim().toLowerCase();
+          const matches = q.length === 0 ? [] : items
+            .filter(p => {
+              const supName = (p.company || p.category || "অজ্ঞাত");
+              return (p.name || "").toLowerCase().includes(q) || supName.toLowerCase().includes(q);
+            })
+            .slice(0, 8);
+          const showDropdown = supSearchFocused && q.length > 0;
+          const goToSupplierOf = (p) => {
+            const supName = p.company || p.category || "অজ্ঞাত";
+            setSupSearchQuery("");
+            setSupSearchFocused(false);
+            openSupplier(supName);
+          };
+          return (
+            <div style={{ position:"relative", marginBottom:14 }}>
+              <div style={{ position:"relative", display:"flex", alignItems:"center" }}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#64748b" strokeWidth="2.5" strokeLinecap="round"
+                  style={{ position:"absolute", left:12, pointerEvents:"none" }}>
+                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                <input
+                  type="text"
+                  value={supSearchQuery}
+                  onChange={(e) => setSupSearchQuery(e.target.value)}
+                  onFocus={() => setSupSearchFocused(true)}
+                  onBlur={() => setTimeout(() => setSupSearchFocused(false), 150)}
+                  placeholder="পণ্য বা সাপ্লায়ার খুঁজুন..."
+                  style={{
+                    width:"100%", background:"#0d1626", border:`1.5px solid ${accent}44`, borderRadius:12,
+                    padding:"11px 36px 11px 36px", color:"#e2e8f0", fontSize:13, fontFamily:"inherit", outline:"none",
+                  }}
+                />
+                {supSearchQuery.length > 0 && (
+                  <button
+                    onClick={() => { setSupSearchQuery(""); setSupSearchFocused(false); }}
+                    style={{ position:"absolute", right:10, background:"none", border:"none", color:"#64748b", fontSize:16, cursor:"pointer", padding:2, lineHeight:1 }}
+                  >✕</button>
+                )}
+              </div>
+              {showDropdown && (
+                <div style={{
+                  position:"absolute", top:"calc(100% + 6px)", left:0, right:0, zIndex:20,
+                  background:"#111c33", border:`1.5px solid ${accent}55`, borderRadius:12,
+                  boxShadow:"0 8px 24px rgba(0,0,0,0.4)", overflow:"hidden", maxHeight:320, overflowY:"auto",
+                }}>
+                  {matches.length === 0 ? (
+                    <div style={{ padding:"14px", color:"#64748b", fontSize:12.5, textAlign:"center" }}>কোনো ফলাফল পাওয়া যায়নি</div>
+                  ) : matches.map((p, i) => {
+                    const supName = p.company || p.category || "অজ্ঞাত";
+                    return (
+                      <div key={p.id || i}
+                        onMouseDown={() => goToSupplierOf(p)}
+                        style={{
+                          display:"flex", alignItems:"center", justifyContent:"space-between", gap:10,
+                          padding:"10px 14px", cursor:"pointer",
+                          borderBottom: i < matches.length - 1 ? "1px solid #ffffff10" : "none",
+                        }}>
+                        <div style={{ minWidth:0, flex:1 }}>
+                          <div style={{ color:"#e2e8f0", fontWeight:700, fontSize:13, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{p.name}</div>
+                          <div style={{ color:accent, fontSize:11, marginTop:2 }}>🏭 {supName}</div>
+                        </div>
+                        <span style={{ color:"#cbd5e1", fontSize:11.5, fontWeight:700, flexShrink:0 }}>{p.stock||0}{p.unit||""}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* মাসিক মেয়াদোত্তীর্ণ হিসাব — শুধু এডমিন */}
         {baseInvKey === 'expired' && currentUser?.role !== "staff" && (
@@ -17550,7 +17787,10 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
                 {sortedRows.map((r, i) => (
                   <tr key={r.id || i} style={{ background: i % 2 === 1 ? "#f8faff" : "#fff" }}>
                     <td style={{ padding:"9px 10px", fontSize:12, textAlign:"center", fontWeight:700, color:"#0369a1", borderBottom:"1px solid #f1f5f9" }}>{i+1}</td>
-                    <td style={{ padding:"9px 10px", fontSize:12.5, color:"#0f172a", borderBottom:"1px solid #f1f5f9" }}>{r.productName}{r.batchNo ? <span style={{ color:"#94a3b8", fontSize:11 }}> ({r.batchNo})</span> : null}</td>
+                    <td style={{ padding:"9px 10px", fontSize:12.5, color:"#0f172a", borderBottom:"1px solid #f1f5f9" }}>
+                      <div style={{ fontWeight:600 }}>{r.productName}</div>
+                      {r.batchNo && <div style={{ color:"#0891b2", fontSize:10.5, fontWeight:700, marginTop:2 }}>ব্যাচ: {r.batchNo}</div>}
+                    </td>
                     <td style={{ padding:"9px 10px", fontSize:12, color:"#334155", borderBottom:"1px solid #f1f5f9" }}>{r.company || r.supplier || "অজ্ঞাত"}</td>
                     <td style={{ padding:"9px 10px", fontSize:12.5, color:"#334155", textAlign:"right", borderBottom:"1px solid #f1f5f9" }}>{r.qty}{r.unit||""}</td>
                     <td style={{ padding:"9px 10px", fontSize:12.5, fontWeight:700, color:"#0f172a", textAlign:"right", borderBottom:"1px solid #f1f5f9" }}>৳{fmt(r.value||0)}</td>
@@ -17566,7 +17806,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
     );
   }
 
-  if (invModal === 'order' || invModal === 'order:create' || invModal === 'order:create:review' || (invModal && invModal.startsWith('order:view:day:')) || (invModal && invModal.startsWith('order:rec:'))) {
+  if (invModal === 'order' || invModal === 'order:list' || invModal === 'order:create' || invModal === 'order:create:review' || (invModal && invModal.startsWith('order:view:day:')) || (invModal && invModal.startsWith('order:rec:'))) {
     const todayKeyPO = todayEn();
     // ── 🆕 ফিউচারিস্টিক থিম টোকেন — পুরো ক্রয় অর্ডার মডিউলে ব্যবহৃত ──────────
     const FUT = {
@@ -17724,7 +17964,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
 
     // ═══ ল্যান্ডিং পেজ: তৈরি করুন / দেখুন — মাত্র ২টি বাটন ═══════════════════════
     if (invModal === 'order') {
-      const todayCount = allPOOrders.filter(r => r.dateKey === todayKeyPO).length;
+      const totalOrderCount = allPOOrders.length;
       return (
         <div style={{ ...S.page, padding:"0 14px 16px", background:FUT.pageBg, minHeight:"100%" }}>
           <button style={S.textBtn} onClick={() => { setInvModal(null); setOrderQtysAll({}); }}>← ড্যাশবোর্ডে ফিরুন</button>
@@ -17747,19 +17987,85 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
               </div>
             </div>
 
-            <div className="tap-card" onClick={()=>setInvModal(`order:view:day:${todayKeyPO}`)}
+            <div className="tap-card" onClick={()=>setInvModal('order:list')}
               style={{ position:"relative", background:FUT.card, backdropFilter:"blur(14px)", WebkitBackdropFilter:"blur(14px)", border:`1.5px solid ${FUT.accent}55`, borderRadius:20, padding:"20px", cursor:"pointer", overflow:"hidden" }}>
               <div style={{ position:"absolute", top:-30, right:-30, width:120, height:120, borderRadius:"50%", background:"radial-gradient(circle,#a78bfa33,transparent 70%)" }}/>
               <div style={{ display:"flex", alignItems:"center", gap:14, position:"relative" }}>
                 <div style={{ width:52, height:52, borderRadius:16, background:"linear-gradient(135deg,#a78bfa33,#f472b633)", border:"1px solid #a78bfa55", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:24 }}>📋</div>
                 <div style={{ flex:1 }}>
                   <div style={{ color:"#f1f5f9", fontWeight:900, fontSize:16 }}>ক্রয় অর্ডার দেখুন</div>
-                  <div style={{ color:"#94a3b8", fontSize:12, marginTop:3 }}>দৈনিক অর্ডার হিস্টোরি</div>
+                  <div style={{ color:"#94a3b8", fontSize:12, marginTop:3 }}>সব ক্রয় অর্ডার — আলাদা আলাদা তালিকা</div>
                 </div>
-                {todayCount > 0 && <div style={{ background:"linear-gradient(135deg,#a78bfa,#7c3aed)", borderRadius:10, padding:"3px 9px", color:"#fff", fontWeight:800, fontSize:11, flexShrink:0 }}>{todayCount} আজ</div>}
+                {totalOrderCount > 0 && <div style={{ background:"linear-gradient(135deg,#a78bfa,#7c3aed)", borderRadius:10, padding:"3px 9px", color:"#fff", fontWeight:800, fontSize:11, flexShrink:0 }}>{totalOrderCount}টি</div>}
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 18 15 12 9 6"/></svg>
               </div>
             </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══ সব ক্রয় অর্ডার — সিরিয়ালি তালিকা (প্রতিটি এন্ট্রি আলাদা, মার্জ হয় না) ═══
+    if (invModal === 'order:list') {
+      // সিরিয়াল নম্বর — তৈরির ক্রম অনুযায়ী (ক্রয় অর্ডার-১ সবচেয়ে পুরনো)
+      const poOrdersByCreated = [...allPOOrders].sort((a,b) => (a.createdAt||"").localeCompare(b.createdAt||""));
+      const poSerialMap = {};
+      poOrdersByCreated.forEach((r,i) => { poSerialMap[r.id] = i+1; });
+      // ডিসপ্লে — সবচেয়ে নতুনটা উপরে
+      const poOrdersDesc = [...allPOOrders].sort((a,b) => (b.createdAt||"").localeCompare(a.createdAt||""));
+
+      const handleDeleteTap = (id) => {
+        if (poDeleteConfirmId === id) {
+          deletePOGroup(id);
+          setPoDeleteConfirmId(null);
+        } else {
+          setPoDeleteConfirmId(id);
+        }
+      };
+
+      return (
+        <div style={{ ...S.page, padding:"0 14px 16px", background:FUT.pageBg, minHeight:"100%" }}
+          onClick={() => { if (poDeleteConfirmId) setPoDeleteConfirmId(null); }}>
+          <button style={S.textBtn} onClick={() => { setInvModal('order'); setPoDeleteConfirmId(null); }}>← ফিরুন</button>
+          <div style={{ color:"#f1f5f9", fontWeight:900, fontSize:16, marginBottom:2 }}>সব ক্রয় অর্ডার</div>
+          <div style={{ color:"#64748b", fontSize:12, marginBottom:14 }}>{allPOOrders.length}টি অর্ডার</div>
+
+          {allPOOrders.length === 0 && (
+            <div style={{ color:"#64748b", textAlign:"center", marginTop:50, fontSize:14 }}>এখনো কোনো ক্রয় অর্ডার তৈরি হয়নি</div>
+          )}
+
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            {poOrdersDesc.map(rec => {
+              const items = resolvedItems(rec);
+              const totalQty = items.reduce((s,it)=>s+(it.qty||0),0);
+              const serial = poSerialMap[rec.id];
+              const isConfirming = poDeleteConfirmId === rec.id;
+              return (
+                <div key={rec.id} className="tap-card"
+                  onClick={(e) => { e.stopPropagation(); if (!isConfirming) setInvModal(`order:rec:${rec.id}`); }}
+                  style={{ position:"relative", display:"flex", alignItems:"center", gap:12, background:FUT.card, backdropFilter:"blur(12px)", WebkitBackdropFilter:"blur(12px)", border:`1.5px solid ${isConfirming ? "#ef444488" : FUT.accent2+"44"}`, borderRadius:16, padding:"14px 15px", cursor:"pointer", transition:"border-color 0.15s ease" }}>
+                  <div style={{ width:42, height:42, borderRadius:12, background:"linear-gradient(135deg,#22d3ee33,#7c3aed33)", border:"1px solid #22d3ee55", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:18 }}>📦</div>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ color:"#f1f5f9", fontWeight:800, fontSize:14 }}>ক্রয় অর্ডার-{serial}</div>
+                    <div style={{ color:"#94a3b8", fontSize:11.5, marginTop:3 }}>🗓️ {dayLabelPO(rec.dateKey)} · {items.length}টি পণ্য · মোট {totalQty}</div>
+                  </div>
+                  {isConfirming ? (
+                    <button onClick={(e)=>{ e.stopPropagation(); handleDeleteTap(rec.id); }}
+                      style={{ background:"linear-gradient(135deg,#dc2626,#ef4444)", border:"none", borderRadius:10, padding:"8px 12px", color:"#fff", fontWeight:800, fontSize:11.5, cursor:"pointer", fontFamily:"inherit", flexShrink:0, whiteSpace:"nowrap" }}>
+                      নিশ্চিত মুছুন
+                    </button>
+                  ) : (
+                    <button onClick={(e)=>{ e.stopPropagation(); handleDeleteTap(rec.id); }}
+                      style={{ width:32, height:32, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", background:"#fb718518", border:"1px solid #fb718544", borderRadius:9, color:"#fb7185", fontSize:14, cursor:"pointer", fontFamily:"inherit" }}>
+                      🗑️
+                    </button>
+                  )}
+                  {!isConfirming && (
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={FUT.accent2} strokeWidth="2.5" strokeLinecap="round" style={{ flexShrink:0 }}><polyline points="9 18 15 12 9 6"/></svg>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       );
@@ -17835,9 +18141,9 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
     if (invModal === 'order:create:review') {
       const reviewItems = allSelectedItems;
       const doConfirm = () => {
-        savePOFromSelection(reviewItems, orderQtysAll);
+        const rec = savePOFromSelection(reviewItems, orderQtysAll);
         setOrderQtysAll({});
-        setInvModal(`order:view:day:${todayKeyPO}`);
+        setInvModal(rec ? `order:rec:${rec.id}` : 'order:list');
       };
       return (
         <div style={{ ...S.page, padding:"0", display:"flex", flexDirection:"column", height:"100%", overflow:"hidden", background:PRINT.pageBg }}>
@@ -17962,12 +18268,15 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
     if (invModal && invModal.startsWith('order:rec:')) {
       const recId = invModal.replace('order:rec:', '');
       const rec = allPOOrders.find(p => p.id === recId);
-      if (!rec) { setInvModal('order'); return null; }
+      if (!rec) { setInvModal('order:list'); return null; }
       const items = resolvedItems(rec);
+      // সিরিয়াল নম্বর — তৈরির ক্রম অনুযায়ী (ক্রয় অর্ডার-১ সবচেয়ে পুরনো)
+      const poOrdersByCreated = [...allPOOrders].sort((a,b) => (a.createdAt||"").localeCompare(b.createdAt||""));
+      const recSerial = poOrdersByCreated.findIndex(r => r.id === rec.id) + 1;
       return (
         <div style={{ ...S.page, padding:"0 14px 16px", background:FUT.pageBg, minHeight:"100%" }}>
-          <button style={S.textBtn} onClick={() => setInvModal(`order:view:day:${rec.dateKey}`)}>← ফিরুন</button>
-          <div style={{ color:"#f1f5f9", fontWeight:900, fontSize:16, marginBottom:2 }}>🧾 অর্ডার এন্ট্রি</div>
+          <button style={S.textBtn} onClick={() => setInvModal('order:list')}>← ফিরুন</button>
+          <div style={{ color:"#f1f5f9", fontWeight:900, fontSize:16, marginBottom:2 }}>🧾 ক্রয় অর্ডার-{recSerial}</div>
           <div style={{ color:"#64748b", fontSize:12, marginBottom:14 }}>{dayLabelPO(rec.dateKey)} · {items.length}টি পণ্য</div>
           <div style={{ background:FUT.card, backdropFilter:"blur(10px)", border:`1px solid ${FUT.accent2}33`, borderRadius:18, overflow:"hidden", marginBottom:16 }}>
             {items.map((it, i) => (
@@ -17985,7 +18294,7 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
               style={{ flex:1, background:"linear-gradient(135deg,#7c3aed,#4c1d95)", border:"none", borderRadius:14, color:"#fff", fontWeight:800, fontSize:13.5, padding:"12px 0", cursor:"pointer", fontFamily:"inherit" }}>
               ✏️ এডিট করুন
             </button>
-            <button onClick={()=>{ deletePOGroup(rec.id); setInvModal('order'); }}
+            <button onClick={()=>{ deletePOGroup(rec.id); setInvModal('order:list'); }}
               style={{ flex:1, background:"linear-gradient(135deg,#b91c1c,#7f1d1d)", border:"none", borderRadius:14, color:"#fff", fontWeight:800, fontSize:13.5, padding:"12px 0", cursor:"pointer", fontFamily:"inherit" }}>
               🗑️ মুছুন
             </button>
@@ -19450,12 +19759,11 @@ function CustomerDetail({ T, S, customer, txns, invoices, customers, paymentInvo
     if (customer.mobile) window.open(`tel:${customer.mobile}`, "_self");
   };
   const handleWhatsApp = () => {
-    if (!customer.mobile) return;
     const balance = customer.balance || 0;
     const msg = balance > 0
       ? `${shopName ? shopName + ": " : ""}${customer.name} ভাই, আপনার বর্তমান বাকি ৳${fmtMoney(balance)}। সুবিধামতো পরিশোধ করার অনুরোধ রইলো। ধন্যবাদ।`
       : `${shopName ? shopName + ": " : ""}${customer.name} ভাই, আপনার কোনো বাকি নেই। ধন্যবাদ আমাদের সাথে থাকার জন্য।`;
-    shareViaWhatsApp(customer.mobile, msg);
+    shareViaWhatsAppSmart("customer", customer.name, customer.mobile, msg);
   };
   const handleHistoryPdf = (months) => {
     const effectiveShopName = shopName || customer.shopName || "SBM";
@@ -19866,7 +20174,7 @@ function TransactionModal({ T, S, customer, setCustomers, sendSMS, showToast, ad
           <button
             onClick={() => {
               const msg = `${shopName ? shopName + ": " : ""}${customer.name} ভাই, ৳${fmtMoney(showInv.amount)} জমা নেওয়া হয়েছে। বর্তমান বাকি: ৳${fmtMoney(showInv.remainingBalance || 0)}। ধন্যবাদ।`;
-              shareViaWhatsApp(customer.mobile, msg, showToast);
+              shareViaWhatsAppSmart("customer", customer.name, customer.mobile, msg, showToast);
             }}
             style={{ ...S.saveBtn, width: "100%", marginTop: 10, background: "linear-gradient(135deg,#22c55e,#16a34a)",
               display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
