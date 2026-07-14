@@ -2853,7 +2853,15 @@ function SubscriptionGate({ children }) {
       DevPanelFlag.visible = !!d.devPanelVisible; // admin.html থেকে টগল করা ফ্ল্যাগ
       if (d.status === "blocked") { setStatus("expired"); if (typeof window.__hideSplash === "function") window.__hideSplash(); return; }
       const now = new Date();
-      const expiry = new Date(d.expiryDate);
+      // 🔴 ফিক্স (টাইমজোন বাগ): expiryDate শুধু "YYYY-MM-DD" (date-only) স্ট্রিং হিসেবে
+      // সংরক্ষিত থাকে (admin.html থেকে)। new Date("2026-08-15") সরাসরি এটাকে UTC
+      // মধ্যরাত হিসেবে ধরে নেয় — যেটা বাংলাদেশ সময়ে (UTC+6) সেই দিনেরই সকাল ৬টা।
+      // ফলে এক্সপায়ারি দিনের সকাল ৬টার পর থেকেই (এমনকি ট্রায়াল/সাবস্ক্রিপশন আসলে
+      // সেদিন শেষ পর্যন্ত বৈধ থাকা সত্ত্বেও) diff নেগেটিভ হয়ে যেত এবং দোকানদার
+      // আগেভাগেই "গ্রেস পিরিয়ড/পেমেন্ট" নোটিশ দেখতে শুরু করতেন। এখন expiryDate-কে
+      // ওইদিনের local দিন-শেষ (23:59:59) হিসেবে ধরা হচ্ছে, যাতে পুরো এক্সপায়ারি
+      // দিনটাই বৈধ থাকে।
+      const expiry = /T/.test(d.expiryDate) ? new Date(d.expiryDate) : new Date(`${d.expiryDate}T23:59:59`);
       const diff = Math.ceil((expiry - now) / 86400000);
       if (!isMounted()) return;
 
@@ -2915,6 +2923,52 @@ function SubscriptionGate({ children }) {
       if (typeof window.__hideSplash === "function") window.__hideSplash();
     }
   };
+
+  // 🔴 ফিক্স (পেমেন্ট করার পরও/ট্রায়াল শেষ না হয়েও বারবার পেমেন্ট নোটিশ দেখানো):
+  // আগে checkSubscription শুধু অ্যাপ প্রথম চালু (mount) হওয়ার সময় একবারই চলত।
+  // ফলে দোকানদার bKash-এ পেমেন্ট করে TxID জমা দেওয়ার পর অ্যাডমিন সেটা কনফার্ম
+  // করলেও, দোকানদার অ্যাপ সম্পূর্ণ বন্ধ না করে শুধু ব্যাকগ্রাউন্ড/লক স্ক্রিনে
+  // পাঠিয়ে আবার ফিরলে (resume) অ্যাপ পুরনো ("expired"/"grace") status-ই দেখাতে
+  // থাকত — যতক্ষণ না অ্যাপ পুরোপুরি ফোর্স-ক্লোজ করে আবার খোলা হয়। এখন app
+  // resume / visibilitychange-এ সাবস্ক্রিপশন সাইলেন্টলি রিচেক করা হয়, যাতে
+  // পেমেন্ট কনফার্ম হওয়ার সাথে সাথে status আপডেট হয়ে যায় — অহেতুক পেমেন্ট-নোটিশ
+  // আর আটকে থাকে না।
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const myPhoneRef = useRef(myPhone);
+  myPhoneRef.current = myPhone;
+
+  useEffect(() => {
+    let mounted = true;
+    const lastRunRef = { current: 0 };
+    const recheck = () => {
+      const phone = myPhoneRef.current;
+      const st = statusRef.current;
+      if (!phone) return;
+      if (st === "loading" || st === "unregistered") return;
+      const now = Date.now();
+      if (now - lastRunRef.current < 3000) return; // ডিবাউন্স — একাধিক ইভেন্ট একসাথে ফায়ার করলে একবারই চলবে
+      lastRunRef.current = now;
+      checkSubscription(phone, () => mounted, { silent: st === "active" || st === "trial" });
+    };
+
+    const onVisible = () => { if (document.visibilityState === "visible") recheck(); };
+    document.addEventListener("visibilitychange", onVisible);
+
+    let appListenerHandle = null;
+    if (typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.()) {
+      import("@capacitor/app").then(({ App }) => {
+        if (mounted) appListenerHandle = App.addListener("resume", recheck);
+      }).catch(() => {});
+    }
+
+    return () => {
+      mounted = false;
+      document.removeEventListener("visibilitychange", onVisible);
+      if (appListenerHandle) appListenerHandle.remove();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleRegister = async () => {
     if (!phoneInput || phoneInput.length < 11) {
@@ -3801,6 +3855,22 @@ const Haptic = {
 // ─── App Version ─────────────────────────────────────────────────────────────
 const APP_VERSION = "v1";
 const APP_BUILD   = "2026-07-11";
+
+// 🔴 নতুন — সেমান্টিক ভার্সন (x.y.z), শুধু ঐচ্ছিক "নতুন আপডেট এসেছে" নোটিশ
+// (UpdateNoticeModal, নিচে App()-এ দেখুন) সেমান্টিকভাবে কম্পেয়ার করার জন্য।
+// ⚠️ প্রতি রিলিজে এটা bump করা আবশ্যক — নাহলে নোটিশ ঠিকমতো বন্ধ হবে না।
+// admin.html-এর "সর্বশেষ ভার্সন" ফিল্ডে যা বসাবেন সেটাও একই x.y.z ফরম্যাটে হতে হবে।
+const APP_VERSION_CODE = "1.0.0";
+
+function compareVersions(a, b) {
+  const pa = String(a || "0.0.0").split(".").map(n => parseInt(n, 10) || 0);
+  const pb = String(b || "0.0.0").split(".").map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
 
 // ─── Developer Config (Hardcoded) ─────────────────────────────────────────────
 // PIN ভুলে গেলে ব্যবহারকারী এই তথ্য দেখবে এবং যোগাযোগ করবে
@@ -31178,8 +31248,193 @@ function ForceUpdateScreen({ version, message, updateUrl }) {
   );
 }
 
+// ─── UpdateNoticeModal — ঐচ্ছিক (dismissible) "নতুন আপডেট এসেছে" নোটিশ ──────
+// ForceUpdateScreen-এর মতো ব্লক করে না — শুধু জানিয়ে দেয় যে নতুন ভার্সন আছে।
+// "পরে করবো" চাপলে শুধু এই সেশনে বন্ধ হয় (কোনো localStorage/dismiss-flag
+// সংরক্ষণ করা হয় না) — কারণ আসল বন্ধ-হওয়ার শর্ত হলো সেমান্টিক ভার্সন কম্পেয়ার:
+// শপকিপার আপডেট করে ফেললে APP_VERSION_CODE বদলে যায় → compareVersions আর
+// negative রিটার্ন করে না → পরের বার অ্যাপ খুললে নোটিশ আপনাআপনি আসবেই না।
+//
+// 🔴 নতুন — এক-ক্লিক ইন-অ্যাপ আপডেট: বাটনে ক্লিক করলে APK ব্যাকগ্রাউন্ডে
+// ডাউনলোড হয় (প্রোগ্রেস % দেখায়), তারপর Android-এর নেটিভ ইনস্টলার ইনটেন্ট
+// অটোমেটিক খুলে যায় — দোকানদারকে শুধু শেষে "Install" বাটনে ট্যাপ করতে হয়
+// (Android নিরাপত্তার কারণে sideloaded APK-তে এই এক ধাপ কখনোই বাদ দেওয়া যায় না)।
+//
+// ⚠️ প্রয়োজনীয় নেটিভ সেটআপ (একবারই করতে হবে):
+//   npm install @capacitor/filesystem @capawesome-team/capacitor-file-opener
+//   npx cap sync android
+//   android/app/src/main/AndroidManifest.xml-এ যোগ করুন:
+//     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+//   android/app/src/main/res/xml/file_paths.xml (না থাকলে তৈরি করুন):
+//     <?xml version="1.0" encoding="utf-8"?>
+//     <paths xmlns:android="http://schemas.android.com/apk/res/android">
+//       <cache-path name="cache" path="." />
+//       <files-path name="files" path="." />
+//     </paths>
+//   উপরের সেটআপ ছাড়া এই ফিচার কাজ করবে না — কিন্তু নিচের কোড fail হলে
+//   স্বয়ংক্রিয়ভাবে পুরনো পদ্ধতিতে (ব্রাউজারে APK লিংক খোলা) fallback করে,
+//   তাই সেটআপ বাকি থাকলেও অ্যাপ ভাঙবে না।
+function UpdateNoticeModal({ version, notes, updateUrl, onDismiss }) {
+  const [phase, setPhase] = useState("idle"); // idle | downloading | installing | error
+  const [progress, setProgress] = useState(0);
+  const [errMsg, setErrMsg] = useState("");
+
+  const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+
+  const handleUpdateClick = async () => {
+    if (!updateUrl) return;
+
+    // Web/ব্রাউজারে (Capacitor native না হলে) — সরাসরি লিংক খুলে দাও, পুরনো আচরণ
+    if (!(typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.())) {
+      window.open(updateUrl, "_blank");
+      return;
+    }
+
+    setPhase("downloading");
+    setProgress(0);
+    setErrMsg("");
+    try {
+      const res = await fetch(updateUrl);
+      if (!res.ok || !res.body) throw new Error("ডাউনলোড শুরু করা যায়নি");
+      const total = Number(res.headers.get("content-length")) || 0;
+      const reader = res.body.getReader();
+      const chunks = [];
+      let received = 0;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        if (total) setProgress(Math.min(99, Math.round((received / total) * 100)));
+      }
+      const blob = new Blob(chunks, { type: "application/vnd.android.package-archive" });
+      const base64 = await blobToBase64(blob);
+
+      const { Filesystem, Directory } = await import("@capacitor/filesystem");
+      const fileName = "sbm-update.apk";
+      await Filesystem.writeFile({ path: fileName, data: base64, directory: Directory.Cache, recursive: true });
+      const { uri } = await Filesystem.getUri({ path: fileName, directory: Directory.Cache });
+
+      setProgress(100);
+      setPhase("installing");
+
+      const { FileOpener } = await import("@capawesome-team/capacitor-file-opener");
+      await FileOpener.openFile({ path: uri, mimeType: "application/vnd.android.package-archive" });
+      // এখান থেকে Android নিজেই ইনস্টলার স্ক্রিন দেখাবে — দোকানদার শুধু "Install" চাপবেন।
+    } catch (e) {
+      // 🔴 fallback — plugin সেটআপ না থাকলে বা ডাউনলোড ব্যর্থ হলে, পুরনো
+      // পদ্ধতিতে (ব্রাউজারে APK লিংক খোলা) দোকানদার তবু আপডেট করতে পারবেন।
+      setPhase("error");
+      setErrMsg("সরাসরি ইনস্টল করা যায়নি — ব্রাউজারে ডাউনলোড লিংক খোলা হচ্ছে...");
+      setTimeout(() => { window.open(updateUrl, "_blank"); }, 800);
+    }
+  };
+
+  const busy = phase === "downloading" || phase === "installing";
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9998,
+      background: "rgba(0,0,0,0.7)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      padding: 20
+    }}>
+      <div className="qc-gradient-card" style={{
+        width: "100%", maxWidth: 360, borderRadius: 18, padding: "1.5px",
+        background: "linear-gradient(135deg,#22d3ee,#8b5cf6,#ec4899)",
+        boxShadow: "0 0 40px rgba(139,92,246,0.35)"
+      }}>
+        <div style={{ borderRadius: 17, background: "#0b0e17", padding: 22, textAlign: "center" }}>
+          <div style={{
+            margin: "0 auto 14px", width: 60, height: 60, borderRadius: "50%",
+            background: "linear-gradient(135deg,#22d3ee,#ec4899)",
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26
+          }}>⬆️</div>
+
+          <div style={{ color: "#fff", fontSize: 17, fontWeight: 800, marginBottom: 4 }}>
+            নতুন আপডেট এসেছে
+          </div>
+          {version && (
+            <div style={{ color: "#94a3b8", fontSize: 13, marginBottom: 14 }}>
+              ভার্সন {version} এখন উপলব্ধ
+            </div>
+          )}
+
+          {notes && !busy && (
+            <div style={{
+              textAlign: "left", background: "rgba(255,255,255,0.05)", borderRadius: 12,
+              padding: 12, marginBottom: 18, color: "#cbd5e1", fontSize: 13,
+              whiteSpace: "pre-line", lineHeight: 1.7
+            }}>
+              {notes}
+            </div>
+          )}
+
+          {busy && (
+            <div style={{ marginBottom: 18 }}>
+              <div style={{
+                height: 8, borderRadius: 6, background: "rgba(255,255,255,0.08)",
+                overflow: "hidden", marginBottom: 8
+              }}>
+                <div style={{
+                  height: "100%", width: `${phase === "installing" ? 100 : progress}%`,
+                  background: "linear-gradient(90deg,#06b6d4,#d946ef)",
+                  transition: "width 0.2s ease"
+                }} />
+              </div>
+              <div style={{ color: "#94a3b8", fontSize: 12 }}>
+                {phase === "downloading" ? `ডাউনলোড হচ্ছে... ${progress}%` : "ইনস্টলার খোলা হচ্ছে..."}
+              </div>
+            </div>
+          )}
+
+          {phase === "error" && (
+            <div style={{ color: "#fbbf24", fontSize: 12, marginBottom: 14 }}>{errMsg}</div>
+          )}
+
+          <button
+            onClick={handleUpdateClick}
+            disabled={busy}
+            style={{
+              width: "100%", padding: "13px", borderRadius: 12, border: "none",
+              background: "linear-gradient(135deg,#06b6d4,#d946ef)",
+              color: "#fff", fontSize: 15, fontWeight: 700,
+              cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1,
+              boxShadow: "0 4px 20px rgba(217,70,239,0.35)"
+            }}
+          >
+            {busy ? "⏳ আপডেট চলছে..." : "⬇️ এখনই আপডেট করুন"}
+          </button>
+
+          {!busy && (
+            <button
+              onClick={onDismiss}
+              style={{
+                width: "100%", padding: "10px", marginTop: 10, borderRadius: 10,
+                border: "1px solid #334155", background: "transparent",
+                color: "#64748b", fontSize: 13, cursor: "pointer"
+              }}
+            >
+              পরে করবো
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [forceUpdate, setForceUpdate] = useState(null); // null | { version, message, updateUrl }
+  // 🔴 নতুন — ঐচ্ছিক (soft) আপডেট নোটিশ: null | { version, notes, updateUrl }
+  const [updateNotice, setUpdateNotice] = useState(null);
+  const [noticeDismissed, setNoticeDismissed] = useState(false); // শুধু এই সেশনের জন্য
 
   useEffect(() => {
     // Admin Firebase থেকে appVersion চেক করো (ব্যাকগ্রাউন্ডে, মাউন্ট গেট করে না)
@@ -31196,6 +31451,15 @@ export default function App() {
               version:   d.version   || "",
               message:   d.message   || "",
               updateUrl: d.updateUrl || ""
+            });
+          } else if (d.version && compareVersions(APP_VERSION_CODE, d.version) < 0) {
+            // 🔴 নতুন — বাধ্যতামূলক নয়, কিন্তু আমাদের APP_VERSION_CODE এডমিনের
+            // "version"-এর চেয়ে পুরনো → ঐচ্ছিক dismissible নোটিশ দেখাও।
+            // (শপকিপার আপডেট করলে পরের বার এই compareVersions আর true হবে না।)
+            setUpdateNotice({
+              version:   d.version        || "",
+              notes:     d.updateNotesBn  || "",
+              updateUrl: d.updateUrl      || ""
             });
           }
         }
@@ -31221,6 +31485,14 @@ export default function App() {
           version={forceUpdate.version}
           message={forceUpdate.message}
           updateUrl={forceUpdate.updateUrl}
+        />
+      )}
+      {!forceUpdate && updateNotice && !noticeDismissed && (
+        <UpdateNoticeModal
+          version={updateNotice.version}
+          notes={updateNotice.notes}
+          updateUrl={updateNotice.updateUrl}
+          onDismiss={() => setNoticeDismissed(true)}
         />
       )}
       <SubscriptionGate>
