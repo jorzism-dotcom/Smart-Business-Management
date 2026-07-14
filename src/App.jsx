@@ -759,7 +759,7 @@ const _db = getFirestore(_fbApp);
 // যাতে app uninstall/reinstall হলে phone+PIN দিয়ে ফিরে পাওয়া যায়।
 // recoveryPinPlain শুধুমাত্র PIN সেট/পরিবর্তনের মুহূর্তে পাঠানো হয় (admin panel-এ
 // মালিক ভুলে গেলে দেখানোর জন্য) — top-level state-এ plaintext PIN কখনো রাখা হয় না।
-async function centralRecoveryPush(phone, { shopFirebaseConfig, users, recoveryPinHash, recoveryPinPlain, shopName, googleDriveConnected }) {
+async function centralRecoveryPush(phone, { shopFirebaseConfig, users, recoveryPinHash, recoveryPinPlain, shopName, googleDriveConnected }, _attempt = 0) {
   if (!phone) return false;
   try {
     const payload = {
@@ -773,7 +773,13 @@ async function centralRecoveryPush(phone, { shopFirebaseConfig, users, recoveryP
     if (googleDriveConnected !== undefined) payload.googleDriveConnected = googleDriveConnected;
     await setDoc(doc(_db, "subscriptions", phone), payload, { merge: true });
     return true;
-  } catch {
+  } catch (err) {
+    // 🔴 ফিক্স: silent fail আর না — একবার retry (1.5s পর), তাও ব্যর্থ হলে central এ log
+    if (_attempt < 1) {
+      await new Promise(res => setTimeout(res, 1500));
+      return centralRecoveryPush(phone, { shopFirebaseConfig, users, recoveryPinHash, recoveryPinPlain, shopName, googleDriveConnected }, _attempt + 1);
+    }
+    try { await logErrorToCentral("centralRecoveryPush", err, { phone }); } catch {}
     return false;
   }
 }
@@ -3100,9 +3106,14 @@ function SubscriptionGate({ children }) {
       const ok = await checkPassword(usePin, data.recoveryPinHash);
       if (!ok) { setRestoreMsg("ভুল PIN, আবার চেষ্টা করুন"); setRestoring(false); return; }
       // ── সব ডেটা local storage-এ ফিরিয়ে আনা ──
+      // 🔴 ফিক্স: shopFirebaseConfig না থাকলে এখন আর নীরবে skip না — এই ডিভাইস
+      // permanently local-only mode-এ চলবে সেটা ট্র্যাক করে শেষে স্পষ্ট warning দেখানো হয়।
+      let configMissing = false;
       if (data.shopFirebaseConfig) {
         await save(SK.firebaseConfig, data.shopFirebaseConfig);
         await save(SK.firebaseEnabled, true);
+      } else {
+        configMissing = true;
       }
       if (data.users) await save(SK.users, data.users);
       await save(SK.recoveryPhone, usePhone);
@@ -3115,6 +3126,8 @@ function SubscriptionGate({ children }) {
       // সব data দেখতে পায়। কিন্তু নেট স্লো/Firestore connect দেরি হলে এই চেষ্টা আটকে
       // থাকতে পারে — তাই হার্ড timeout (৭ সেকেন্ড), timeout হলে নিঃশব্দে skip করি;
       // রিলোডের পর রিয়েল-টাইম listener এমনিতেই ডেটা নিয়ে আসবে।
+      // 🔴 ফিক্স: pull সফল হয়েছে কিনা ট্র্যাক করা হচ্ছে, যাতে শেষে মিথ্যা "✅" মেসেজ না দেখায়
+      let pullFailed = false;
       if (data.shopFirebaseConfig) {
         try {
           FB.init(data.shopFirebaseConfig);
@@ -3165,11 +3178,20 @@ function SubscriptionGate({ children }) {
           if (auditLogsD.length)       await save(SK.auditLogs, auditLogsD);
           if (quotationsD.length)      await save(SK.quotations, quotationsD);
           if (supplierPaymentsD.length) await save(SK.supplierPayments, supplierPaymentsD);
-        } catch { /* silent — রিলোডের পর রিয়েল-টাইম listener এমনিতেই চেষ্টা করবে */ }
+        } catch { pullFailed = true; /* রিলোডের পর রিয়েল-টাইম listener চেষ্টা করবে, কিন্তু এখন owner-কে জানানো হচ্ছে */ }
       }
 
-      setRestoreMsg("✅ ডেটা ফিরে পাওয়া গেছে! অ্যাপ রিলোড হচ্ছে...");
-      setTimeout(() => window.location.reload(), 1200);
+      // 🔴 ফিক্স: config না থাকলে বা pull ব্যর্থ হলে স্পষ্ট warning — মিথ্যা সাফল্য মেসেজ না
+      if (configMissing) {
+        setRestoreMsg("⚠️ রিকভারি ডেটায় Firebase কনফিগ পাওয়া যায়নি — এই ডিভাইস শুধু local ডেটা নিয়ে চলবে, অন্য ডিভাইসের সাথে সিঙ্ক হবে না। মালিককে জানান।");
+        setTimeout(() => window.location.reload(), 2500);
+      } else if (pullFailed) {
+        setRestoreMsg("⚠️ কনফিগ পাওয়া গেছে কিন্তু ডেটা টানতে সমস্যা হয়েছে (নেট স্লো?) — অ্যাপ রিলোড হচ্ছে, রিয়েল-টাইম সিঙ্ক এমনিতেই চেষ্টা করবে।");
+        setTimeout(() => window.location.reload(), 2000);
+      } else {
+        setRestoreMsg("✅ ডেটা ফিরে পাওয়া গেছে! অ্যাপ রিলোড হচ্ছে...");
+        setTimeout(() => window.location.reload(), 1200);
+      }
     } catch {
       setRestoreMsg("সমস্যা হয়েছে, আবার চেষ্টা করুন");
     }
@@ -10499,6 +10521,9 @@ function SmartBusinessMgmt() {
   // millisecond-এ পৌঁছায় — সম্পূর্ণ array ওভাররাইট হয় না, তাই conflict/mismatch
   // হয় না, আর Firestore-এর built-in offline cache থাকায় নেট না থাকলেও কাজ করে।
   const [fssReady, setFssReady] = useState(false);
+  // 🔴 ফিক্স: centralRecoveryPush ব্যর্থ হলে এখন silent না — এই ফ্ল্যাগ true হলে
+  // Settings/Sync Diagnostics কার্ডে owner-কে দেখানো হবে যে recovery backup আপডেট হয়নি।
+  const [recoveryPushFailed, setRecoveryPushFailed] = useState(false);
 
   useEffect(() => {
     if (!loaded || !firebaseEnabled || !firebaseConfig) {
@@ -10824,6 +10849,10 @@ function SmartBusinessMgmt() {
         shopFirebaseConfig: firebaseConfig,
         users, recoveryPinHash, shopName,
         googleDriveConnected: !!localStorage.getItem("sbm_gd_token"),
+      }).then(ok => {
+        // 🔴 ফিক্স: return value এখন চেক করা হচ্ছে — ব্যর্থ হলে flag সেট করে
+        // owner-কে জানানো হবে, QR/restore stale config নিয়ে চলবে না নীরবে
+        setRecoveryPushFailed(!ok);
       });
     }, 2500);
     return () => clearTimeout(t);
@@ -24726,6 +24755,17 @@ function RecoverySetupCard({ T, S, showToast, recoveryPhone, setRecoveryPhone, r
     try {
       const ok = await checkPassword(qrConfirmPin, recoveryPinHash);
       if (!ok) { setQrError("ভুল PIN, আবার চেষ্টা করুন"); setQrChecking(false); return; }
+      // 🔴 ফিক্স: QR দেখানোর ঠিক আগে fresh central push করা হচ্ছে — যাতে central-এ
+      // আগে থেকে থাকা stale/null config-এর বদলে সবসময় বর্তমান firebaseConfig যায়।
+      // push ব্যর্থ হলে স্পষ্ট error দেখিয়ে QR আটকে দেওয়া হয়, নীরবে পুরনো ডেটা পাঠানো হয় না।
+      const pushOk = await centralRecoveryPush(recoveryPhone, {
+        shopFirebaseConfig: firebaseConfig, users, recoveryPinHash, shopName,
+      });
+      if (!pushOk) {
+        setQrError("সেন্ট্রাল সার্ভারে কনফিগ পাঠাতে ব্যর্থ — নেট চেক করে আবার চেষ্টা করুন। এই অবস্থায় QR দিলে স্টাফ পুরনো/ভুল ডেটা পাবে।");
+        setQrChecking(false);
+        return;
+      }
       setQrPayload(`SBMQR1|${recoveryPhone}|${qrConfirmPin}`);
     } catch {
       setQrError("সমস্যা হয়েছে, আবার চেষ্টা করুন");
@@ -26572,6 +26612,18 @@ function Settings_({ T, S, shopName,
           </div>
         </div>
       )}
+
+      {/* ══ Read-only Sync Status (সব role দেখতে পারে, staff-ও) ══ */}
+      {/* 🔴 ফিক্স: আগে Firestore connection status শুধু Master-Key gated Firebase
+          প্যানেলের ভেতরে ছিল, স্টাফ role এটা দেখতেই পেত না — তাই ডিভাইস আসলে
+          disconnected/local-only mode-এ চলছে কিনা বুঝতে পারত না। এখন dot+টেক্সট
+          আকারে সবাই দেখতে পাবে, কিন্তু কনফিগ এডিট করার ফুল ফর্ম শুধু owner-ই পাবে। */}
+      <div style={{ display:"flex", alignItems:"center", gap:8, background: fssReady ? "#22c55e12" : "#64748b12", border:`1px solid ${fssReady ? "#22c55e30" : "#64748b30"}`, borderRadius:10, padding:"8px 12px", marginBottom:12 }}>
+        <span style={{ width:8, height:8, borderRadius:99, background: fssReady ? "#22c55e" : "#64748b", display:"inline-block", flexShrink:0 }} />
+        <span style={{ color: fssReady ? "#4ade80" : "#94a3b8", fontSize:11, fontWeight:700 }}>
+          Firestore: {fssReady ? "সংযুক্ত (real-time sync চলছে)" : "সংযুক্ত নেই — এই ডিভাইস শুধু local ডেটা নিয়ে চলছে"}
+        </span>
+      </div>
 
       {/* ══ Theme Card ══ */}
       {(() => {
