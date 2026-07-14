@@ -474,7 +474,14 @@ function computeSupplierDueMap(products = [], purchaseOrders = [], supplierPayme
     const signed = p.type === "due" ? -(p.amount || 0) : (p.amount || 0);
     row.paid += signed;
   });
-  Object.values(map).forEach(row => { row.due = Math.max(0, row.totalPurchased - row.paid); });
+  // 🔴 ফিক্স: আগে due = totalPurchased (ক্রয় অর্ডারের মোট মূল্য) − paid হিসাবে বের হতো,
+  // ফলে ম্যানুয়ালি "বাকি যোগ" না করলেও শুধু ক্রয় অর্ডার থাকলেই বাকি দেখাত — যেটা
+  // ড্যাশবোর্ডের সাথে সিঙ্ক থাকতো না এবং ব্যবহারকারীর প্রত্যাশিত আচরণ ছিল না। এখন
+  // totalPurchased শুধু তথ্যের জন্য (কার্ডে "মোট ক্রয়" দেখাতে) হিসাব হয়, বাকির (due)
+  // সাথে এর কোনো সম্পর্ক নেই — due শুধুমাত্র ম্যানুয়াল "বাকি যোগ" বাটন দিয়ে যোগ করা
+  // এন্ট্রি (type:"due") ও পেমেন্ট (type:"payment"/ক্যাশ ড্রয়ার থেকে পেমেন্ট) দিয়ে
+  // নির্ধারিত হয়: due = max(0, বাকি-যোগ-এর যোগফল − পেমেন্টের যোগফল)।
+  Object.values(map).forEach(row => { row.due = Math.max(0, -row.paid); });
   return map;
 }
 
@@ -10647,13 +10654,21 @@ function SmartBusinessMgmt() {
           // ট্রাই হবে, ব্যর্থ হলে কারণটা console-এ log হবে।
           const doScheduleAll = async () => {
             await LocalNotifications.cancel({ notifications: cancelIds });
+            // 🔴 ফিক্স: আগে এখানে একটা জেনেরিক/ফাঁকা বডি ("${shopName} • দৈনিক রিপোর্ট",
+            // কোনো বিক্রয়/নগদ/বাকির হিসাব ছাড়া) দিয়ে রিশিডিউল হতো, যা DailyNotifCard-এর
+            // আসল হিসাবসহ নোটিফিকেশনকে ওভাররাইট করে ফেলত। এখন একই শেয়ার্ড
+            // buildDailySummaryData/buildDailySummaryNotifContent ব্যবহার করা হচ্ছে,
+            // তাই নোটিফিকেশন সবসময় আসল বিক্রয়/নগদ/বাকির হিসাবসহ দেখাবে।
+            const sum = buildDailySummaryData({ invoices, txns, customers, products, cashLogs, purchaseOrders });
+            const { body, largeBody } = buildDailySummaryNotifContent(sum);
             for (let i = 0; i < Math.min(times.length, NOTIF_MAX_TIMES); i++) {
               const t = times[i];
               await Notif.send({
                 id: NOTIF_ID_BASE + i,
                 title: `✨ ${shopName} — আজকের সারসংক্ষেপ`,
                 iconColor: "#8b5cf6",
-                body: `${shopName} • দৈনিক রিপোর্ট`,
+                body,
+                largeBody,
                 summaryText: `${shopName} • দৈনিক রিপোর্ট ✨`,
                 repeatDailyAt: { hour: t.hour, minute: t.minute },
               });
@@ -12134,6 +12149,8 @@ function SmartBusinessMgmt() {
               showToast={showToast}
               currentUser={currentUser}
               shopName={shopName}
+              cashLogs={cashLogs}
+              setCashLogs={setCashLogs}
             />
           </ErrorBoundary>
         )}
@@ -16390,7 +16407,9 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
   const [expRemoveConfirm, setExpRemoveConfirm] = useState(null); // { product, batch }
   const [expRemoveSubmitting, setExpRemoveSubmitting] = useState(false);
   const [poDeleteConfirmId, setPoDeleteConfirmId] = useState(null); // 🆕 ক্রয় অর্ডার লিস্টে ইনলাইন ডিলিট কনফার্মেশন
-  const [poListDayFilter, setPoListDayFilter] = useState(null); // 🆕 "সব ক্রয় অর্ডার" পেজে ডে-নেভিগেটর দিয়ে বাছাই করা দিন (null = সব দিন)
+  // 🔴 ফিক্স: আগে ডিফল্ট null ("সব তারিখ") ছিল — এখন পেজে ঢুকলে সবসময় ডিফল্ট হিসেবে
+  // আজকের তারিখ সিলেক্ট করা থাকবে (এবং "সব" বাটন সরিয়ে ফেলা হয়েছে, দেখুন নিচে order:list ব্লক)।
+  const [poListDayFilter, setPoListDayFilter] = useState(() => todayEn()); // "সব ক্রয় অর্ডার" পেজে ডে-নেভিগেটর দিয়ে বাছাই করা দিন
   // 🔍 সাপ্লায়ার তালিকা পেজে পণ্য/সাপ্লায়ার অটো-সাজেস্ট সার্চ
   const [supSearchQuery, setSupSearchQuery] = useState("");
   const [supSearchFocused, setSupSearchFocused] = useState(false);
@@ -16635,6 +16654,9 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
         dateKey: todayKeyStr,
         addedBy: currentUser?.name || "মালিক",
         createdAt: new Date().toISOString(),
+        // 🆕 এই পেমেন্ট এন্ট্রি কোন cashLogs এন্ট্রি থেকে তৈরি হয়েছে তার রেফারেন্স —
+        // পরে সাপ্লায়ার পেজ থেকে এই পেমেন্ট মুছে ফেললে সংশ্লিষ্ট উইথড্রয়ালও মুছতে ব্যবহার হয়।
+        cashLogId: entry.id,
       };
       setSupplierPayments(prev => [payEntry, ...(prev || [])]);
     }
@@ -16643,8 +16665,17 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
 
 
   // পুরো "order" ফ্লো (landing/create/create-review/view/...) ছেড়ে গেলেই সিলেকশন রিসেট হয়।
+  // 🆕 ফিক্স: "পণ্য বেছে নিন" পেজের সার্চবার (poSupplierQuery) আগে রিসেট হতো না — ব্যাক
+  // করে আবার ঢুকলেও আগের সার্চ টেক্সট/সাজেশন/সিলেক্টেড সাপ্লায়ার রয়ে যেত। এখন অর্ডার
+  // ফ্লো ছেড়ে গেলেই এগুলোও ডিফল্ট (খালি) অবস্থায় রিসেট হয়ে যাবে।
   React.useEffect(() => {
-    if (!invModal || !invModal.startsWith('order')) { setOrderQtysAll({}); }
+    if (!invModal || !invModal.startsWith('order')) {
+      setOrderQtysAll({});
+      setPoSupplierQuery("");
+      setPoSupplierSelected(null);
+      setPoSupplierSuggestOpen(false);
+      setPoListDayFilter(todayEn());
+    }
   }, [invModal]);
   // ড্যাশমোডাল বন্ধ হলে (ফিরুন বাটন/ফোনের ব্যাক/নেভিগেশন হোম) ভেতরের ইনভয়েস-ভিউও বন্ধ হবে
   React.useEffect(() => {
@@ -18216,9 +18247,6 @@ function Dashboard({ T, S, customers, totalBaki, todayBaki, todayJoma, todayTota
               {isTodayListDk && <span style={{ background:"#dbeafe", color:PRINT.accent, fontSize:9.5, fontWeight:800, borderRadius:6, padding:"2px 7px", border:"1px solid #bfdbfe" }}>আজ</span>}
             </div>
             <button onClick={()=>setPoListDayFilter(shiftDayKey(poListDayFilter || todayKeyPO, 1))} style={navBtnStyleList}>›</button>
-            {poListDayFilter && (
-              <button onClick={()=>setPoListDayFilter(null)} style={{ ...navBtnStyleList, width:"auto", padding:"0 10px", fontSize:11.5, fontWeight:800 }}>সব</button>
-            )}
           </div>
 
           {poOrdersDesc.length === 0 && (
@@ -22555,7 +22583,8 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
 // 🏭 SupplierPaymentModule — সাপ্লায়ার পেমেন্ট ট্র্যাকিং
 // ══════════════════════════════════════════════════════════════════════════════
 function SupplierPaymentModule({ T, S, products = [], purchaseOrders = [],
-  supplierPayments = [], setSupplierPayments, showToast, currentUser, shopName }) {
+  supplierPayments = [], setSupplierPayments, showToast, currentUser, shopName,
+  cashLogs = [], setCashLogs }) {
 
   const fmt = n => fmtMoney(n);
   const todayKey = _dateKeyOf(new Date());
@@ -22662,13 +22691,20 @@ function SupplierPaymentModule({ T, S, products = [], purchaseOrders = [],
     // 🆕 ফিক্স: আগে কোনো কনফার্মেশন ছাড়াই সরাসরি স্থায়ীভাবে মুছে যেত — এটা সাপ্লায়ারের
     // বাকি/পাওনার হিসাবকেও প্রভাবিত করে, তাই ভুল ক্লিক ঠেকাতে confirm যোগ করা হলো।
     if (!window.confirm("এই এন্ট্রি মুছবেন? এটা ফেরত আনা যাবে না এবং সাপ্লায়ারের বাকির হিসাব বদলে যাবে।")) return;
+    // 🆕 এই পেমেন্ট এন্ট্রিটি ক্যাশ ড্রয়ার থেকে উইথড্রয়াল করে তৈরি হয়ে থাকলে (cashLogId আছে),
+    // সংশ্লিষ্ট cashLogs এন্ট্রিটিও একইসাথে মুছে ফেলা হবে — যাতে দুই জায়গার হিসাব সবসময় সিঙ্ক থাকে।
+    const target = supplierPayments.find(p => p.id === id);
+    if (target?.cashLogId && typeof setCashLogs === "function") {
+      setCashLogs(prev => (prev || []).filter(c => c.id !== target.cashLogId));
+      if (FSS.isReady()) FSS.deleteRecord("cashLogs", target.cashLogId);
+    }
     setSupplierPayments(prev => prev.filter(p => p.id !== id));
     // 🔴 ফিক্স: supplierPayments-এ এখন sync layer আর diff দেখে অটো-ডিলিট করে না
     // (দেখুন useFSSCollection("supplierPayments",...)-এর syncDeletes:false) — তাই
     // ইচ্ছাকৃত ডিলিটের সময় এখানেই সরাসরি Firestore থেকে মুছে ফেলা হয়।
     if (FSS.isReady()) FSS.deleteRecord("supplierPayments", id);
     showToast("এন্ট্রি মুছে ফেলা হয়েছে", "#f59e0b");
-  }, [setSupplierPayments, showToast]);
+  }, [setSupplierPayments, setCashLogs, supplierPayments, showToast]);
 
   // ── Total stats ────────────────────────────────────────────────────────────
   // 🔴 ফিক্স: আগে totalDue = Math.max(0, সব সাপ্লায়ারের totalPurchased যোগফল − সব
@@ -23791,9 +23827,9 @@ function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUs
                 <div />
                 <div style={{ color: T.sub, fontSize: 9.5, fontWeight: 800 }}>খরচ</div>
                 {viewMode === "month" && (
-                  <div style={{ textAlign: "center", color: T.sub, fontSize: 9.5, fontWeight: 800 }}>তারিখ</div>
+                  <div style={{ textAlign: "center", color: T.sub, fontSize: 9.5, fontWeight: 800, transform: "translateX(-38px)" }}>তারিখ</div>
                 )}
-                <div style={{ textAlign: "right", color: T.sub, fontSize: 9.5, fontWeight: 800 }}>পরিমাণ</div>
+                <div style={{ textAlign: "right", color: T.sub, fontSize: 9.5, fontWeight: 800, transform: "translateX(-38px)" }}>পরিমাণ</div>
                 {showEdit && (
                   <div style={{ textAlign: "center", color: T.sub, fontSize: 9.5, fontWeight: 800 }}>ইডিট</div>
                 )}
@@ -23819,11 +23855,11 @@ function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUs
                       </div>
                     </div>
                     {viewMode === "month" && (
-                      <div style={{ textAlign: "center", background: T.bg, border: `1px solid ${T.border}`, borderRadius: 8, padding: "3px 2px" }}>
+                      <div style={{ textAlign: "center", background: T.bg, border: `1px solid ${T.border}`, borderRadius: 8, padding: "3px 2px", transform: "translateX(-38px)" }}>
                         <div style={{ color: T.sub, fontSize: 10.5, fontWeight: 700 }}>{(e.date || "").slice(5) || "—"}</div>
                       </div>
                     )}
-                    <div style={{ color: "#ef4444", fontWeight: 900, fontSize: 13.5, textAlign: "right" }}>৳{fmt(e.amount)}</div>
+                    <div style={{ color: "#ef4444", fontWeight: 900, fontSize: 13.5, textAlign: "right", transform: "translateX(-38px)" }}>৳{fmt(e.amount)}</div>
                     {showEdit && (
                       <div style={{ display: "flex", gap: 3, justifyContent: "center" }}>
                         <button onClick={() => startEdit(e)}
@@ -24017,6 +24053,72 @@ function PasswordChange({ T, S, currentUser, setUsers, showToast }) {
 const NOTIF_ID_BASE = 1001;
 const NOTIF_MAX_TIMES = 8; // সর্বোচ্চ কতগুলো সময়ে নোটিফিকেশন দেওয়া যাবে (একদিনে)
 
+// 🔴 ফিক্স: আগে এই হিসাব (buildSummary) ও নোটিফিকেশনের বডি (buildNotifContent)
+// শুধু DailyNotifCard কম্পোনেন্টের ভেতরে লোকাল ফাংশন ছিল। কিন্তু App-এর
+// role-switch notification guard (স্টাফ/এডমিন লগইনের সময়) আলাদাভাবে একই
+// নোটিফিকেশন আইডি দিয়ে একটা জেনেরিক/ফাঁকা বডি ("SBM • দৈনিক রিপোর্ট", কোনো
+// বিক্রয়/নগদ/বাকির হিসাব ছাড়া) দিয়ে রিশিডিউল করে দিত — যেটা আসল হিসাবসহ
+// নোটিফিকেশনকে ওভাররাইট করে ফেলত, ফলে ব্যবহারকারী নোটিফিকেশনে কোনো তথ্যই
+// দেখতে পেতেন না। এখন এই দুটো ফাংশন গ্লোবাল/শেয়ার্ড করা হলো, DailyNotifCard ও
+// App — দুই জায়গাতেই এই একই ফাংশন ব্যবহার হয়, তাই নোটিফিকেশন সবসময় আসল
+// হিসাবসহ দেখাবে, কোনটাই একে অপরকে ফাঁকা কনটেন্ট দিয়ে ওভাররাইট করবে না।
+function buildDailySummaryData({ invoices = [], txns = [], customers = [], products = [], cashLogs = [], purchaseOrders = [] } = {}) {
+  const todayKey = todayEn();
+  // voided ও isSelfUse বাদ — না হলে নোটিফিকেশনে ভুল revenue/profit দেখায়
+  const todayInvList  = (invoices || []).filter(i => i.dateKey === todayKey && !i.isSelfUse && i.status !== "voided");
+  const revenue       = todayInvList.reduce((s, i) => s + (i.total || 0), 0);
+  const cashSale      = todayInvList.reduce((s, i) => {
+    if (i.payType === "cash") return s + (i.total || 0);
+    if (i.payType === "partial") return s + Math.min(i.paidAmount || 0, i.total || 0);
+    return s;
+  }, 0);
+  const _voidedIds2   = new Set((invoices||[]).filter(i=>i.status==="voided").map(i=>i.id));
+  const bakiToday     = (txns || []).filter(t => t.dateKey === todayKey && t.type === "baki" && t.invoiceId && !_voidedIds2.has(t.invoiceId)).reduce((s, t) => s + t.amount, 0);
+  const jomaToday     = (txns || []).filter(t => t.dateKey === todayKey && t.type === "joma" && t.source !== "partial-sale" && t.source !== "void-reversal" && t.source !== "cash-sale").reduce((s, t) => s + t.amount, 0);
+  const totalBakiNow  = (customers || []).reduce((s, c) => s + (c.balance || 0), 0);
+  // 🟢 আজকের লাভ ও 🔴 আজকের লস — invoice-level আলাদা করে হিসাব
+  const prodMap   = new Map((products || []).map(p => [p.id, p]));
+  const totalProfit = todayInvList.reduce((s, inv) => {
+    const p = calcInvoiceProfit(inv, prodMap);
+    return s + (p > 0 ? p : 0);
+  }, 0);
+  const totalLoss = todayInvList.reduce((s, inv) => {
+    const p = calcInvoiceProfit(inv, prodMap);
+    return s + (p < 0 ? Math.abs(p) : 0);
+  }, 0);
+  // 💰 ক্যাশ ড্রয়ার — ওপেনিং ক্যাশ ও আজ দোকান থেকে বের হওয়া টাকা
+  const cashLogsAll  = cashLogs || [];
+  const openingCash  = cashLogsAll.filter(c => c.type === "opening" && c.dateKey === todayKey).reduce((s, c) => s + (c.amount || 0), 0);
+  const cashOutToday = cashLogsAll.filter(c => c.type === "withdrawal" && c.dateKey === todayKey).reduce((s, c) => s + (c.amount || 0), 0);
+  const todayPurchaseCost = (purchaseOrders || [])
+    .filter(p => p._type === "pe" && (p.dateKey === todayKey || (p.createdAt && p.createdAt.startsWith(todayKey))))
+    .reduce((s, p) => s + (p.totalCost || 0), 0);
+  const currentCashDrawer = openingCash + cashSale + jomaToday - cashOutToday - todayPurchaseCost;
+  return { revenue, cashSale, bakiToday, jomaToday, totalBakiNow, totalProfit, totalLoss, openingCash, cashOutToday, currentCashDrawer, todayPurchaseCost };
+}
+
+function buildDailySummaryNotifContent(sum, extra = "") {
+  const f = (n) => fmtMoney(n);
+  const profitVal = sum.totalProfit;
+  const lossVal   = sum.totalLoss;
+  return {
+    body: `💎 বিক্রয় ৳${f(sum.revenue)}  •  💵 নগদ ৳${f(sum.cashSale)}  •  📌 বাকি ৳${f(sum.bakiToday)}`,
+    largeBody:
+      `💎 আজকের বিক্রয়: ৳${f(sum.revenue)}\n` +
+      `💵 আজকের নগদ বিক্রয়: ৳${f(sum.cashSale)}\n` +
+      `📌 আজকের বাকি: ৳${f(sum.bakiToday)}\n` +
+      `🟢 আজকের লাভ: ৳${f(profitVal)}\n` +
+      `🔴 আজকের লস: ৳${f(lossVal)}\n` +
+      `🪙 আজকের ওপেনিং ক্যাশ: ৳${f(sum.openingCash)}\n` +
+      `🏧 আজকের উইথড্রয়াল: ৳${f(sum.cashOutToday)}\n` +
+      `🏦 ক্যাশড্রয়ারে বর্তমান ক্যাশ: ৳${f(sum.currentCashDrawer)}\n` +
+      `🔴 মোট বাকি: ৳${f(sum.totalBakiNow)}\n` +
+      `📥 আজকের বাকি আদায়: ৳${f(sum.jomaToday)}` +
+      (sum.todayPurchaseCost > 0 ? `\n🛒 আজকের ক্রয় খরচ: ৳${f(sum.todayPurchaseCost)}` : "") +
+      extra,
+  };
+}
+
 function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoices = [], txns = [], cashLogs = [], products = [], purchaseOrders = [] }) {
   // light theme detection — dark background এড়াতে
   const isLight = T.bg && (T.bg.startsWith("#f") || T.bg.startsWith("#e") || T.bg.startsWith("rgb(2") || T.bg === "#ffffff");
@@ -24077,65 +24179,12 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
   };
 
   // 📊 আজকের সারসংক্ষেপ হিসাব — বিক্রয়, লাভ/লস, বাকি, ক্যাশ ড্রয়ার ইত্যাদি
-  const buildSummary = () => {
-    const todayKey = todayEn();
-    // Fix 1: voided ও isSelfUse বাদ — না হলে notification-এ ভুল revenue/profit দেখায়
-    const todayInvList  = (invoices || []).filter(i => i.dateKey === todayKey && !i.isSelfUse && i.status !== "voided");
-    const revenue       = todayInvList.reduce((s, i) => s + (i.total || 0), 0);
-    const cashSale      = todayInvList.reduce((s, i) => {
-      if (i.payType === "cash") return s + (i.total || 0);
-      if (i.payType === "partial") return s + Math.min(i.paidAmount || 0, i.total || 0);
-      return s;
-    }, 0);
-    const _voidedIds2   = new Set((invoices||[]).filter(i=>i.status==="voided").map(i=>i.id));
-    const bakiToday     = (txns || []).filter(t => t.dateKey === todayKey && t.type === "baki" && t.invoiceId && !_voidedIds2.has(t.invoiceId)).reduce((s, t) => s + t.amount, 0);
-    const jomaToday     = (txns || []).filter(t => t.dateKey === todayKey && t.type === "joma" && t.source !== "partial-sale" && t.source !== "void-reversal" && t.source !== "cash-sale").reduce((s, t) => s + t.amount, 0);
-    const totalBakiNow  = (customers || []).reduce((s, c) => s + (c.balance || 0), 0);
-    // 🟢 আজকের লাভ ও 🔴 আজকের লস — invoice-level আলাদা করে হিসাব (একই পণ্যের ভিন্ন ইনভয়েস cancel হবে না)
-    const prodMap   = new Map((products || []).map(p => [p.id, p]));
-    const totalProfit = todayInvList.reduce((s, inv) => {
-      const p = calcInvoiceProfit(inv, prodMap);
-      return s + (p > 0 ? p : 0);
-    }, 0);
-    const totalLoss = todayInvList.reduce((s, inv) => {
-      const p = calcInvoiceProfit(inv, prodMap);
-      return s + (p < 0 ? Math.abs(p) : 0);
-    }, 0);
-    // 💰 ক্যাশ ড্রয়ার — ওপেনিং ক্যাশ ও আজ দোকান থেকে বের হওয়া টাকা (ক্যাশড্রয়ার কার্ড থেকে)
-    const cashLogsAll  = cashLogs || [];
-    const openingCash  = cashLogsAll.filter(c => c.type === "opening" && c.dateKey === todayKey).reduce((s, c) => s + (c.amount || 0), 0);
-    const cashOutToday = cashLogsAll.filter(c => c.type === "withdrawal" && c.dateKey === todayKey).reduce((s, c) => s + (c.amount || 0), 0);
-    // Fix 6: আজকের ক্রয় খরচ ক্যাশ ড্রয়ার থেকে বাদ যাবে
-    const todayPurchaseCost = (purchaseOrders || [])
-      .filter(p => p._type === "pe" && (p.dateKey === todayKey || (p.createdAt && p.createdAt.startsWith(todayKey))))
-      .reduce((s, p) => s + (p.totalCost || 0), 0);
-    // ক্যাশড্রয়ারে বর্তমান ক্যাশ = ওপেনিং + নগদ বিক্রয় + বাকি আদায় - উইথড্রয়াল - ক্রয় খরচ
-    const currentCashDrawer = openingCash + cashSale + jomaToday - cashOutToday - todayPurchaseCost;
-    return { revenue, cashSale, bakiToday, jomaToday, totalBakiNow, totalProfit, totalLoss, openingCash, cashOutToday, currentCashDrawer, todayPurchaseCost };
-  };
+  // (এখন গ্লোবাল buildDailySummaryData ব্যবহার করে — App-এর role-switch guard-এর
+  // সাথেও শেয়ার্ড, দেখুন উপরের কমেন্ট)
+  const buildSummary = () => buildDailySummaryData({ invoices, txns, customers, products, cashLogs, purchaseOrders });
 
-  // 📝 নোটিফিকেশনের body / largeBody তৈরি
-  const buildNotifContent = (sum, extra = "") => {
-    const f = (n) => fmtMoney(n);
-    const profitVal = sum.totalProfit;
-    const lossVal   = sum.totalLoss;
-    return {
-      body: `💎 বিক্রয় ৳${f(sum.revenue)}  •  💵 নগদ ৳${f(sum.cashSale)}  •  📌 বাকি ৳${f(sum.bakiToday)}`,
-      largeBody:
-        `💎 আজকের বিক্রয়: ৳${f(sum.revenue)}\n` +
-        `💵 আজকের নগদ বিক্রয়: ৳${f(sum.cashSale)}\n` +
-        `📌 আজকের বাকি: ৳${f(sum.bakiToday)}\n` +
-        `🟢 আজকের লাভ: ৳${f(profitVal)}\n` +
-        `🔴 আজকের লস: ৳${f(lossVal)}\n` +
-        `🪙 আজকের ওপেনিং ক্যাশ: ৳${f(sum.openingCash)}\n` +
-        `🏧 আজকের উইথড্রয়াল: ৳${f(sum.cashOutToday)}\n` +
-        `🏦 ক্যাশড্রয়ারে বর্তমান ক্যাশ: ৳${f(sum.currentCashDrawer)}\n` +
-        `🔴 মোট বাকি: ৳${f(sum.totalBakiNow)}\n` +
-        `📥 আজকের বাকি আদায়: ৳${f(sum.jomaToday)}` +
-        (sum.todayPurchaseCost > 0 ? `\n🛒 আজকের ক্রয় খরচ: ৳${f(sum.todayPurchaseCost)}` : "") +
-        extra,
-    };
-  };
+  // 📝 নোটিফিকেশনের body / largeBody তৈরি (গ্লোবাল buildDailySummaryNotifContent ব্যবহার করে)
+  const buildNotifContent = (sum, extra = "") => buildDailySummaryNotifContent(sum, extra);
 
   const cancelAllScheduled = async () => {
     try {
@@ -25313,14 +25362,6 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast, r
           </div>
         )}
 
-        {staffList.length > 0 && (
-          <div style={{ marginTop: 12, position:"relative" }}>
-            <input style={{ ...S.input, paddingLeft:32 }} type="text" placeholder="নাম বা ইউজারনেম দিয়ে খুঁজুন..."
-              value={search} onChange={e => setSearch(e.target.value)} />
-            <span style={{ position:"absolute", left:10, top:"50%", transform:"translateY(-50%)", fontSize:13, opacity:0.5 }}>🔍</span>
-          </div>
-        )}
-
         <div style={{ marginTop: 14 }}>
           {staffList.length === 0 ? (
             <div style={{ color: T.sub, fontSize: 12, textAlign: "center", padding: "12px 0" }}>
@@ -25370,27 +25411,46 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast, r
 
               {/* সাময়িক অনুমতি */}
               <div style={{ borderTop:"1px solid #8b5cf622", padding:"10px 12px", background:"#8b5cf608" }}>
-                <div style={{ color:T.sub, fontSize:10.5, fontWeight:800, marginBottom:6 }}>🔑 সাময়িক ক্রয় এন্ট্রি অনুমতি</div>
-                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                  {activePurchasePerm ? (
-                    <button style={{ background:"#ef444415", border:"1px solid #ef444433", color:"#ef4444", borderRadius:8, padding:"5px 11px", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}
-                      onClick={() => {
-                        const updatedUser = { ...u, tempPermissions: (u.tempPermissions||[]).filter(p => p.key !== "purchase_entry") };
-                        setUsers(prev => prev.map(x => x.id === u.id ? updatedUser : x));
-                        showToast(`${u.name}-এর ক্রয় এন্ট্রি অনুমতি বাতিল হয়েছে`, "#ef4444");
-                        // 🛡️ সার্ভারে সত্যিই পৌঁছেছে কিনা নিশ্চিত করা — নাহলে চুপচাপ ব্যর্থ হয়ে
-                        // স্টাফ আগের মতোই ক্রয় এন্ট্রি করতে পারবে (আগের যে বাগ হয়েছিল)
-                        verifyPermissionSync(
-                          u.id,
-                          (fresh) => !((fresh.tempPermissions || []).some(p => p.key === "purchase_entry")),
-                          () => updatedUser,
-                          showToast,
-                          `${u.name}-এর ক্রয় এন্ট্রি অনুমতি বাতিল`
-                        );
-                      }}>
-                      ✕ ক্রয় এন্ট্রি বাতিল
-                    </button>
-                  ) : (
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
+                    <span style={{ fontSize:10.5, fontWeight:800, color:T.sub }}>🔑 সাময়িক ক্রয় এন্ট্রি অনুমতি</span>
+                    {activePurchasePerm && (
+                      <span style={{ fontSize:9, fontWeight:800, padding:"2px 7px", borderRadius:20, background:"#22c55e22", color:"#86efac", border:"1px solid #22c55e44" }}>
+                        ● {new Date(activePurchasePerm.expiresAt).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",timeZone:"Asia/Dhaka"})} পর্যন্ত
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    disabled={!activePurchasePerm}
+                    onClick={() => {
+                      if (!activePurchasePerm) return; // বন্ধ থেকে চালু করতে নিচের সময়সীমা বেছে নিতে হবে
+                      const updatedUser = { ...u, tempPermissions: (u.tempPermissions||[]).filter(p => p.key !== "purchase_entry") };
+                      setUsers(prev => prev.map(x => x.id === u.id ? updatedUser : x));
+                      showToast(`${u.name}-এর ক্রয় এন্ট্রি অনুমতি বাতিল হয়েছে`, "#ef4444");
+                      // 🛡️ সার্ভারে সত্যিই পৌঁছেছে কিনা নিশ্চিত করা — নাহলে চুপচাপ ব্যর্থ হয়ে
+                      // স্টাফ আগের মতোই ক্রয় এন্ট্রি করতে পারবে (আগের যে বাগ হয়েছিল)
+                      verifyPermissionSync(
+                        u.id,
+                        (fresh) => !((fresh.tempPermissions || []).some(p => p.key === "purchase_entry")),
+                        () => updatedUser,
+                        showToast,
+                        `${u.name}-এর ক্রয় এন্ট্রি অনুমতি বাতিল`
+                      );
+                    }}
+                    style={{
+                      width: 40, height: 22, borderRadius: 20, border: "none",
+                      cursor: activePurchasePerm ? "pointer" : "default",
+                      background: activePurchasePerm ? "linear-gradient(135deg,#7c3aed,#5b21b6)" : "#4b556355",
+                      position: "relative", transition: "background 0.2s", flexShrink: 0,
+                    }}>
+                    <span style={{
+                      position:"absolute", top:2, left: activePurchasePerm ? 20 : 2, width:18, height:18, borderRadius:"50%",
+                      background:"#fff", transition:"left 0.2s", boxShadow:"0 1px 3px #0006",
+                    }} />
+                  </button>
+                </div>
+                {!activePurchasePerm && (
+                  <div style={{ marginTop:8 }}>
                     <StaffCustomTimePicker
                       T={T} staffName={u.name}
                       onGrant={(expiresAt, label) => {
@@ -25412,8 +25472,8 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast, r
                         );
                       }}
                     />
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
 
               {/* অটো-শিডিউল (দৈনিক) */}
@@ -25427,29 +25487,33 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast, r
 
               {/* পণ্য অনুমতি */}
               <div style={{ borderTop:"1px solid #8b5cf622", padding:"10px 12px", background:"#8b5cf608" }}>
-                <div style={{ color:T.sub, fontSize:10.5, fontWeight:800, marginBottom:6 }}>📦 পণ্য অনুমতি</div>
-                <button
-                  style={{
-                    background: u.canAddProduct ? "#ef444415" : "#22c55e15",
-                    border: `1px solid ${u.canAddProduct ? "#ef444433" : "#22c55e33"}`,
-                    color: u.canAddProduct ? "#ef4444" : "#22c55e",
-                    borderRadius:8, padding:"5px 11px", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"inherit",
-                  }}
-                  onClick={() => {
-                    const next = !u.canAddProduct;
-                    const updatedUser = { ...u, canAddProduct: next };
-                    setUsers(prev => prev.map(x => x.id === u.id ? updatedUser : x));
-                    showToast(next ? `${u.name}-কে নতুন পণ্য যোগের অনুমতি দেওয়া হয়েছে` : `${u.name}-এর পণ্য যোগের অনুমতি বাতিল হয়েছে`, next ? "#22c55e" : "#ef4444");
-                    verifyPermissionSync(
-                      u.id,
-                      (fresh) => !!fresh.canAddProduct === next,
-                      () => updatedUser,
-                      showToast,
-                      `${u.name}-এর পণ্য যোগ অনুমতি`
-                    );
-                  }}>
-                  {u.canAddProduct ? "✕ পণ্য যোগ অনুমতি বাতিল করুন" : "✓ নতুন পণ্য যোগের অনুমতি দিন"}
-                </button>
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                  <span style={{ fontSize:10.5, fontWeight:800, color:T.sub }}>📦 পণ্য অনুমতি</span>
+                  <button
+                    onClick={() => {
+                      const next = !u.canAddProduct;
+                      const updatedUser = { ...u, canAddProduct: next };
+                      setUsers(prev => prev.map(x => x.id === u.id ? updatedUser : x));
+                      showToast(next ? `${u.name}-কে নতুন পণ্য যোগের অনুমতি দেওয়া হয়েছে` : `${u.name}-এর পণ্য যোগের অনুমতি বাতিল হয়েছে`, next ? "#22c55e" : "#ef4444");
+                      verifyPermissionSync(
+                        u.id,
+                        (fresh) => !!fresh.canAddProduct === next,
+                        () => updatedUser,
+                        showToast,
+                        `${u.name}-এর পণ্য যোগ অনুমতি`
+                      );
+                    }}
+                    style={{
+                      width: 40, height: 22, borderRadius: 20, border: "none", cursor: "pointer",
+                      background: u.canAddProduct ? "linear-gradient(135deg,#7c3aed,#5b21b6)" : "#4b556355",
+                      position: "relative", transition: "background 0.2s", flexShrink: 0,
+                    }}>
+                    <span style={{
+                      position:"absolute", top:2, left: u.canAddProduct ? 20 : 2, width:18, height:18, borderRadius:"50%",
+                      background:"#fff", transition:"left 0.2s", boxShadow:"0 1px 3px #0006",
+                    }} />
+                  </button>
+                </div>
               </div>
             </div>
           );})}
