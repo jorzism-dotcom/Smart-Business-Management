@@ -636,6 +636,33 @@
 
         <div id="fbWorkArea" style="display:none;margin-top:16px">
 
+          <div class="glass card" style="margin-bottom:16px;padding:14px;border-color:rgba(245,158,11,0.35)">
+            <div style="font-weight:700;margin-bottom:10px;color:var(--amber)">🏗️ নতুন দোকান — এক ক্লিকে সম্পূর্ণ Firebase Project তৈরি করুন</div>
+            <div class="form-group">
+              <label>দোকানের নাম</label>
+              <input id="fbNewShopName" placeholder="যেমন: রহিম স্টোর" oninput="fbAutoProjectId()">
+            </div>
+            <div class="form-group">
+              <label>নতুন Project ID (auto তৈরি হবে, চাইলে বদলাতে পারেন)</label>
+              <input id="fbNewProjectId" placeholder="rahim-store-a1b2c">
+              <div class="hint">শুধু ছোট হাতের ইংরেজি অক্ষর, সংখ্যা ও হাইফেন — ৬-৩০ ক্যারেক্টার, প্রথম অক্ষর দিয়ে শুরু</div>
+            </div>
+            <div class="form-group">
+              <label>Region</label>
+              <select id="fbNewRegion" style="width:100%;padding:10px;border-radius:10px;background:rgba(0,0,0,0.3);color:var(--text);border:1px solid var(--border)">
+                <option value="asia-southeast1">asia-southeast1 (Singapore)</option>
+                <option value="asia-south1">asia-south1 (Mumbai)</option>
+                <option value="us-central1">us-central1 (Iowa)</option>
+              </select>
+            </div>
+            <button class="btn-primary" style="background:linear-gradient(135deg,#f59e0b,#d97706)" onclick="fbCreateAndDeployAll()">
+              🏗️ নতুন Project তৈরি করে সব Deploy করুন
+            </button>
+            <div class="hint" style="margin-top:8px">এটা নতুন GCP Project + Firebase + Firestore Database + Realtime Database — সবকিছু একদম শূন্য থেকে তৈরি করবে। বিদ্যমান কোনো দোকানের প্রজেক্টে এই বাটন ব্যবহার করবেন না — শুধু একদম নতুন দোকানের জন্য।</div>
+          </div>
+
+          <div style="text-align:center;color:var(--sub2);font-size:12px;margin:14px 0">— অথবা বিদ্যমান প্রজেক্টে deploy করুন —</div>
+
           <div class="form-group">
             <label>Firebase Project ID *</label>
             <input id="fbProjectId" placeholder="যেমন: chiren-eff4c">
@@ -1795,10 +1822,11 @@ async function fbDeployIndexes(projectId, indexesJsonText) {
 async function fbDeployRtdbRules(databaseURL, rtdbJsonText) {
   if (!databaseURL) { fbLog('Database URL পাওয়া যায়নি, RTDB rules স্কিপ করা হলো।', 'warn'); return; }
   JSON.parse(rtdbJsonText); // validate
-  const url = databaseURL.replace(/\/$/, '') + '/.settings/rules.json';
+  // RTDB REST API শুধু access_token query parameter মানে, Authorization header মানে না
+  const url = databaseURL.replace(/\/$/, '') + '/.settings/rules.json?access_token=' + encodeURIComponent(fbAccessToken);
   const res = await fetch(url, {
     method: 'PUT',
-    headers: { Authorization: 'Bearer ' + fbAccessToken, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: rtdbJsonText
   });
   if (!res.ok) {
@@ -1808,16 +1836,11 @@ async function fbDeployRtdbRules(databaseURL, rtdbJsonText) {
   fbLog('Realtime Database Rules সফলভাবে deploy হয়েছে।', 'ok');
 }
 
-window.fbDeployAll = async function() {
-  const projectId = document.getElementById('fbProjectId').value.trim();
-  if (!projectId) { fbLog('আগে Project ID লিখুন।', 'err'); return; }
-  if (!fbAccessToken) { fbLog('আগে Google account দিয়ে সংযুক্ত করুন।', 'err'); return; }
-
+async function fbRunDeploySteps(projectId) {
   const rulesText   = document.getElementById('fbRulesText').value;
   const indexesText = document.getElementById('fbIndexesText').value;
   const rtdbText    = document.getElementById('fbRtdbText').value;
 
-  document.getElementById('fbLog').innerHTML = '';
   fbLog('Deploy শুরু হচ্ছে — Project: ' + projectId);
 
   try {
@@ -1843,6 +1866,151 @@ window.fbDeployAll = async function() {
   }
 
   fbLog('সম্পন্ন। উপরের লগ চেক করে নিশ্চিত হোন সব ধাপ ঠিকঠাক হয়েছে।', 'ok');
+}
+
+window.fbDeployAll = async function() {
+  const projectId = document.getElementById('fbProjectId').value.trim();
+  if (!projectId) { fbLog('আগে Project ID লিখুন।', 'err'); return; }
+  if (!fbAccessToken) { fbLog('আগে Google account দিয়ে সংযুক্ত করুন।', 'err'); return; }
+
+  document.getElementById('fbLog').innerHTML = '';
+  await fbRunDeploySteps(projectId);
+};
+
+// ── নতুন Project ID auto-generate (শপের নাম থেকে) ──
+window.fbAutoProjectId = function() {
+  const raw = document.getElementById('fbNewShopName').value || 'shop';
+  let base = raw.toLowerCase()
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 18);
+  if (!base || !/^[a-z]/.test(base)) base = 'shop-' + base;
+  const rand = Math.random().toString(36).slice(2, 7);
+  let id = (base + '-' + rand).replace(/-+/g, '-');
+  if (id.length < 6) id = id + '0'.repeat(6 - id.length);
+  document.getElementById('fbNewProjectId').value = id.slice(0, 30).replace(/-+$/, '');
+};
+
+// ── একটা Long Running Operation (LRO) শেষ হওয়া পর্যন্ত পোল করা ──
+async function fbPollLRO(opGetUrl, label, maxTries) {
+  maxTries = maxTries || 40;
+  for (let i = 0; i < maxTries; i++) {
+    const op = await fbApiFetch(opGetUrl);
+    if (op.done) {
+      if (op.error) throw new Error(op.error.message || JSON.stringify(op.error));
+      return op.response || op;
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  throw new Error(label + ' — সময় বেশি লাগছে, একটু পরে Firebase Console-এ গিয়ে ম্যানুয়ালি চেক করুন।');
+}
+
+// ── ধাপ ১: GCP Project তৈরি ──
+async function fbCreateGcpProject(projectId, displayName) {
+  fbLog('GCP Project তৈরি হচ্ছে: ' + projectId + ' ...');
+  const op = await fbApiFetch('https://cloudresourcemanager.googleapis.com/v1/projects', {
+    method: 'POST',
+    body: JSON.stringify({ projectId: projectId, name: (displayName || projectId).slice(0, 30) })
+  });
+  await fbPollLRO('https://cloudresourcemanager.googleapis.com/v1/' + op.name, 'GCP Project তৈরি');
+  fbLog('GCP Project তৈরি হয়েছে।', 'ok');
+}
+
+// ── ধাপ ২: Firebase enable করা ──
+async function fbAddFirebaseToProject(projectId) {
+  fbLog('Project-এ Firebase enable হচ্ছে...');
+  const op = await fbApiFetch('https://firebase.googleapis.com/v1beta1/projects/' + projectId + ':addFirebase', {
+    method: 'POST',
+    body: JSON.stringify({})
+  });
+  await fbPollLRO('https://firebase.googleapis.com/v1beta1/' + op.name, 'Firebase enable');
+  fbLog('Firebase enable হয়েছে।', 'ok');
+}
+
+// ── ধাপ ৩: Firestore Database তৈরি ──
+async function fbCreateFirestoreDb(projectId, locationId) {
+  fbLog('Firestore Database তৈরি হচ্ছে (' + locationId + ')...');
+  const op = await fbApiFetch('https://firestore.googleapis.com/v1/projects/' + projectId + '/databases?databaseId=(default)', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'FIRESTORE_NATIVE', locationId: locationId })
+  });
+  await fbPollLRO('https://firestore.googleapis.com/v1/' + op.name, 'Firestore Database তৈরি');
+  fbLog('Firestore Database তৈরি হয়েছে।', 'ok');
+}
+
+// ── ধাপ ৪: Realtime Database Instance তৈরি ──
+async function fbCreateRtdbInstanceNew(projectId, locationId) {
+  fbLog('Realtime Database Instance তৈরি হচ্ছে...');
+  const dbId = (projectId + '-default-rtdb').slice(0, 60);
+  const data = await fbApiFetch(
+    'https://firebasedatabase.googleapis.com/v1beta/projects/' + projectId + '/locations/' + locationId + '/instances?databaseId=' + dbId,
+    { method: 'POST', body: JSON.stringify({}) }
+  );
+  fbLog('Realtime Database Instance তৈরি হয়েছে।', 'ok');
+  return data.databaseUrl || ('https://' + dbId + '.firebaseio.com');
+}
+
+// ── ধাপ ৫: Web App রেজিস্টার করে config বের করা ──
+async function fbRegisterWebAppNew(projectId) {
+  fbLog('Web App রেজিস্টার হচ্ছে...');
+  await fbApiFetch('https://firebase.googleapis.com/v1beta1/projects/' + projectId + '/webApps', {
+    method: 'POST',
+    body: JSON.stringify({ displayName: 'SBM' })
+  });
+  await new Promise(r => setTimeout(r, 4000));
+  const webApps = await fbApiFetch('https://firebase.googleapis.com/v1beta1/projects/' + projectId + '/webApps');
+  const appId = webApps.apps[0].appId;
+  const config = await fbApiFetch('https://firebase.googleapis.com/v1beta1/projects/' + projectId + '/webApps/' + appId + '/config');
+  fbLog('Web App config পাওয়া গেছে।', 'ok');
+  return config;
+}
+
+// ── সব একসাথে: নতুন Project তৈরি + Rules/Indexes/RTDB deploy ──
+window.fbCreateAndDeployAll = async function() {
+  if (!fbAccessToken) { fbLog('আগে Google account দিয়ে সংযুক্ত করুন।', 'err'); return; }
+
+  const shopName  = document.getElementById('fbNewShopName').value.trim();
+  const projectId = document.getElementById('fbNewProjectId').value.trim();
+  const locationId = document.getElementById('fbNewRegion').value;
+
+  if (!projectId) { fbLog('Project ID লিখুন বা দোকানের নাম দিয়ে auto-generate করুন।', 'err'); return; }
+  if (!/^[a-z][a-z0-9-]{5,29}$/.test(projectId)) {
+    fbLog('Project ID অবৈধ — শুধু ছোট হাতের ইংরেজি অক্ষর/সংখ্যা/হাইফেন, ৬-৩০ ক্যারেক্টার, প্রথম অক্ষর দিয়ে শুরু হতে হবে।', 'err');
+    return;
+  }
+
+  document.getElementById('fbLog').innerHTML = '';
+  fbLog('🏗️ নতুন দোকান সেটআপ শুরু — Project ID: ' + projectId);
+
+  try {
+    await fbCreateGcpProject(projectId, shopName);
+  } catch (e) { fbLog('Project তৈরি ব্যর্থ: ' + e.message, 'err'); return; }
+
+  try {
+    await fbAddFirebaseToProject(projectId);
+  } catch (e) { fbLog('Firebase enable ব্যর্থ: ' + e.message, 'err'); return; }
+
+  try {
+    await fbCreateFirestoreDb(projectId, locationId);
+  } catch (e) { fbLog('Firestore Database তৈরি ব্যর্থ: ' + e.message, 'err'); }
+
+  try {
+    fbDatabaseURL = await fbCreateRtdbInstanceNew(projectId, locationId);
+  } catch (e) { fbLog('RTDB Instance তৈরি ব্যর্থ: ' + e.message, 'err'); }
+
+  try {
+    const config = await fbRegisterWebAppNew(projectId);
+    document.getElementById('fbProjectId').value = projectId;
+    document.getElementById('fbc-apikey').textContent = config.apiKey || '—';
+    document.getElementById('fbc-dburl').textContent  = config.databaseURL || fbDatabaseURL || '—';
+    document.getElementById('fbc-pid').textContent    = config.projectId || projectId;
+    document.getElementById('fbConfigResult').style.display = 'block';
+    if (config.databaseURL) fbDatabaseURL = config.databaseURL;
+  } catch (e) { fbLog('Web App config আনতে ব্যর্থ: ' + e.message, 'warn'); }
+
+  await fbRunDeploySteps(projectId);
+  fbLog('🎉 নতুন দোকান "' + (shopName || projectId) + '" প্রস্তুত!', 'ok');
 };
 
 
