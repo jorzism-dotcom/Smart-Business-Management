@@ -5040,6 +5040,14 @@ const FSS = {
     this._app = null;
     this._db = null;
     this._cfg = null;
+    // 🔴 ফিক্স: _persistTried এই singleton-এর property, নির্দিষ্ট Firestore app
+    // instance-এর না — teardown()-এর পর নতুন config দিয়ে init() হলে সেটা একটা
+    // সম্পূর্ণ নতুন Firebase app/Firestore instance, যার নিজের enableIndexedDbPersistence
+    // এখনো কল হয়নি। আগে এই ফ্ল্যাগ রিসেট না হওয়ায় (admin যদি Settings থেকে
+    // Firebase project config বদলান, অ্যাপ রিস্টার্ট ছাড়াই) নতুন প্রজেক্টে অফলাইন
+    // persistence নীরবে বন্ধ থেকে যেত — নেট ছাড়া কাজ করত না যতক্ষণ না অ্যাপ পুরো
+    // রিস্টার্ট হয়। এখন প্রতিটা নতুন init()-এর জন্য আবার চেষ্টা হবে।
+    this._persistTried = false;
   },
 
   // একটা collection-এর সব ডকুমেন্ট রিয়েল-টাইমে শোনে — যেকোনো ফোনে কোনো রেকর্ড
@@ -8030,9 +8038,13 @@ const calcInvoiceProfit = (inv, prodMap) => {
   const items = inv.items || [];
   const subtotal = items.reduce((s, it) => s + (it.price || 0) * (it.qty || 1), 0);
   // Fix 5: discountRatio শুধু discount-এর জন্য — extraCharge আলাদা যোগ হবে
-  // total = subtotal - discount + extraCharge
-  // তাই revenue = (subtotal - discount) + extraCharge = items revenue + extraCharge
-  const discount = inv.discount || 0;
+  // total = subtotal - itemDiscount - discount + extraCharge
+  // তাই revenue = (subtotal - itemDiscount - discount) + extraCharge = items revenue + extraCharge
+  // 🔴 ফিক্স: আগে শুধু inv.discount (গ্লোবাল ডিসকাউন্ট) বিয়োগ হতো, inv.itemDiscount
+  // (প্রতি-লাইন ডিসকাউন্ট, createInvoice-এ আলাদা ফিল্ডে সেভ হয়) সম্পূর্ণ উপেক্ষিত
+  // হতো — ফলে কোনো ইনভয়েসে লাইন-আইটেম ডিসকাউন্ট দেওয়া থাকলে Dashboard/AI-এর
+  // "আজকের/এই মাসের লাভ" ঠিক ততটাই বেশি দেখাত (itemDiscount-এর সমপরিমাণ)।
+  const discount = (inv.discount || 0) + (inv.itemDiscount || 0);
   const extraCharge = inv.extraCharge || 0;
   const discountRatio = subtotal > 0 ? (subtotal - discount) / subtotal : 1;
   const itemsProfit = items.reduce((s, it) => {
@@ -8088,6 +8100,13 @@ const runLogicTests = () => {
     const inv = { items: [{ productId: "p1", price: 100, qty: 1, costPrice: 50 }], discount: 0, extraCharge: 30 };
     const actual = calcInvoiceProfit(inv, prodMap);
     return { pass: approx(actual, 80), expected: 80, actual }; // (100-50)+30
+  });
+  t("লাভ হিসাব (calcInvoiceProfit)", "প্রতি-লাইন itemDiscount ধরা উচিত (global discount-এর মতোই)", () => {
+    const prodMap = new Map([["p1", { costPrice: 50 }]]);
+    // subtotal=200, itemDiscount=20 (লাইন-লেভেল), global discount=0 → revenue=180, cost=100 → profit=80
+    const inv = { items: [{ productId: "p1", price: 100, qty: 2, costPrice: 50 }], discount: 0, itemDiscount: 20, extraCharge: 0 };
+    const actual = calcInvoiceProfit(inv, prodMap);
+    return { pass: approx(actual, 80), expected: 80, actual };
   });
   t("লাভ হিসাব (calcInvoiceProfit)", "সেবা (service) আইটেমের cost সবসময় ০ ধরা উচিত", () => {
     const inv = { items: [{ productId: "s1", price: 500, qty: 1, productType: "service", costPrice: 999 }], discount: 0, extraCharge: 0 };
@@ -8196,7 +8215,14 @@ const calcProfitByProduct = (invList, prodMap, productsFallback = []) => {
   invList.forEach(inv => {
     const items = inv.items || [];
     const subtotal = items.reduce((s, it) => s + (it.price || 0) * (it.qty || 1), 0);
-    const discountRatio = subtotal > 0 ? (inv.total || 0) / subtotal : 1;
+    // 🔴 ফিক্স: আগে (inv.total||0)/subtotal ব্যবহার হতো — inv.total-এর মধ্যে
+    // extraCharge-ও যোগ থাকে (যেটার কোনো নির্দিষ্ট পণ্য/cost নেই), তাই ratio-টা
+    // extraCharge-সহ ইনভয়েসে ১-এর বেশি হয়ে যেত আর প্রতিটা পণ্যের revenue/profit
+    // সেই অনুপাতে (extraCharge-এর ভাগ পেয়ে) বাস্তবের চেয়ে বেশি দেখাত। extraCharge
+    // বাদ দিয়ে শুধু items-এর নিজস্ব revenue (subtotal - itemDiscount - discount)
+    // থেকে ratio বানানো হচ্ছে — calcInvoiceProfit-এর সাথেও এখন সামঞ্জস্যপূর্ণ।
+    const itemsRevenueTotal = (inv.total || 0) - (inv.extraCharge || 0);
+    const discountRatio = subtotal > 0 ? itemsRevenueTotal / subtotal : 1;
     items.forEach(item => {
       const qty = item.qty || 1;
       const p = prodMap?.get?.(item.productId) || productsFallback.find(pr => pr.name === item.name);
@@ -8225,8 +8251,11 @@ const calcProfitByProductWithInvoices = (invList, prodMap, productsFallback = []
   invList.forEach(inv => {
     const items = inv.items || [];
     const subtotal = items.reduce((s, it) => s + (it.price || 0) * (it.qty || 1), 0);
-    const discountRatio = subtotal > 0 ? (inv.total || 0) / subtotal : 1;
-    const discountAmt = subtotal - (inv.total || 0);
+    // 🔴 ফিক্স: calcProfitByProduct-এর মতোই — extraCharge বাদ দিয়ে ratio বানানো
+    // হচ্ছে, নাহলে extraCharge-সহ ইনভয়েসে প্রতিটা পণ্যের profit বেশি দেখাত।
+    const itemsRevenueTotal = (inv.total || 0) - (inv.extraCharge || 0);
+    const discountRatio = subtotal > 0 ? itemsRevenueTotal / subtotal : 1;
+    const discountAmt = subtotal - itemsRevenueTotal;
     items.forEach(item => {
       const qty = item.qty || 1;
       const p = prodMap?.get?.(item.productId) || productsFallback.find(pr => pr.name === item.name);
@@ -11118,11 +11147,9 @@ function SmartBusinessMgmt() {
         const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
         setCustomerTxnsFull({ customerId: detailCId, rows });
       } catch (err) {
-        // 🔴 TEMP DEBUG: আসল কারণ দেখার জন্য — কনফার্ম হলে এই ব্লক আবার silent catch-এ ফিরিয়ে দিতে হবে
         console.error("customerTxnsFull query failed:", err);
         if (!cancelled) {
           setCustomerTxnsFull({ customerId: detailCId, rows: null }); // ব্যর্থ — fallback windowed-এ
-          setSyncToast?.({ msg: `টেস্ট: txn history query ব্যর্থ — ${err?.code || err?.message || "unknown"}`, ok: false });
         }
       }
     })();
@@ -16814,16 +16841,28 @@ function ProfitStatementCard({ T, S, invoices, products, shopName, expenses = []
       if (!dailyMap[dateKey]) dailyMap[dateKey] = { revenue: 0, profit: 0 };
       dailyMap[dateKey].revenue += total;
 
+      // 🔴 ফিক্স: আগে এখানে raw (price×qty) - cost ব্যবহার হতো, itemDiscount/
+      // discount কোনোটাই ধরত না — ফলে ডিসকাউন্ট দেওয়া ইনভয়েসের দিনে "দৈনিক লাভ"
+      // বেশি দেখাত, আর দৈনিক রো-গুলোর যোগফল উপরের headline গ্রস-লাভের সাথে মিলত
+      // না। এখন calcInvoiceProfit-এর মতোই discount-adjusted revenue ব্যবহার হয়।
+      const itemsSubtotal = (inv.items||[]).reduce((s, it) => s + (it.price||0)*(it.qty||1), 0);
+      const invDiscount = (inv.discount||0) + (inv.itemDiscount||0);
+      const discountRatio = itemsSubtotal > 0 ? (itemsSubtotal - invDiscount) / itemsSubtotal : 1;
       (inv.items||[]).forEach(it => {
         const p = prodMap.get(it.productId);
+        const lineRevenue = (it.price||0)*(it.qty||1);
         const cost = (p?.costPrice||0) * (it.qty||1);
         cogs += cost;
-        dailyMap[dateKey].profit += (it.price||0)*(it.qty||1) - cost;
+        dailyMap[dateKey].profit += lineRevenue*discountRatio - cost;
         const key = it.name || it.productId;
         if (!topProducts[key]) topProducts[key] = { name: it.name||key, revenue: 0, qty: 0 };
-        topProducts[key].revenue += (it.price||0)*(it.qty||1);
+        topProducts[key].revenue += lineRevenue*discountRatio;
         topProducts[key].qty += it.qty||1;
       });
+      // extraCharge-এর কোনো cost/পণ্য নেই — সরাসরি সেই দিনের লাভে যোগ (headline
+      // grossProfit = revenue-cogs-এর সাথে মেলাতে, যেহেতু revenue-তে extraCharge
+      // ইতিমধ্যে অন্তর্ভুক্ত)
+      if (inv.extraCharge) dailyMap[dateKey].profit += inv.extraCharge;
     });
 
     const totalExpense = filtExp.reduce((s, e) => s + (e.amount||0), 0);
