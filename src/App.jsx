@@ -2973,25 +2973,55 @@ function SubscriptionGate({ children }) {
       // আগেভাগেই "গ্রেস পিরিয়ড/পেমেন্ট" নোটিশ দেখতে শুরু করতেন। এখন expiryDate-কে
       // ওইদিনের local দিন-শেষ (23:59:59) হিসেবে ধরা হচ্ছে, যাতে পুরো এক্সপায়ারি
       // দিনটাই বৈধ থাকে।
-      const expiry = /T/.test(d.expiryDate) ? new Date(d.expiryDate) : new Date(`${d.expiryDate}T23:59:59`);
-      const diff = Math.ceil((expiry - now) / 86400000);
+      // 🔴 ফিক্স (ভুয়া "সাবস্ক্রিপশন শেষ" লুপ): আগে d.expiryDate খালি/undefined
+      // অথবা কোনো কারণে non-string (যেমন Firestore Timestamp) হলে
+      // `new Date(`${d.expiryDate}T23:59:59`)` একটা Invalid Date বানাত।
+      // Invalid Date দিয়ে বিয়োগ করলে diff = NaN হয়, আর `NaN > 0` ও `NaN > -7`
+      // দুটোই false — তাই কোড সরাসরি else ব্লকে গিয়ে "expired" সেট করে দিত,
+      // যদিও admin.html-এ status আসলে active/trial-ই ছিল। ফলে দোকানদার প্রতিবার
+      // অ্যাপ খোলা/resume করার সময়ই "সাবস্ক্রিপশন শেষ" লক স্ক্রিন দেখতেন —
+      // মেয়াদ আসলে শেষ না হওয়া সত্ত্বেও। এখন expiryDate পার্স করার আগেই
+      // বৈধতা যাচাই করা হয়; অবৈধ/অনুপস্থিত হলে দোকানদারকে ভুলভাবে লক না করে
+      // Firestore-এর status ফিল্ড অনুযায়ী নিরাপদ ডিফল্ট (active/trial) দেওয়া হয়
+      // এবং সমস্যাটা app_errors-এ লগ করা হয় যাতে এডমিন প্যানেল থেকে ডেটা ঠিক
+      // করা যায়।
+      const rawExpiry = d.expiryDate;
+      let expiry = null;
+      if (rawExpiry) {
+        const candidate = /T/.test(String(rawExpiry)) ? new Date(rawExpiry) : new Date(`${rawExpiry}T23:59:59`);
+        if (!isNaN(candidate.getTime())) expiry = candidate;
+      }
       if (!isMounted()) return;
 
       let resolvedStatus;
-      if (diff > 0) {
-        setDaysLeft(diff);
-        resolvedStatus = d.status === "trial" ? "trial" : "active";
+      if (!expiry) {
+        // expiryDate নেই বা পার্স করা যায়নি — Firestore-এ যা status সেট করা আছে
+        // সেটাকেই বিশ্বাস করো, আগেভাগে লক করে দিও না।
+        resolvedStatus = d.status === "trial" ? "trial" : (d.status === "blocked" ? "expired" : "active");
         setStatus(resolvedStatus);
         if (typeof window.__hideSplash === "function") window.__hideSplash();
-      } else if (diff > -7) {
-        setDaysLeft(7 + diff);
-        resolvedStatus = "grace";
-        setStatus(resolvedStatus);
-        if (typeof window.__hideSplash === "function") window.__hideSplash();
+        try {
+          logErrorToCentral("subscription_expiryDate_invalid", new Error("Invalid/missing expiryDate on subscriptions doc"), {
+            phone, rawExpiry: String(rawExpiry ?? ""), storedStatus: d.status || "",
+          });
+        } catch {}
       } else {
-        resolvedStatus = "expired";
-        setStatus(resolvedStatus);
-        if (typeof window.__hideSplash === "function") window.__hideSplash();
+        const diff = Math.ceil((expiry - now) / 86400000);
+        if (diff > 0) {
+          setDaysLeft(diff);
+          resolvedStatus = d.status === "trial" ? "trial" : "active";
+          setStatus(resolvedStatus);
+          if (typeof window.__hideSplash === "function") window.__hideSplash();
+        } else if (diff > -7) {
+          setDaysLeft(7 + diff);
+          resolvedStatus = "grace";
+          setStatus(resolvedStatus);
+          if (typeof window.__hideSplash === "function") window.__hideSplash();
+        } else {
+          resolvedStatus = "expired";
+          setStatus(resolvedStatus);
+          if (typeof window.__hideSplash === "function") window.__hideSplash();
+        }
       }
 
       // ── সফল check হলে secure cache সংরক্ষণ করো ─────────────────────────
@@ -3984,9 +4014,10 @@ const Haptic = {
 const APP_VERSION = "v1";
 const APP_BUILD   = "2026-07-11";
 
-// 🔴 নতুন — সেমান্টিক ভার্সন (x.y.z), শুধু ঐচ্ছিক "নতুন আপডেট এসেছে" নোটিশ
-// (UpdateNoticeModal, নিচে App()-এ দেখুন) সেমান্টিকভাবে কম্পেয়ার করার জন্য।
-// ⚠️ প্রতি রিলিজে এটা bump করা আবশ্যক — নাহলে নোটিশ ঠিকমতো বন্ধ হবে না।
+// 🔴 সেমান্টিক ভার্সন (x.y.z) — Settings-এর নীরব AppVersionCard (দেখুন
+// Settings_-এর ঠিক আগের অংশ) এটার সাথে admin.html-এর প্রকাশিত ভার্সন
+// সেমান্টিকভাবে কম্পেয়ার করে।
+// ⚠️ প্রতি রিলিজে এটা bump করা আবশ্যক — নাহলে কার্ডটা ঠিকমতো বন্ধ হবে না।
 // admin.html-এর "সর্বশেষ ভার্সন" ফিল্ডে যা বসাবেন সেটাও একই x.y.z ফরম্যাটে হতে হবে।
 const APP_VERSION_CODE = "1.0.0";
 
@@ -5352,7 +5383,53 @@ const FSS = {
         setDoc(doc(this._db, "stats", dateKey),  upd, { merge: true }),
         setDoc(doc(this._db, "stats", monthKey), upd, { merge: true }),
       ]);
-    } catch { /* silent — stats failure main flow block করবে না */ }
+    } catch (e) {
+      // 🔴 ফিক্স: আগে এখানে সম্পূর্ণ silent catch{} ছিল — লেখা ব্যর্থ হলে delta
+      // চিরতরে হারিয়ে যেত, কোথাও কোনো চিহ্ন থাকত না, আর stats doc নিঃশব্দে
+      // লোকাল ইনভয়েসের যোগফলের চেয়ে কম দেখাতে থাকত ("ফুল অ্যাপ চেকআপ"-এ ধরা
+      // পড়া ৳ অমিলের মূল কারণ)। এখন ব্যর্থ delta localStorage-এ একটা রিট্রাই
+      // কিউতে জমা রাখা হয় — পরের successful updateStats() কল বা app চালু/অনলাইন
+      // হওয়ার সময় flushPendingStats() সেটা আবার চেষ্টা করবে, একদম হারাবে না।
+      try {
+        const q = JSON.parse(localStorage.getItem("sbm_pending_stats") || "[]");
+        q.push({ dateKey, monthKey, delta, at: Date.now() });
+        localStorage.setItem("sbm_pending_stats", JSON.stringify(q.slice(-200)));
+      } catch {}
+    }
+  },
+
+  // 🔁 আগে ব্যর্থ হওয়া stats delta গুলো (localStorage কিউ) আবার চেষ্টা করে —
+  // FSS.init() সফল হওয়ার পরে ও নেট ফিরে এলে কল করা উচিত।
+  async flushPendingStats() {
+    if (!this._db) return;
+    let q = [];
+    try { q = JSON.parse(localStorage.getItem("sbm_pending_stats") || "[]"); } catch { return; }
+    if (!q.length) return;
+    const remaining = [];
+    for (const item of q) {
+      try {
+        const upd = {};
+        if (item.delta.sale   !== undefined) upd.totalSale   = increment(item.delta.sale);
+        if (item.delta.profit !== undefined) upd.totalProfit = increment(item.delta.profit);
+        if (item.delta.baki   !== undefined) upd.totalBaki   = increment(item.delta.baki);
+        if (item.delta.cash   !== undefined) upd.totalCash   = increment(item.delta.cash);
+        upd.updatedAt = Date.now();
+        await Promise.all([
+          setDoc(doc(this._db, "stats", item.dateKey),  upd, { merge: true }),
+          setDoc(doc(this._db, "stats", item.monthKey), upd, { merge: true }),
+        ]);
+      } catch { remaining.push(item); }
+    }
+    try { localStorage.setItem("sbm_pending_stats", JSON.stringify(remaining)); } catch {}
+  },
+
+  // 🩹 ড্রিফট-প্রুফ রিপেয়ার: increment()-এর বদলে সরাসরি প্রকৃত ইনভয়েস/txn ডেটা
+  // থেকে হিসেব করা absolute মান দিয়ে stats doc সম্পূর্ণ ওভাররাইট (merge নয়) করে।
+  // যেকোনো কারণে (silent-fail, race condition ইত্যাদি) drift হয়ে গেলে এটাই
+  // একমাত্র নির্ভরযোগ্য সমাধান — "ফুল অ্যাপ চেকআপ"-এর অমিল ধরা পড়লে ব্যবহার করুন।
+  async setStatsAbsolute(key, vals) {
+    if (!this._db || !key) return;
+    await setDoc(doc(this._db, "stats", key), { ...vals, updatedAt: Date.now() }, { merge: false });
   },
 
   // 📊 stats doc একবার পড়া (Dashboard cold load)
@@ -10921,6 +10998,9 @@ function SmartBusinessMgmt() {
     if (!ok) return;
 
     SyncLog.add("info", "Firestore রিয়েলটাইম সিঙ্ক চালু হয়েছে (instant, record-level)");
+    // 🔴 ফিক্স: আগে ব্যর্থ হওয়া updateStats() delta গুলো কখনো রিট্রাই হতো না —
+    // এখন প্রতিবার Firestore রেডি হওয়ার সময় pending queue ফ্লাশ করার চেষ্টা হয়
+    FSS.flushPendingStats();
 
     // Device presence (RTDB) — Settings স্ক্রিনে active devices লিস্টের জন্য
     FB.init(firebaseConfig);
@@ -10934,7 +11014,7 @@ function SmartBusinessMgmt() {
     }, 5 * 60 * 1000);
     FB.getActiveDevices().then(devs => setActiveDevices(devs));
 
-    const onOnline = () => { const r = FSS.init(firebaseConfig); setFssReady(r); };
+    const onOnline = () => { const r = FSS.init(firebaseConfig); setFssReady(r); if (r) FSS.flushPendingStats(); };
     window.addEventListener("online", onOnline);
 
     return () => {
@@ -13906,6 +13986,7 @@ function LoginScreen({ users, onLogin, shopName, T, setUsers, devContact, master
           onChange={e => { setStaffUsername(e.target.value); setStaffError(""); }}
           onKeyDown={e => e.key === "Enter" && handleStaffLogin()}
           autoComplete="username"
+          autoCapitalize="off" autoCorrect="off" spellCheck="false"
         />
 
         <div style={{ color: "rgba(0,229,255,0.7)", fontSize: 12, fontWeight: 700, marginBottom: 6 }}>পাসওয়ার্ড</div>
@@ -14670,10 +14751,26 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
   const paidAmt = payType === "partial" ? (parseFloat(partialAmt) || 0) : (payType === "cash" ? total : 0);
   const bakiAmt = Math.max(0, total - paidAmt);
   // Overpayment split: পরিশোধ > আজকের invoice → অতিরিক্ত অংশ কাস্টমারের জমা হবে
-  const prevBalance = (!selCust || selCust.id === "__walkin__" || selCust.id === "__selfuse__") ? 0 : (selCust.balance || 0);
+  // 🔴 ফিক্স: Walk-in ফ্লো-তে "বাকি"/"আংশিক" এর ভেতর "পুরোনো কাস্টমার" সিলেক্ট করলে
+  // (walkInExistingId) সেই কাস্টমারের পূর্বের বাকিও এখানে ধরতে হবে — আগে শুধু
+  // selCust (যেটা এই কেসে সবসময় "__walkin__") চেক হতো বলে পূর্বের বাকি ০ দেখাতো।
+  const walkInExistingCust = (selCust?.id === "__walkin__" && walkInCustMode === "existing" && walkInExistingId)
+    ? (customers || []).find(c => c.id === walkInExistingId) : null;
+  const prevBalance = walkInExistingCust ? (walkInExistingCust.balance || 0)
+    : (!selCust || selCust.id === "__walkin__" || selCust.id === "__selfuse__") ? 0 : (selCust.balance || 0);
   const isOverpay = payType === "partial" && paidAmt > total;
   const overpayAmt = isOverpay ? (paidAmt - total) : 0;
   const newBalance = prevBalance + bakiAmt - overpayAmt;
+  // 🔴 ফিক্স: Walk-in ফ্লো-তে top-level payType সবসময় "cash" থাকে (walkInPayType
+  // আলাদা state), তাই generic bakiAmt/newBalance walk-in-এর জন্য সবসময় ০ হিসেব
+  // করত। সামারি কার্ডে "পূর্বের বাকি + সর্বমোট বাকি" ঠিকভাবে দেখাতে walk-in-এর
+  // নিজস্ব বাকি (walkInPayType অনুযায়ী) দিয়ে হিসেব করা হচ্ছে।
+  const displayBakiAmt = (selCust?.id === "__walkin__")
+    ? (walkInPayType === "baki" ? total
+       : walkInPayType === "partial" ? Math.max(0, total - (parseFloat(walkInPartialAmt) || 0))
+       : 0)
+    : bakiAmt;
+  const displayNewBalance = prevBalance + displayBakiAmt - overpayAmt;
 
   const resetAll = () => {
     setStep(1); setSelCust(null); setCustSearch(""); setItems([]);
@@ -14788,7 +14885,15 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
       payType: effectivePayType, note,
       paidAmount: isSelfUse ? 0 : isWalkIn ? walkInPaidAmt : paidAmt,
       bakiAmount: isSelfUse ? 0 : isWalkIn ? walkInBakiAmt : bakiAmt,
-      prevBalance: (isWalkIn || isSelfUse) ? 0 : selCust.balance,
+      // 🔴 ফিক্স: Walk-in ফ্লো-তে "পুরোনো কাস্টমার" সিলেক্ট করা থাকলে (walkInCustId
+      // === walkInExistingId) তার পূর্বের বাকিও রিসিটে সঠিকভাবে সেভ হতে হবে —
+      // আগে isWalkIn হলেই prevBalance সবসময় ০ সেভ হতো (নতুন walk-in বাকিদারের
+      // ক্ষেত্রে ঠিক আছে, কিন্তু পুরোনো কাস্টমার বাছাই করলে ভুল)।
+      prevBalance: isSelfUse ? 0
+        : (isWalkIn ? (walkInCustMode === "existing" && walkInExistingId
+            ? (customers.find(c => c.id === walkInExistingId)?.balance || 0)
+            : 0)
+          : selCust.balance),
       date: todayStr(), dateKey: todayEn(), shopName,
       createdAt: new Date().toISOString(),
       createdBy: currentUser?.name || "মালিক",
@@ -15248,14 +15353,14 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
           {/* Search */}
           <div style={{
             display: "flex", alignItems: "center", gap: 10,
-            background: "#ffffff0d", border: "1.5px solid #f9731633",
+            background: T.card, border: "1.5px solid #f9731633",
             borderRadius: 14, padding: "12px 14px",
-            boxShadow: "inset 0 2px 8px rgba(0,0,0,0.2)",
+            boxShadow: "inset 0 2px 8px rgba(0,0,0,0.08)",
             marginBottom: 8,
           }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f97316" strokeWidth="2.5" strokeLinecap="round" style={{ flexShrink:0, opacity:0.85 }}><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             <input
-              style={{ flex: 1, background: "none", border: "none", outline: "none", color: "#f1f5f9", fontSize: 14, fontFamily: "inherit", padding: 0 }}
+              style={{ flex: 1, background: "none", border: "none", outline: "none", color: T.text, fontSize: 14, fontFamily: "inherit", padding: 0 }}
               placeholder={`নাম, মোবাইল বা সিরিয়াল নম্বর... (${customers.length}জন)`}
               defaultValue={custSearch}
               ref={el => {
@@ -16032,7 +16137,7 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
                 <span style={{ color: T.text, fontWeight:800 }}>৳{fmt(total)}</span>
               </div>
               {/* পরিশোধ পদ্ধতি */}
-              <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, color: T.sub, marginBottom: (prevBalance > 0 || bakiAmt > 0) ? 6 : 0 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, color: T.sub, marginBottom: (prevBalance > 0 || displayBakiAmt > 0) ? 6 : 0 }}>
                 <span>পরিশোধ পদ্ধতি</span>
                 <span style={{ color: (selCust?.id==="__walkin__"||payType==="cash")?"#22c55e":payType==="baki"?"#ef4444":"#f59e0b", fontWeight:800 }}>
                   {selCust?.id === "__walkin__"
@@ -16044,8 +16149,8 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
                     : "নগদ পরিশোধ"}
                 </span>
               </div>
-              {/* পূর্বের বাকি — শুধু registered customer, walk-in নয় */}
-              {selCust && selCust.id !== "__walkin__" && selCust.id !== "__selfuse__" && prevBalance > 0 && (
+              {/* পূর্বের বাকি — registered customer অথবা walk-in ফ্লো-তে বেছে নেওয়া পুরোনো কাস্টমার */}
+              {((selCust && selCust.id !== "__walkin__" && selCust.id !== "__selfuse__") || walkInExistingCust) && prevBalance > 0 && (
                 <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, color: T.sub, marginBottom:6 }}>
                   <span>পূর্বের বাকি</span>
                   <span style={{ color:"#f59e0b", fontWeight:800 }}>৳{fmt(prevBalance)}</span>
@@ -16058,11 +16163,11 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
                   <span style={{ fontWeight:800 }}>৳{fmt(overpayAmt)}</span>
                 </div>
               )}
-              {/* বর্তমান বাকি */}
-              {selCust && selCust.id !== "__walkin__" && selCust.id !== "__selfuse__" && (prevBalance > 0 || bakiAmt > 0) && (
+              {/* বর্তমান বাকি (মোট = পূর্বের বাকি + এই ইনভয়েসের বাকি) */}
+              {((selCust && selCust.id !== "__walkin__" && selCust.id !== "__selfuse__") || walkInExistingCust) && (prevBalance > 0 || displayBakiAmt > 0) && (
                 <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, borderTop:`1px solid ${T.border}`, paddingTop:6, marginTop:2 }}>
-                  <span style={{ color: T.sub }}>বর্তমান বাকি</span>
-                  <span style={{ color: newBalance > 0 ? "#ef4444" : "#22c55e", fontWeight:900 }}>৳{fmt(Math.max(0, newBalance))}</span>
+                  <span style={{ color: T.sub }}>সর্বমোট বাকি</span>
+                  <span style={{ color: displayNewBalance > 0 ? "#ef4444" : "#22c55e", fontWeight:900 }}>৳{fmt(Math.max(0, displayNewBalance))}</span>
                 </div>
               )}
             </div>
@@ -21858,6 +21963,18 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
     setFormErrors(er => ({ ...er, name: false, company: false }));
     setNameSuggestOpen(false);
   };
+  // 🔴 ফিক্স: আগে ডুপ্লিকেট পণ্যের নাম শুধু "যোগ করুন" চাপার পরে (পুরো ফর্ম পূরণ
+  // করার পরে) ধরা পড়ত। এখন টাইপ করার সাথে সাথেই (প্রতি কি-স্ট্রোকে) নাম হুবহু
+  // (case/space-insensitive) মিলে গেলে সাথে সাথে জানিয়ে দেয় — বাকি ফিল্ড পূরণ
+  // করার আগেই, যাতে সময় নষ্ট না হয়।
+  const liveDupProduct = useMemo(() => {
+    if (editId) return null; // এডিটের সময় নিজের সাথে মিলবেই — চেক দরকার নেই
+    const nm = (form.name || "").trim();
+    if (!nm) return null;
+    const normName = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const target = normName(nm);
+    return products.find(p => normName(p.name) === target) || null;
+  }, [form.name, products, editId]);
   // ── #৭ AI ফিচার — এক লাইনে বাংলা টেক্সট থেকে ফর্ম ফিল্ড অটো-পার্স (পর্যায় ১) ──
   const [showAiQuickEntry, setShowAiQuickEntry] = useState(false);
   const [aiQuickText, setAiQuickText] = useState("");
@@ -23081,15 +23198,15 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               {!anthropicKey && <div style={{ color:T.sub, fontSize:10, marginTop:6 }}>ℹ️ সেটিংসে Anthropic API Key দিলে এই ফিচার কাজ করবে</div>}
             </div>
           )}
-          <div style={{ position:"relative", marginBottom: formErrors.name ? 2 : 4 }}>
+          <div style={{ position:"relative", marginBottom: (formErrors.name || liveDupProduct) ? 2 : 4 }}>
             <div style={{ display:"flex", gap:6, alignItems:"center" }}>
-              <input style={{ ...S.input, flex:1, marginBottom:0, border: formErrors.name ? "1.5px solid #ef4444" : S.input.border }} placeholder="" defaultValue={form.name}
+              <input style={{ ...S.input, flex:1, marginBottom:0, border: (formErrors.name || liveDupProduct) ? "1.5px solid #ef4444" : S.input.border }} placeholder="" defaultValue={form.name}
                 ref={el => { nameInputRef.current = el; if (el && !el._b) { el._b=true; el.addEventListener("compositionend", (e) => { {setForm(f=>({...f,name:el.value})); if (el.value.trim()) setFormErrors(er=>({...er,name:false}));}; }, {passive:true}); el.addEventListener("blur", (e) => { {setForm(f=>({...f,name:el.value})); if (el.value.trim()) setFormErrors(er=>({...er,name:false}));}; setTimeout(() => setNameSuggestOpen(false), 200); }, {passive:true}); el.addEventListener("focus", () => setNameSuggestOpen(true), {passive:true}); el.addEventListener("input", (e) => { /* বাংলা IME কম্পোজিশনের মাঝেও (স্পেস দেওয়ার আগেই) সাজেশন দেখাতে হবে — তাই isComposing চেক বাদ, প্রতি কি-স্ট্রোকেই আপডেট করা হচ্ছে (আনকন্ট্রোল্ড ইনপুট বলে DOM value/커서 নিয়ে সমস্যা হয় না) */ setForm(f=>({...f,name:el.value})); if (el.value.trim()) setFormErrors(er=>({...er,name:false})); setNameSuggestOpen(true); }, {passive:true}); } }} onChange={()=>{}}
                 autoCorrect="off" autoCapitalize="off" spellCheck="false" autoComplete="off"
                 inputMode="text" enterKeyHint="next" />
             </div>
             {/* ── #১ নাম অটো-সাজেশন ড্রপডাউন — নাম+পাওয়ার মিলিয়ে সাজেস্ট, সিলেক্ট করলে সাপ্লায়ার অটো-ফিল ── */}
-            {nameSuggestOpen && nameSuggestions.length > 0 && (
+            {nameSuggestOpen && !liveDupProduct && nameSuggestions.length > 0 && (
               <div style={{ position:"absolute", top:"100%", left:0, right:0, background:T.card, border:`1px solid ${T.border}`, borderRadius:12, zIndex:200, maxHeight:220, overflowY:"auto", boxShadow:"0 8px 24px rgba(0,0,0,0.4)", marginTop:4 }}>
                 {nameSuggestions.map((entry, i) => (
                   <div key={i} onMouseDown={() => pickNameSuggestion(entry)}
@@ -23103,7 +23220,13 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               </div>
             )}
           </div>
-          {formErrors.name && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginBottom:6, marginTop:-2 }}>⚠️ নাম আবশ্যক</div>}
+          {/* 🔴 ফিক্স: টাইপ করার সাথে সাথেই ডুপ্লিকেট নাম নোটিফাই — ফর্ম সাবমিটের অপেক্ষা করে না */}
+          {liveDupProduct && (
+            <div style={{ color:"#ef4444", fontSize:11.5, fontWeight:700, marginBottom:8, marginTop:-2, background:"#ef444414", border:"1px solid #ef444444", borderRadius:8, padding:"7px 10px" }}>
+              ⚠️ "{liveDupProduct.name}" নামে পণ্য আগে থেকেই আছে — নতুন স্টক এলে "ক্রয় এন্ট্রি" থেকে ব্যাচ যোগ করুন
+            </div>
+          )}
+          {!liveDupProduct && formErrors.name && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginBottom:6, marginTop:-2 }}>⚠️ নাম আবশ্যক</div>}
           {/* ── সাপ্লায়ার selector — শুধু পণ্যের জন্য ── */}
           {form.productType !== "service" && (<>
           <label style={S.label}>🏭 সাপ্লায়ার *</label>
@@ -26142,9 +26265,22 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast, r
     setUsers(prev => prev.map(x => x.id === u.id ? updatedUser : x));
     // 🛡️ সার্ভারে সত্যিই পৌঁছেছে কিনা নিশ্চিত করা — নাহলে চুপচাপ ব্যর্থ হয়ে
     // অটো-শিডিউল আগের মতোই থেকে যাবে (আগে tempPermissions/canAddProduct-এ যে বাগ হয়েছিল সেই ক্লাস)
+    // 🔴 ফিক্স: আগে JSON.stringify(...) === JSON.stringify(...) দিয়ে তুলনা হতো —
+    // এটা object key-এর অর্ডারের ওপর নির্ভরশীল, তাই write আসলে সফল হলেও Firestore
+    // থেকে ফেরত আসা object-এর key-অর্ডার সামান্য ভিন্ন হলেই (বা কোনো ফিল্ড
+    // undefined থাকায় বাদ পড়লে) ভুলভাবে "কনফার্ম হয়নি" দেখাতো — যদিও ডেটা আসলে
+    // ঠিকই সেভ হয়ে গিয়েছিল। এখন প্রতিটা ফিল্ড আলাদা করে (order-independent) মেলানো হয়।
     verifyPermissionSync(
       u.id,
-      (fresh) => JSON.stringify((fresh.autoSchedules || []).find(s => s.key === "purchase_entry") || {}) === JSON.stringify(nextSchedule),
+      (fresh) => {
+        const f = (fresh.autoSchedules || []).find(s => s.key === "purchase_entry");
+        if (!f) return false;
+        return !!f.enabled === !!nextSchedule.enabled
+          && (f.startHour ?? 0)   === (nextSchedule.startHour ?? 0)
+          && (f.startMinute ?? 0) === (nextSchedule.startMinute ?? 0)
+          && (f.endHour ?? 0)     === (nextSchedule.endHour ?? 0)
+          && (f.endMinute ?? 0)   === (nextSchedule.endMinute ?? 0);
+      },
       () => updatedUser,
       showToast,
       `${u.name}-এর অটো-শিডিউল`
@@ -26203,6 +26339,7 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast, r
               onChange={e => setUserForm(f => ({ ...f, name: e.target.value }))} />
             <label style={S.label}>ইউজারনেম</label>
             <input style={S.input} type="text" placeholder="যেমন: rahim123" value={userForm.username}
+              autoCapitalize="off" autoCorrect="off" spellCheck="false" autoComplete="off"
               onChange={e => setUserForm(f => ({ ...f, username: e.target.value.replace(/\s/g,"") }))} />
             <label style={S.label}>পাসওয়ার্ড</label>
             <input style={S.input} type="text" placeholder="পাসওয়ার্ড দিন" value={userForm.password}
@@ -26382,6 +26519,180 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast, r
   );
 }
 
+// ─── downloadAndInstallApk() — সত্যিকারের এক-ট্যাপ আপডেট ────────────────────
+// আগে বাটনে ট্যাপ করলে শুধু window.open(updateUrl) হতো — যেটা আসলে ব্রাউজার
+// খুলে APK ডাউনলোড শুরু করত, তারপর দোকানদারকে নিজে নোটিফিকেশনে ট্যাপ করে
+// ফাইল ম্যানেজার/ইনস্টলার খুঁজে বের করতে হতো (৪-৫ ধাপ)। এখন Capacitor
+// Filesystem দিয়ে সরাসরি ডিভাইসে APK নামানো হয় এবং ডাউনলোড শেষে অটো
+// প্যাকেজ-ইনস্টলার স্ক্রিন খুলে যায় — Android নিজে যে "Install" কনফার্মেশন
+// দেখায় সেটা বাদে দোকানদারের আর কোনো অতিরিক্ত ধাপ লাগে না।
+// ⚠️ নোট: FileOpener (`@capacitor-community/file-opener`) নেটিভ প্রজেক্টে যোগ
+// করা থাকলে সরাসরি ইনস্টলার খুলবে; না থাকলে Share শীটে (Package Installer
+// অপশনসহ) পড়বে — দুই ক্ষেত্রেই আগের চেয়ে অনেক কম ধাপ।
+async function downloadAndInstallApk(url, version, onProgress) {
+  const isNative = typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.();
+  if (!isNative) { window.open(url, "_blank"); return { ok: true, installed: false }; }
+
+  const Filesystem = window.Capacitor?.Plugins?.Filesystem;
+  if (!Filesystem) { window.open(url, "_blank"); return { ok: true, installed: false }; }
+
+  const fileName = `sbm-update-v${version}.apk`;
+  const path = "Download/SBM-Update/" + fileName;
+  let progressHandle = null;
+
+  try {
+    let fileUri = null;
+
+    if (typeof Filesystem.downloadFile === "function") {
+      // ── নেটিভ ডাউনলোড, রিয়েল-টাইম প্রোগ্রেসসহ ──
+      try {
+        progressHandle = await Filesystem.addListener?.("progress", (p) => {
+          if (p?.contentLength) onProgress?.(Math.round((p.bytes / p.contentLength) * 100));
+        });
+      } catch { /* progress listener না থাকলে চুপচাপ এগিয়ে যাও */ }
+      const res = await Filesystem.downloadFile({ url, path, directory: "EXTERNAL_STORAGE", recursive: true });
+      fileUri = res?.path || res?.uri || null;
+      if (!fileUri) {
+        const g = await Filesystem.getUri({ path, directory: "EXTERNAL_STORAGE" });
+        fileUri = g?.uri || null;
+      }
+    } else {
+      // ── ফলব্যাক: CapacitorHttp দিয়ে ম্যানুয়ালি নামিয়ে লেখা ──
+      onProgress?.(5);
+      const { CapacitorHttp } = await import("@capacitor/core");
+      const r = await CapacitorHttp.request({ method: "GET", url, responseType: "blob" });
+      onProgress?.(75);
+      await Filesystem.writeFile({ path, data: r.data, directory: "EXTERNAL_STORAGE", recursive: true });
+      const g = await Filesystem.getUri({ path, directory: "EXTERNAL_STORAGE" });
+      fileUri = g?.uri || null;
+      onProgress?.(100);
+    }
+
+    if (!fileUri) return { ok: false, error: "ডাউনলোড শেষ হয়েছে কিন্তু ফাইল খুঁজে পাওয়া যায়নি" };
+
+    // ── ইনস্টলার খোলা — যা পাওয়া যায় তা দিয়ে চেষ্টা, নাহলে গ্রেসফুল ফলব্যাক ──
+    const FileOpener = window.Capacitor?.Plugins?.FileOpener;
+    if (FileOpener?.open) {
+      await FileOpener.open({ filePath: fileUri, contentType: "application/vnd.android.package-archive" });
+      return { ok: true, installed: true };
+    }
+    const Share = window.Capacitor?.Plugins?.Share;
+    if (Share?.share) {
+      await Share.share({ title: `SBM v${version}`, url: fileUri, dialogTitle: "ইনস্টল করতে অ্যাপ বেছে নিন (Package Installer)" });
+      return { ok: true, installed: true };
+    }
+    return { ok: true, installed: false, path: fileUri };
+  } catch (e) {
+    return { ok: false, error: e?.message || "ডাউনলোড ব্যর্থ হয়েছে" };
+  } finally {
+    try { progressHandle?.remove?.(); } catch {}
+  }
+}
+
+// ─── AppVersionCard — অ্যাপ ভার্সন তথ্য + (থাকলে) নীরব আপডেট, একই কার্ডে ─────
+// 🔴 রিডিজাইন: আগে "নীরব আপডেট কার্ড" আর "অ্যাপ ভার্সন কার্ড" আলাদা দুটো
+// বক্স ছিল — এখন একটাই কার্ড: সবসময় বর্তমান ভার্সন দেখায়, আর নতুন ভার্সন
+// প্রকাশিত থাকলে সেই একই কার্ডের ভেতরেই (নিচে একটা ডিভাইডারের পর) আপডেট
+// বিবরণ ও ইনস্টল বাটন দেখা যায়। আপডেট-চেক সম্পূর্ণ নীরব — কোনো popup/toast/
+// badge-on-open নেই, দোকানদার নিজে Settings-এ এলে তবেই দেখবেন।
+function AppVersionCard({ T, S }) {
+  const [info, setInfo]             = React.useState(null); // নতুন ভার্সন থাকলে তথ্য, নাহলে null
+  const [downloading, setDownloading] = React.useState(false);
+  const [progress, setProgress]       = React.useState(0);
+  const [status, setStatus]           = React.useState("");
+
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const snap = await Promise.race([
+          getDoc(doc(_db, "admin_config", "appVersion")),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 5000)),
+        ]);
+        if (!mounted || !snap.exists()) return;
+        const d = snap.data();
+        if (d.version && compareVersions(APP_VERSION_CODE, d.version) < 0) {
+          setInfo({
+            version:   d.version       || "",
+            notes:     d.updateNotesBn || "",
+            updateUrl: d.updateUrl     || "",
+            mandatory: d.forceUpdate === true,
+          });
+        }
+      } catch { /* নীরবে ব্যর্থ — কোনো error UI দোকানদারকে দেখানো হয় না */ }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  const handleUpdate = async () => {
+    if (!info?.updateUrl || downloading) return;
+    setDownloading(true); setProgress(0); setStatus("ডাউনলোড শুরু হচ্ছে...");
+    const res = await downloadAndInstallApk(info.updateUrl, info.version, (p) => {
+      setProgress(p); setStatus(`ডাউনলোড হচ্ছে... ${p}%`);
+    });
+    setDownloading(false);
+    if (!res.ok) { setStatus("❌ " + res.error); return; }
+    setStatus(res.installed ? "✅ ইনস্টলার খোলা হয়েছে — চালিয়ে যেতে \"Install\" চাপুন" : "✅ ডাউনলোড সম্পন্ন — Download ফোল্ডারে খুঁজে পাবেন");
+  };
+
+  return (
+    <div className="qc-gradient-card" style={{
+      ...S.card,
+      background: info
+        ? "linear-gradient(135deg,rgba(34,211,238,0.10),rgba(139,92,246,0.06))"
+        : "linear-gradient(135deg,rgba(249,115,22,0.06),rgba(239,68,68,0.04))",
+      border: info ? "1px solid rgba(34,211,238,0.35)" : S.card.border,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ color: T.text, fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={info ? "#22d3ee" : "#f97316"} strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            অ্যাপ ভার্সন
+            {info?.mandatory && (
+              <span style={{ fontSize: 10, fontWeight: 700, color: "#fca5a5", background: "rgba(239,68,68,0.15)", borderRadius: 20, padding: "2px 8px" }}>জরুরি</span>
+            )}
+          </div>
+          <div style={{ color: T.sub, fontSize: 11, marginTop: 4 }}>Smart Business Management (SBM)</div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ color: info ? "#22d3ee" : "#f97316", fontWeight: 900, fontSize: 18, letterSpacing: 1 }}>{APP_VERSION}</div>
+          <div style={{ color: T.sub, fontSize: 11, marginTop: 2 }}>Build: {APP_BUILD}</div>
+        </div>
+      </div>
+
+      {info && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+          <div style={{ color: T.text, fontWeight: 700, fontSize: 13 }}>⬆️ নতুন ভার্সন {info.version} উপলব্ধ</div>
+          {info.notes ? (
+            <div style={{ color: T.sub, fontSize: 12, marginTop: 8, whiteSpace: "pre-line", lineHeight: 1.6, background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: "8px 10px" }}>
+              {info.notes}
+            </div>
+          ) : null}
+          {downloading && (
+            <div style={{ height: 8, borderRadius: 6, background: "rgba(255,255,255,0.08)", overflow: "hidden", marginTop: 10 }}>
+              <div style={{ height: "100%", width: `${progress}%`, background: "linear-gradient(135deg,#06b6d4,#8b5cf6)", transition: "width .2s" }} />
+            </div>
+          )}
+          {status ? <div style={{ color: T.sub, fontSize: 11.5, marginTop: 8 }}>{status}</div> : null}
+          <button
+            onClick={handleUpdate}
+            disabled={downloading}
+            style={{
+              width: "100%", marginTop: 12, padding: "12px", borderRadius: 12, border: "none",
+              background: downloading ? "rgba(255,255,255,0.08)" : "linear-gradient(135deg,#06b6d4,#8b5cf6)",
+              color: "#fff", fontSize: 14, fontWeight: 800,
+              cursor: downloading ? "default" : "pointer",
+              boxShadow: downloading ? "none" : "0 4px 16px rgba(6,182,212,0.3)",
+            }}
+          >
+            {downloading ? `⬇️ ডাউনলোড হচ্ছে... ${progress}%` : "⬇️ এক ট্যাপে ডাউনলোড ও ইনস্টল করুন"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Settings_({ T, S, shopName,
  setShopName, users, setUsers, currentUser, setCurrentUser, showToast, customers, setCustomers, products, setProducts, invoices, setInvoices, txns, setTxns, smsLog, setSmsLog, sendSMS, darkMode, setDarkMode, activeTheme, setActiveTheme, fontSize, setFontSize, deletedCustomers, setDeletedCustomers, deletedProducts = [], setDeletedProducts, smsGateway, setSmsGateway, btConnected, btDevice, onConnectBluetooth, onDisconnectBluetooth, paymentInvoices, setPaymentInvoices, purchaseOrders = [], setPurchaseOrders, stockMovements = [], setStockMovements, lastAutoBackup, lastLocalBackup, driveStatus, backupNeeded, backupFailStreak, lastBackupError, restoreTestAt, restoreTestOk, restoreTestDetail, restoreTestFailStreak, onRunRestoreTest, performDriveBackup, buildBackupData, buildManualBackupData, manualBackupSetters, setBackupNeeded, performMasterSync, masterSyncStatus, masterSyncDetail, lastMasterSync, autoMasterSyncEnabled, setAutoMasterSyncEnabled, googleDriveToken, setGoogleDriveToken, anthropicKey, setAnthropicKey, smsTemplates, setSmsTemplates, autoBackupEnabled, setAutoBackupEnabled, firebaseConfig, setFirebaseConfig, firebaseEnabled, setFirebaseEnabled, setAuthSession, devContact, setDevContact, masterResetHash, setMasterResetHash, activeDevices = [], setActiveDevices, recoveryPhone, setRecoveryPhone, recoveryPinHash, setRecoveryPinHash, cashLogs = [], setCashLogs, suppliers = [], setSuppliers, expenses = [], setExpenses, returns = [], setReturns, quotations = [], setQuotations, supplierPayments = [], setSupplierPayments, auditLogs = [], setAuditLogs, hasPerm, fssReady = false, pendingConflicts = [] }) {
   const [editName,    setEditName]    = useState(false);
@@ -26438,6 +26749,45 @@ function Settings_({ T, S, shopName,
   // ঘেঁটে স্ক্রিনশট নেওয়ার বদলে। প্রতিটা ফিচারের জন্য pass/fail/todo রিপোর্ট করে। ──
   const [syncDiag, setSyncDiag] = useState(null); // null | {running:true} | {ranAt, checks:[]}
   const [logicTest, setLogicTest] = useState(null); // null | {ranAt, results:[]} — synchronous, তাই running স্টেট লাগে না
+  const [statsFixing, setStatsFixing] = useState(false);
+  // 🩹 "আজকের Firestore stats doc vs লোকাল ইনভয়েস যোগফল" ফেইল হলে এই বাটনে চাপলে
+  // প্রকৃত ইনভয়েস/txn ডেটা থেকে দিন ও মাসের stats doc সম্পূর্ণ রিক্যালকুলেট
+  // (ওভাররাইট, increment নয়) করে দেয় — যেকোনো পুরনো drift ধুয়ে-মুছে ঠিক করে।
+  const fixStatsDrift = async () => {
+    if (!FSS.isReady()) { showToast("Firestore রেডি না — ইন্টারনেট/কনফিগ চেক করুন", "#ef4444"); return; }
+    setStatsFixing(true);
+    try {
+      const voidedIds = new Set((invoices || []).filter(i => i.status === "voided").map(i => i.id));
+      const prodMap = new Map((products || []).map(p => [p.id, p]));
+      const computeFor = (matchKey) => {
+        const invList = (invoices || []).filter(i => i.dateKey && matchKey(i.dateKey) && !i.isSelfUse && i.status !== "voided");
+        const totalSale = invList.reduce((s, i) => s + (i.total || 0), 0);
+        const totalCash = invList.reduce((s, i) => {
+          if (i.payType === "cash") return s + (i.total || 0);
+          if (i.payType === "partial") return s + Math.min(i.paidAmount || 0, i.total || 0);
+          return s;
+        }, 0);
+        const totalBaki = (txns || []).filter(t => t.dateKey && matchKey(t.dateKey) && t.type === "baki" && t.invoiceId && !voidedIds.has(t.invoiceId)).reduce((s, t) => s + (t.amount || 0), 0);
+        const totalProfit = invList.reduce((s, inv) => {
+          const p = calcInvoiceProfit(inv, prodMap);
+          return s + (p > 0 ? p : 0);
+        }, 0);
+        return { totalSale, totalCash, totalBaki, totalProfit };
+      };
+      const dayKey = todayEn();
+      const monthKey = dayKey.slice(0, 7);
+      const dayVals = computeFor(dk => dk === dayKey);
+      const monthVals = computeFor(dk => dk.startsWith(monthKey));
+      await FSS.setStatsAbsolute(dayKey, dayVals);
+      await FSS.setStatsAbsolute(monthKey, monthVals);
+      showToast("✅ Stats doc রিক্যালকুলেট হয়েছে — প্রকৃত ইনভয়েস ডেটার সাথে এখন মিলছে");
+      runSyncDiagnostics();
+    } catch (e) {
+      showToast("রিক্যালকুলেট ব্যর্থ হয়েছে: " + (e?.message || "unknown error"), "#ef4444");
+    } finally {
+      setStatsFixing(false);
+    }
+  };
   const runSyncDiagnostics = async () => {
     setSyncDiag({ running: true });
     const checks = [];
@@ -27746,14 +28096,6 @@ function Settings_({ T, S, shopName,
                 );
               })()}
 
-              {/* ── 📜 Invoice History — এখন নিচের "ইনভয়েস হিস্ট্রি" ট্যাবে (আগে
-                  "ফেরত") সরিয়ে নেওয়া হয়েছে, যাতে ফেরত দেওয়ার সময়ও পুরনো
-                  ইনভয়েস একই স্ক্রিন থেকে খোঁজা যায়। ── */}
-              <div style={{ marginBottom:10, borderRadius:10, border:"1px solid #a78bfa33", background:"#a78bfa08", padding:"9px 11px", display:"flex", alignItems:"center", gap:6 }}>
-                <span style={{ fontSize:13 }}>📜</span>
-                <div style={{ color:"#94a3b8", fontSize:9.5 }}>ইনভয়েস হিস্ট্রি এখন নিচের <span style={{color:"#c4b5fd", fontWeight:800}}>"ইনভয়েস হিস্ট্রি"</span> ট্যাবে পাবেন</div>
-              </div>
-
               {/* ── 🩺 ফুল অ্যাপ চেকআপ — কানেকশন, স্টাফ পারমিশন সিঙ্ক, ডেটা
                   ইন্টেগ্রিটি, লোকাল স্টোরেজ, ব্যাকআপ/হেলথ, পুরনো windowing
                   ফিচারগুলো (stockMovements/txns/cashLogs/Invoice History) এবং
@@ -27807,6 +28149,13 @@ function Settings_({ T, S, shopName,
                               <div style={{ flex:1 }}>
                                 <div style={{ color:colorFor(c.status), fontSize:9.5, fontWeight:700 }}>{c.name}</div>
                                 <div style={{ color:"#94a3b8", fontSize:8.5 }}>{c.detail}</div>
+                                {/* 🩹 Stats drift ধরা পড়লে সরাসরি এখান থেকেই রিক্যালকুলেট করার অপশন */}
+                                {c.status === "fail" && c.name === "আজকের Firestore stats doc vs লোকাল ইনভয়েস যোগফল" && (
+                                  <button onClick={fixStatsDrift} disabled={statsFixing}
+                                    style={{ marginTop:4, background:"#f59e0b22", border:"1px solid #f59e0b55", borderRadius:6, padding:"4px 9px", color:"#f59e0b", fontSize:8.5, fontWeight:800, cursor: statsFixing ? "not-allowed" : "pointer", fontFamily:"inherit", opacity: statsFixing ? 0.6 : 1 }}>
+                                    {statsFixing ? "ঠিক করা হচ্ছে..." : "🩹 এখনই রিক্যালকুলেট করে ঠিক করুন"}
+                                  </button>
+                                )}
                               </div>
                             </div>
                           ))}
@@ -28737,9 +29086,6 @@ onChange={()=>{}} />
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-9z"/></svg>
           ১ ক্লিকে বাকি রিমাইন্ডার SMS
         </div>
-        <div style={{ color: T.sub, fontSize: 12, marginBottom: 10 }}>
-          মোবাইল নম্বর আছে এবং বাকি ৳০-এর বেশি — এমন <b style={{color:"#ef4444"}}>{bakiSmsCustomers.length}</b>জন কাস্টমারকে তাদের নিজ নিজ বাকির পরিমান উল্লেখ করে এক ক্লিকে আলাদা আলাদা SMS পাঠানো হবে।
-        </div>
         {bulkSmsSending ? (
           <div>
             <div style={{ height: 8, borderRadius: 4, background: "#33415544", overflow: "hidden", marginBottom: 6 }}>
@@ -28955,11 +29301,6 @@ onChange={()=>{}} />
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1" fill="#ef4444"/></svg>
             🗑️ মাস্টার ফুল রিসেট (লাইভ + ব্যাকআপ)
           </div>
-          <div style={{ color:T.sub, fontSize:11, marginBottom:12, lineHeight:1.6 }}>
-            পণ্য, কাস্টমার, ইনভয়েস, লাভ/লস, বাকি, নগদ বিক্রি — দোকানের <b style={{ color:"#ef4444" }}>সব লাইভ ডেটা</b> এবং Firebase + Google Drive + Local-এর <b style={{ color:"#ef4444" }}>সব ব্যাকআপ</b> — একসাথে স্থায়ীভাবে মুছে দেয়।
-            নতুন অ্যাপ ইনস্টলের মতো একদম ফ্রেশ হয়ে যাবে — শুধু অ্যাপ সেটিং (থিম, ফন্ট, Firebase কানেকশন, SMS গেটওয়ে, ইউজার লগইন) অপরিবর্তিত থাকবে। দীর্ঘমেয়াদী আর্কাইভ (ransomware-সুরক্ষা) ডিফল্টে থেকে যায়, চাইলে ঐচ্ছিকভাবে সেটাও মোছা যাবে।
-            অত্যন্ত স্পর্শকাতর — Master Key + ৩-স্তরের নিশ্চিতকরণ প্রয়োজন।
-          </div>
           <button
             style={{ ...S.cancelBtn, width:"100%", color:"#ef4444", border:"1px solid #ef444444", background:"#ef444410" }}
             onClick={() => { setMkTarget("delete-backups"); setMkInput(""); setMkError(""); }}>
@@ -29169,22 +29510,9 @@ onChange={()=>{}} />
       </div>
       )}
 
-      {/* App Version Card */}
-      <div className="qc-gradient-card" style={{ ...S.card, background: "linear-gradient(135deg,rgba(249,115,22,0.06),rgba(239,68,68,0.04))" }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-          <div>
-            <div style={{ color: T.text, fontWeight: 700, fontSize: 14, display:"flex", alignItems:"center", gap:8 }}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#f97316" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-              অ্যাপ ভার্সন
-            </div>
-            <div style={{ color: T.sub, fontSize: 11, marginTop: 4 }}>Smart Business Management (SBM)</div>
-          </div>
-          <div style={{ textAlign:"right" }}>
-            <div style={{ color:"#f97316", fontWeight:900, fontSize:18, letterSpacing:1 }}>{APP_VERSION}</div>
-            <div style={{ color: T.sub, fontSize: 11, marginTop:2 }}>Build: {APP_BUILD}</div>
-          </div>
-        </div>
-      </div>
+      {/* অ্যাপ ভার্সন কার্ড — বর্তমান ভার্সন সবসময় দেখায়, নতুন ভার্সন প্রকাশিত
+          থাকলে এই একই কার্ডের ভেতরেই (নীরবে, কোনো popup ছাড়া) আপডেট দেখা যাবে */}
+      <AppVersionCard T={T} S={S} />
 
 
       <button style={{ ...S.cancelBtn, width: "100%", padding: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
@@ -31907,254 +32235,29 @@ function BRS_DataSummary({ data, color }) {
   );
 }
 
-// ─── ForceUpdateScreen — বাধ্যতামূলক আপডেট স্ক্রিন ─────────────────────────
-function ForceUpdateScreen({ version, message, updateUrl }) {
-  const [dismissed, setDismissed] = useState(false);
-
-  // ৩ বার dismiss করলে তবেই সাময়িক বাইপাস (UX কারণে)
-  const [dismissCount, setDismissCount] = useState(0);
-
-  if (dismissed && dismissCount >= 3) return null; // allow temporary bypass after 3 tries
-
-  return (
-    <div style={{
-      position: "fixed", inset: 0, zIndex: 99999,
-      background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)",
-      display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center",
-      padding: 24, fontFamily: "'Segoe UI', sans-serif"
-    }}>
-      {/* Animated icon */}
-      <div style={{
-        fontSize: 72, marginBottom: 24,
-        animation: "hg-float 2s ease-in-out infinite"
-      }}>🔄</div>
-
-      <div style={{
-        background: "#1e293b", border: "1px solid #38bdf8",
-        borderRadius: 20, padding: 28, maxWidth: 380, width: "100%",
-        textAlign: "center", boxShadow: "0 0 40px #38bdf822"
-      }}>
-        <div style={{ fontSize: 22, fontWeight: 900, color: "#38bdf8", marginBottom: 8 }}>
-          নতুন আপডেট এসেছে!
-        </div>
-        {version && (
-          <div style={{
-            display: "inline-block", background: "#0ea5e920",
-            border: "1px solid #0ea5e9", borderRadius: 20,
-            padding: "4px 16px", fontSize: 13, fontWeight: 700,
-            color: "#7dd3fc", marginBottom: 14
-          }}>
-            ভার্সন {version}
-          </div>
-        )}
-        <div style={{ fontSize: 14, color: "#94a3b8", lineHeight: 1.7, marginBottom: 20 }}>
-          {message || "অ্যাপটি আপডেট করুন এবং নতুন ফিচার উপভোগ করুন।"}
-        </div>
-
-        {updateUrl ? (
-          <a href={updateUrl} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>
-            <button style={{
-              width: "100%", padding: "14px", borderRadius: 12, border: "none",
-              background: "linear-gradient(135deg, #0284c7, #0ea5e9)",
-              color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer",
-              marginBottom: 10, boxShadow: "0 4px 20px #0ea5e944"
-            }}>
-              ⬇️ এখনই আপডেট করুন
-            </button>
-          </a>
-        ) : (
-          <button style={{
-            width: "100%", padding: "14px", borderRadius: 12, border: "none",
-            background: "linear-gradient(135deg, #0284c7, #0ea5e9)",
-            color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer",
-            marginBottom: 10, boxShadow: "0 4px 20px #0ea5e944"
-          }} onClick={() => window.location.reload()}>
-            🔄 অ্যাপ রিফ্রেশ করুন
-          </button>
-        )}
-
-        <button
-          style={{
-            width: "100%", padding: "10px", borderRadius: 10, border: "1px solid #334155",
-            background: "transparent", color: "#64748b", fontSize: 13, cursor: "pointer"
-          }}
-          onClick={() => {
-            const next = dismissCount + 1;
-            setDismissCount(next);
-            if (next >= 3) setDismissed(true);
-          }}
-        >
-          {dismissCount < 2 ? `এড়িয়ে যান (${2 - dismissCount} বার বাকি)` : "সাময়িক এড়িয়ে যান"}
-        </button>
-      </div>
-
-      <div style={{ fontSize: 11, color: "#334155", marginTop: 16 }}>
-        আপনার অ্যাডমিন কর্তৃক আপডেট বাধ্যতামূলক করা হয়েছে
-      </div>
-    </div>
-  );
-}
-
-// ─── UpdateNoticeModal — ঐচ্ছিক (dismissible) "নতুন আপডেট এসেছে" নোটিশ ──────
-// ForceUpdateScreen-এর মতো ব্লক করে না — শুধু জানিয়ে দেয় যে নতুন ভার্সন আছে।
-// "পরে করবো" চাপলে শুধু এই সেশনে বন্ধ হয় (কোনো localStorage/dismiss-flag
-// সংরক্ষণ করা হয় না) — কারণ আসল বন্ধ-হওয়ার শর্ত হলো সেমান্টিক ভার্সন কম্পেয়ার:
-// শপকিপার আপডেট করে ফেললে APP_VERSION_CODE বদলে যায় → compareVersions আর
-// negative রিটার্ন করে না → পরের বার অ্যাপ খুললে নোটিশ আপনাআপনি আসবেই না।
-//
-// 🔴 ফিক্স (CI build ব্যর্থতা): এখানে আগে @capacitor/filesystem ও
-// @capawesome-team/capacitor-file-opener দিয়ে সরাসরি in-app APK ইনস্টল করার
-// চেষ্টা ছিল, কিন্তু এই দুই প্যাকেজ কখনো npm install করে package.json-এ যোগ
-// করা হয়নি (শুধু কমেন্টে "করতে হবে" লেখা ছিল) — GitHub Actions build-এ Rollup
-// এই ইমপোর্ট resolve করতে না পেরে পুরো build ভেঙে যাচ্ছিল। এছাড়া এই ফিচারের
-// জন্য দরকারি Android manifest permission ও file_paths.xml সেটআপও কখনো
-// যাচাই করা হয়নি। তাই নিরাপদ ও নির্ভরযোগ্য পুরনো পদ্ধতিতে ফিরিয়ে দেওয়া হলো —
-// বাটনে ক্লিক করলে সরাসরি ব্রাউজারে APK ডাউনলোড লিংক খোলে, কোনো নতুন npm
-// dependency বা native সেটআপ ছাড়াই।
-function UpdateNoticeModal({ version, notes, updateUrl, onDismiss }) {
-  const handleUpdateClick = () => {
-    if (!updateUrl) return;
-    window.open(updateUrl, "_blank");
-  };
-
-  return (
-    <div style={{
-      position: "fixed", inset: 0, zIndex: 9998,
-      background: "rgba(0,0,0,0.7)",
-      display: "flex", alignItems: "center", justifyContent: "center",
-      padding: 20
-    }}>
-      <div className="qc-gradient-card" style={{
-        width: "100%", maxWidth: 360, borderRadius: 18, padding: "1.5px",
-        background: "linear-gradient(135deg,#22d3ee,#8b5cf6,#ec4899)",
-        boxShadow: "0 0 40px rgba(139,92,246,0.35)"
-      }}>
-        <div style={{ borderRadius: 17, background: "#0b0e17", padding: 22, textAlign: "center" }}>
-          <div style={{
-            margin: "0 auto 14px", width: 60, height: 60, borderRadius: "50%",
-            background: "linear-gradient(135deg,#22d3ee,#ec4899)",
-            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26
-          }}>⬆️</div>
-
-          <div style={{ color: "#fff", fontSize: 17, fontWeight: 800, marginBottom: 4 }}>
-            নতুন আপডেট এসেছে
-          </div>
-          {version && (
-            <div style={{ color: "#94a3b8", fontSize: 13, marginBottom: 14 }}>
-              ভার্সন {version} এখন উপলব্ধ
-            </div>
-          )}
-
-          {notes && (
-            <div style={{
-              textAlign: "left", background: "rgba(255,255,255,0.05)", borderRadius: 12,
-              padding: 12, marginBottom: 18, color: "#cbd5e1", fontSize: 13,
-              whiteSpace: "pre-line", lineHeight: 1.7
-            }}>
-              {notes}
-            </div>
-          )}
-
-          <button
-            onClick={handleUpdateClick}
-            style={{
-              width: "100%", padding: "13px", borderRadius: 12, border: "none",
-              background: "linear-gradient(135deg,#06b6d4,#d946ef)",
-              color: "#fff", fontSize: 15, fontWeight: 700,
-              cursor: "pointer",
-              boxShadow: "0 4px 20px rgba(217,70,239,0.35)"
-            }}
-          >
-            ⬇️ এখনই আপডেট করুন
-          </button>
-
-          <button
-            onClick={onDismiss}
-            style={{
-              width: "100%", padding: "10px", marginTop: 10, borderRadius: 10,
-              border: "1px solid #334155", background: "transparent",
-              color: "#64748b", fontSize: 13, cursor: "pointer"
-            }}
-          >
-            পরে করবো
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+// ─── [অপসারিত] ForceUpdateScreen / UpdateNoticeModal ────────────────────────
+// 🔴 রিডিজাইন: এই দুটো ফুল-স্ক্রিন popup/ওভারলে আগে admin_config/appVersion
+// ডকুমেন্টে ভার্সন বসানোমাত্রই — এমনকি admin.html-এ শুধু তথ্য সেভ করার সময়ও —
+// সব দোকানদারের সামনে হুট করে হাজির হতো, যা অনিচ্ছাকৃতভাবে হলেও এক ধরনের
+// push notification-ই ছিল। এখন সম্পূর্ণ অপসারণ করা হয়েছে — আপডেট তথ্য শুধু
+// Settings ট্যাবে AppVersionCard-এ নীরবে দেখানো হয় (দেখুন Settings_-এর ঠিক
+// আগের অংশ), দোকানদার নিজে সেখানে গেলে তবেই দেখবেন, আর নিজে থেকেই এক ক্লিকে
+// আপডেট করতে পারবেন — কোনো জোরপূর্বক বা অনাকাঙ্ক্ষিত নোটিফিকেশন ছাড়াই।
 
 export default function App() {
-  const [forceUpdate, setForceUpdate] = useState(null); // null | { version, message, updateUrl }
-  // 🔴 নতুন — ঐচ্ছিক (soft) আপডেট নোটিশ: null | { version, notes, updateUrl }
-  const [updateNotice, setUpdateNotice] = useState(null);
-  const [noticeDismissed, setNoticeDismissed] = useState(false); // শুধু এই সেশনের জন্য
-
-  useEffect(() => {
-    // Admin Firebase থেকে appVersion চেক করো (ব্যাকগ্রাউন্ডে, মাউন্ট গেট করে না)
-    (async () => {
-      try {
-        const snap = await Promise.race([
-          getDoc(doc(_db, "admin_config", "appVersion")),
-          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 5000))
-        ]);
-        if (snap.exists()) {
-          const d = snap.data();
-          if (d.forceUpdate === true) {
-            setForceUpdate({
-              version:   d.version   || "",
-              message:   d.message   || "",
-              updateUrl: d.updateUrl || ""
-            });
-          } else if (d.version && compareVersions(APP_VERSION_CODE, d.version) < 0) {
-            // 🔴 নতুন — বাধ্যতামূলক নয়, কিন্তু আমাদের APP_VERSION_CODE এডমিনের
-            // "version"-এর চেয়ে পুরনো → ঐচ্ছিক dismissible নোটিশ দেখাও।
-            // (শপকিপার আপডেট করলে পরের বার এই compareVersions আর true হবে না।)
-            setUpdateNotice({
-              version:   d.version        || "",
-              notes:     d.updateNotesBn  || "",
-              updateUrl: d.updateUrl      || ""
-            });
-          }
-        }
-      } catch {
-        // offline বা error → আপডেট স্ক্রিন দেখাবে না
-      }
-    })();
-  }, []);
-
-  // 🔴 পারফরম্যান্স ফিক্স: আগে version check (Firestore round-trip, ৫s টাইমআউট)
-  // শেষ না হওয়া পর্যন্ত পুরো অ্যাপ (SubscriptionGate + SmartBusinessMgmt সহ)
-  // মাউন্টই হতো না — এটাই "অ্যাপ খুলতে বেশি সময় লাগছে" সমস্যার প্রধান কারণ।
-  // ForceUpdateScreen নিজেই একটা fixed/zIndex:99999 ফুল-স্ক্রিন ওভারলে, তাই এটাকে
-  // মাউন্ট গেট করার দরকার নেই — ব্যাকগ্রাউন্ডে চেক চলতে থাকুক, দরকার হলে পরে
-  // ওভারলে হয়ে উপরে চলে আসবে। এখন SubscriptionGate সাথে সাথেই মাউন্ট হয় এবং
-  // তার নিজের optimistic cache লজিক সমান্তরালে চলে — নেটওয়ার্ক রাউন্ড-ট্রিপের
-  // জন্য আর অপেক্ষা করতে হয় না।
-
+  // 🔴 রিডিজাইন: এখানে আগে mount-এর সাথে সাথেই admin_config/appVersion চেক
+  // করে ForceUpdateScreen/UpdateNoticeModal popup দেখানো হতো — অনিচ্ছাকৃত হলেও
+  // সেটা কার্যত এক ধরনের push notification ছিল, যা admin.html-এ শুধু ভার্সন
+  // ফিল্ড বসানোর সাথে সাথেই সব দোকানদারের কাছে চলে যেত। এখন আপডেট-চেক
+  // সম্পূর্ণ সরিয়ে Settings-এ নিয়ে যাওয়া হয়েছে (AppVersionCard) — দোকানদার
+  // নিজে Settings-এ গেলে তবেই, সম্পূর্ণ নীরবে ও ঐচ্ছিকভাবে দেখবেন। এখানে আর
+  // কোনো network round-trip/টাইমআউট রেসের দরকার নেই, তাই App() আরও দ্রুত
+  // মাউন্ট হয়।
   return (
-    <>
-      {forceUpdate && (
-        <ForceUpdateScreen
-          version={forceUpdate.version}
-          message={forceUpdate.message}
-          updateUrl={forceUpdate.updateUrl}
-        />
-      )}
-      {!forceUpdate && updateNotice && !noticeDismissed && (
-        <UpdateNoticeModal
-          version={updateNotice.version}
-          notes={updateNotice.notes}
-          updateUrl={updateNotice.updateUrl}
-          onDismiss={() => setNoticeDismissed(true)}
-        />
-      )}
-      <SubscriptionGate>
-        <ErrorBoundary>
-          <SmartBusinessMgmt />
-        </ErrorBoundary>
-      </SubscriptionGate>
-    </>
+    <SubscriptionGate>
+      <ErrorBoundary>
+        <SmartBusinessMgmt />
+      </ErrorBoundary>
+    </SubscriptionGate>
   );
 }
