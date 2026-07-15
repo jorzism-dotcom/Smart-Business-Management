@@ -6038,14 +6038,7 @@ function isAutoScheduleActive(schedule) {
 }
 
 // ─── useFSSSettings — shopName/smsTemplates/smsGateway ↔ firestore/settings/main ─
-// 🔴 ফিক্স #৭ (heartbeat-coverage গ্যাপ): আগে এই হুকের remote-listen effect শুধু
-// [ready]-এর ওপর নির্ভর করত — App()-লেভেল ২০-সেকেন্ড heartbeat/resume/online
-// resync (resyncTick) coverage-এর বাইরে ছিল। ফলে shopName/smsTemplates/
-// smsGateway/googleDriveToken-এর listener Android background-এ মরে গেলে
-// invoices/txns/stockMovements/cashLogs/resetMarker-এর আগের বাগটার মতোই
-// exit+login ছাড়া recover হতো না। এখন resyncTick param নেওয়া হচ্ছে এবং
-// dependency-তে যোগ করা হয়েছে — বাকি সব listener-এর মতোই auto-recover করবে।
-function useFSSSettings(ready, shopName, setShopName, smsTemplates, setSmsTemplates, smsGateway, setSmsGateway, googleDriveToken, setGoogleDriveToken, resyncTick) {
+function useFSSSettings(ready, shopName, setShopName, smsTemplates, setSmsTemplates, smsGateway, setSmsGateway, googleDriveToken, setGoogleDriveToken) {
   const lastSynced  = useRef(null);
   const firstRemote = useRef(false);
   const localRef    = useRef({ shopName, smsTemplates, smsGateway, googleDriveToken });
@@ -6071,7 +6064,7 @@ function useFSSSettings(ready, shopName, setShopName, smsTemplates, setSmsTempla
     });
     return () => FSS.unsubscribe("__settings");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, resyncTick]);
+  }, [ready]);
 
   useEffect(() => {
     if (!ready || !firstRemote.current) return;
@@ -11340,7 +11333,7 @@ function SmartBusinessMgmt() {
     onSync: (v) => { setSyncToast?.(v); if (v === "error") showToast?.("⚠️ স্টাফ/পারমিশন সিঙ্ক ব্যর্থ হয়েছে — Firestore Rules চেক করুন", "#ef4444"); },
     syncDeletes: false,
   });
-  useFSSSettings(fssReady, shopName, setShopName, smsTemplates, setSmsTemplates, smsGateway, setSmsGateway, googleDriveToken, setGoogleDriveToken, appResyncTick);
+  useFSSSettings(fssReady, shopName, setShopName, smsTemplates, setSmsTemplates, smsGateway, setSmsGateway, googleDriveToken, setGoogleDriveToken);
 
   // ── Phase 1.3: Stats doc real-time subscribe — Dashboard আজকের totals ───────
   // todayInvs.reduce() এর বদলে একটা ছোট Firestore doc থেকে instant read।
@@ -22441,28 +22434,8 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
           // সিঙ্ক্রোনাস লুপেও একে অপরের ওপর সঠিকভাবে জমা হয় (দেখুন স্টক-এডিট
           // ফাংশনের একই প্যাটার্ন)।
           let newStock = (prod.stock || 0) + qty; // fallback/লগের জন্য প্রাথমিক মান
-          // 🔴 ফিক্স #৮ (মাল্টি-ডিভাইস batchNo collision): _peBatchOffset শুধু এই
-          // execution-এর (এক ডিভাইসের এক লুপের) মধ্যে collision ঠেকায়। কিন্তু দুই
-          // ডিভাইস (মালিক+স্টাফ) প্রায় একই সময়ে একই পণ্যে আলাদা পার্চেজ এন্ট্রি
-          // দিলে getNextBatch() দুই ডিভাইসেই stale closure থেকে একই "পরবর্তী"
-          // batchNo গণনা করতে পারে। এখন setProducts-এর functional updater-এর
-          // ভেতরে `p.batches` (এই মুহূর্তে React state-এ থাকা সবচেয়ে সাম্প্রতিক
-          // কপি — অন্য ডিভাইস থেকে ইতিমধ্যে সিঙ্ক হয়ে থাকলে সেটাও এখানে থাকবে)
-          // চেক করে batchNo আসলেই ইউনিক কিনা যাচাই করা হচ্ছে; কলিশন পেলে সংখ্যা
-          // বাড়িয়ে (linear probing) একটা ফাঁকা suffix খুঁজে নেওয়া হয়।
           setProducts(prev => prev.map(p => {
             if (p.id !== productId) return p;
-            const existingBatchNos = new Set((p.batches || []).map(b => b.batchNo));
-            if (existingBatchNos.has(newBatch.batchNo)) {
-              const m = /^(.*-)(\d+)$/.exec(newBatch.batchNo);
-              if (m) {
-                let n = parseInt(m[2], 10);
-                let candidate;
-                do { n += 1; candidate = `${m[1]}${n}`; } while (existingBatchNos.has(candidate));
-                newBatch.batchNo = candidate;
-                entry.batch = candidate;
-              }
-            }
             const oldStock = p.stock || 0;
             const oldCost  = p.costPrice || 0;
             newStock = oldStock + qty;
@@ -24187,7 +24160,7 @@ const RH_MONTH_NAMES_BN = ["জানুয়ারি","ফেব্রুয�
 const rhDayLabel   = (dk) => { const d = new Date(dk); if (isNaN(d.getTime())) return dk; return `${d.getDate()} ${RH_MONTH_NAMES_BN[d.getMonth()]}, ${d.getFullYear()}`; };
 const rhMonthLabel = (mk) => { const [y, m] = (mk || "").split("-"); return m ? `${RH_MONTH_NAMES_BN[parseInt(m, 10) - 1]} ${y}` : mk; };
 
-function ReturnModule({ T, S, invoices, products, customers, returns, setReturns, setProducts, setCustomers, setStockMovements, addTxn, showToast, currentUser, shopName }) {
+function ReturnModule({ T, S, invoices, customers, showToast, currentUser, shopName }) {
 
   const fmt      = n => fmtMoney(n);
   const todayKey = _dateKeyOf(new Date());
@@ -24195,8 +24168,7 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
 
   const custMap = React.useMemo(() => new Map((customers||[]).map(c => [c.id, c])), [customers]);
 
-  // ── 🔍 ইনভয়েস খুঁজুন — যেকোনো ইনভয়েসের ফুল ডিটেইলস মোডালে দেখাবে, এবং সেখান
-  // থেকেই এখন প্রতিটা পণ্যের জন্য ফেরত (return) প্রসেস করা যাবে (নিচে দেখুন) ──
+  // ── 🔍 ইনভয়েস খুঁজুন — যেকোনো ইনভয়েসের ফুল ডিটেইলস মোডালে দেখাবে (ফেরত-ফ্লো নেই) ──
   const [invSearch, setInvSearch]   = React.useState("");
   const [detailInv, setDetailInv]   = React.useState(null); // ফুল ডিটেইলস মোডাল — যেকোনো সোর্স থেকে ওপেন হয়
 
@@ -24340,148 +24312,6 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
     [invoices, monthKeyNow]);
   const monthVoidedCount  = monthVoided.length;
   const monthVoidedRefund = React.useMemo(() => monthVoided.reduce((s,i) => s + (i.total||0), 0), [monthVoided]);
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // 🔄 পণ্য ফেরত (Product Return) — এতদিন এই কম্পোনেন্ট শুধু props নিতই কিন্তু
-  // ব্যবহার করত না (products/setProducts/setCustomers/setStockMovements/
-  // addTxn/returns/setReturns — সব silently unused ছিল), ফলে "returns"
-  // কালেকশনটা sync-ready থাকলেও কোথাও লেখাই হতো না। এখন এখানে আসল ফিচার —
-  // ইনভয়েস ডিটেইলস মোডাল থেকে যেকোনো বিক্রিত পণ্য আংশিক/পূর্ণ ফেরত নেওয়া যাবে।
-  // ── স্টক রিস্টোর ও কাস্টমার-ব্যালেন্স সমন্বয় ঠিক voidInvoice()-এর মতোই
-  // atomic transaction (+ অফলাইন local fallback) দিয়ে হয়, যাতে দুই ডিভাইসে
-  // প্রায় একই সময়ে রিটার্ন প্রসেস হলেও কোনো delta হারিয়ে না যায়।
-  const [retQty,    setRetQty]    = React.useState({});   // productId -> qty string
-  const [retReason, setRetReason] = React.useState({});   // productId -> reason string
-  const [retMode,   setRetMode]   = React.useState({});   // productId -> "cash" | "baki"
-  const [retBusy,   setRetBusy]   = React.useState(null);  // productId currently processing
-
-  // এই ইনভয়েসের এই পণ্যটা আগে কতটা ফেরত নেওয়া হয়েছে — returns রেকর্ড থেকেই
-  // গণনা হয় (invoice.items মিউটেট করতে হয় না, append-only audit-trail-ই সত্য উৎস)
-  const getReturnedQty = React.useCallback((invoiceId, productId) =>
-    (returns || []).filter(r => r.invoiceId === invoiceId && r.productId === productId)
-      .reduce((s, r) => s + (r.qty || 0), 0),
-    [returns]);
-
-  const processReturn = async (inv, item) => {
-    const productId = item.productId;
-    const alreadyReturned = getReturnedQty(inv.id, productId);
-    const maxReturnable = Math.max(0, (item.qty || 0) - alreadyReturned);
-    const qty = parseFloat(retQty[productId]);
-    if (!qty || qty <= 0) { showToast("সঠিক পরিমাণ দিন", "#ef4444"); return; }
-    if (qty > maxReturnable) { showToast(`সর্বোচ্চ ${maxReturnable} ${item.unit || "পিস"} ফেরত নেওয়া যাবে`, "#ef4444"); return; }
-
-    setRetBusy(productId);
-    try {
-      // 🔴 ফিক্স (মাল্টি-ডিভাইস ডাবল-রিটার্ন race — সংকীর্ণ করা): উপরের চেক
-      // render-time-এর `returns` prop (stale হতে পারে) দিয়ে হয়েছিল। কমিট করার
-      // ঠিক আগে freshest Zustand state (getState()) থেকে আবার চেক করা হচ্ছে,
-      // যাতে এই ডিভাইসেই কিছুক্ষণ আগে সিঙ্ক হওয়া অন্য ডিভাইসের রিটার্ন এন্ট্রি
-      // থাকলে সেটা ধরা পড়ে। ⚠️ এটা এখনো পুরোপুরি atomic না (অন্য ডিভাইস ঠিক এই
-      // মুহূর্তে অফলাইনে/এখনো-না-সিঙ্ক-হওয়া অবস্থায় একই আইটেম ফেরত নিলে সেটা এখনো
-      // মিস হতে পারে — Firestore transaction দিয়ে কালেকশন-কোয়েরি lock করা যায় না
-      // বলে stock/balance-এর মতো ১০০% গ্যারান্টি এখানে দেওয়া সম্ভব না), কিন্তু
-      // সাধারণ ব্যবহারে (একই মুহূর্তে দুই ডিভাইস থেকে একই আইটেম ফেরত — বিরল) এটা
-      // রেসের সম্ভাবনা যথেষ্ট কমায়।
-      const freshReturned = (useAppStore.getState().returns || [])
-        .filter(r => r.invoiceId === inv.id && r.productId === productId)
-        .reduce((s, r) => s + (r.qty || 0), 0);
-      const freshMax = Math.max(0, (item.qty || 0) - freshReturned);
-      if (qty > freshMax) {
-        showToast(freshMax <= 0 ? "এই পণ্য ইতিমধ্যে অন্য ডিভাইস থেকে ফেরত নেওয়া হয়ে গেছে" : `সর্বোচ্চ ${freshMax} ${item.unit || "পিস"} ফেরত নেওয়া যাবে`, "#ef4444");
-        return; // নিচের finally { setRetBusy(null); } এমনিতেই চলবে
-      }
-      const mode = retMode[productId] || "cash";
-      const reason = (retReason[productId] || "").trim();
-      const localP = products.find(p => p.id === productId);
-
-      // ── ১. স্টক ফেরত — সার্ভারের বর্তমান কপির ওপর atomically (voidInvoice-এর
-      // মতোই); Firebase বন্ধ/ব্যর্থ হলে সবচেয়ে সাম্প্রতিক local state (getState())
-      // থেকে fallback, stale closure থেকে না।
-      let stockResult = null;
-      if (FSS.isReady()) {
-        stockResult = await FSS.transactionRestoreStock(productId, qty, item.batchNo || "", {
-          costPrice: item.costPrice || localP?.costPrice || 0,
-          expiryDate: item.expiryDate || "",
-          voidAdjBatchNo: `RETURN-ADJ-${inv.id.slice(-6)}`,
-        });
-      }
-      if (!stockResult) {
-        const freshP = useAppStore.getState().products.find(p => p.id === productId) || localP;
-        if (freshP) {
-          let updatedBatches = freshP.batches ? [...freshP.batches] : [];
-          const soldBatchNo = item.batchNo || "";
-          if (soldBatchNo) {
-            const bIdx = updatedBatches.findIndex(b => b.batchNo === soldBatchNo);
-            if (bIdx >= 0) updatedBatches[bIdx] = { ...updatedBatches[bIdx], qty: (updatedBatches[bIdx].qty || 0) + qty };
-            else updatedBatches.push({ batchNo: soldBatchNo, qty, costPrice: item.costPrice || freshP.costPrice || 0, expiryDate: item.expiryDate || "" });
-          } else {
-            updatedBatches = [...updatedBatches, {
-              batchNo: `RETURN-ADJ-${inv.id.slice(-6)}`, qty,
-              costPrice: item.costPrice || freshP.avgCost || freshP.costPrice || 0,
-              expiryDate: null, addedAt: new Date().toISOString(), note: "product return adjustment",
-            }];
-          }
-          stockResult = { stock: (freshP.stock || 0) + qty, batches: updatedBatches };
-        }
-      }
-      if (stockResult) {
-        setProducts(prev => prev.map(p => p.id === productId
-          ? { ...p, stock: stockResult.stock, batches: stockResult.batches, lastUpdated: new Date().toISOString() }
-          : p));
-      }
-
-      // ── ২. Stock movement লগ (ট্রেসেবিলিটি — অন্য সব stock adjustment-এর মতো) ──
-      const mv = pushStockMovement({
-        id: "sm_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7),
-        productId, productName: item.name || localP?.name || "",
-        stock: stockResult?.stock ?? ((localP?.stock || 0) + qty),
-        prevStock: stockResult ? (stockResult.stock - qty) : (localP?.stock || 0),
-        delta: qty, at: new Date().toISOString(), dateKey: todayKey, source: "return",
-      });
-      setStockMovements(prev => [mv, ...(prev || [])]);
-
-      // ── ৩. রিফান্ড/সমন্বয় — "বাকি সমন্বয়" হলে কাস্টমারের বকেয়া কমে (একই
-      // atomic transactionUpdateBalance + fallback প্যাটার্ন, voidInvoice দেখুন)।
-      // "নগদ ফেরত" হলে balance অপরিবর্তিত থাকে (দোকান থেকে হাতে-হাতে টাকা ফেরত)।
-      const refundAmount = qty * (item.price ?? 0);
-      let newBalanceAfter = null;
-      const cust = inv.customerId ? custMap.get(inv.customerId) : null;
-      if (mode === "baki" && cust) {
-        const txBal = await FSS.transactionUpdateBalance(cust.id, (serverBal) => Math.max(0, serverBal - refundAmount));
-        setCustomers(prev => prev.map(c => {
-          if (c.id !== cust.id) return c;
-          const newBal = txBal !== null ? txBal : Math.max(0, (c.balance || 0) - refundAmount);
-          newBalanceAfter = newBal;
-          setTimeout(() => {
-            addTxn(cust.id, "joma", refundAmount, newBal, inv.id,
-              `পণ্য ফেরত সমন্বয় — ${item.name || ""}${reason ? " (" + reason + ")" : ""}`, null, "return-adjust");
-          }, 0);
-          return { ...c, balance: newBal };
-        }));
-      }
-
-      // ── ৪. returns কালেকশনে audit রেকর্ড — useFSSCollection-এর জেনেরিক
-      // diff-push দিয়েই সিঙ্ক হবে (customers/products-এর মতো), আলাদা pushDurable
-      // দরকার নেই কারণ এটা windowed কালেকশন না।
-      const retEntry = {
-        id: uid(), invoiceId: inv.id, invoiceNo: inv.invoiceNo || inv.id,
-        productId, productName: item.name || localP?.name || "",
-        qty, unit: item.unit || localP?.unit || "",
-        unitPrice: item.price ?? 0, costPrice: item.costPrice || localP?.costPrice || 0,
-        batchNo: item.batchNo || "", refundAmount, refundMode: mode,
-        customerId: cust?.id || null, customerName: cust?.name || inv.customerName || "",
-        reason, date: todayStr(), dateKey: todayKey, time: nowStr(),
-        createdAt: new Date().toISOString(), createdBy: currentUser?.name || "মালিক",
-      };
-      setReturns(prev => [retEntry, ...(prev || [])]);
-
-      setRetQty(m => ({ ...m, [productId]: "" }));
-      setRetReason(m => ({ ...m, [productId]: "" }));
-      showToast(`✅ ${qty} ${item.unit || "পিস"} ফেরত নেওয়া হয়েছে${mode === "baki" ? " ও বাকি সমন্বয় হয়েছে" : ""}`, "#22c55e");
-    } finally {
-      setRetBusy(null);
-    }
-  };
 
   return (
     <div style={{ ...S.page, paddingBottom: 100 }}>
@@ -24761,62 +24591,6 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
                 style={{ background:T.border, border:"none", borderRadius:8, width:30, height:30, color:T.text, fontSize:16, cursor:"pointer", fontFamily:"inherit" }}>✕</button>
             </div>
             <InvoiceReceipt T={T} S={S} inv={detailInv} customer={custMap.get(detailInv.customerId)} type="buyer" />
-
-            {/* ══ 🔄 পণ্য ফেরত নিন — শুধু active (non-voided) ইনভয়েসে, সার্ভিস-আইটেম বাদে ══ */}
-            {detailInv.status !== "voided" && (
-              <div style={{ marginTop:16, borderTop:`1px dashed ${T.border}`, paddingTop:14 }}>
-                <div style={{ color:T.text, fontWeight:900, fontSize:14, marginBottom:10 }}>🔄 পণ্য ফেরত নিন</div>
-                {(detailInv.items || []).filter(it => it.productType !== "service").map((item, idx) => {
-                  const alreadyReturned = getReturnedQty(detailInv.id, item.productId);
-                  const maxReturnable = Math.max(0, (item.qty || 0) - alreadyReturned);
-                  const cust = detailInv.customerId ? custMap.get(detailInv.customerId) : null;
-                  return (
-                    <div key={item.productId + "_" + idx}
-                      style={{ background:T.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 12px", marginBottom:10 }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
-                        <div style={{ color:T.text, fontWeight:800, fontSize:13 }}>{item.name}</div>
-                        <div style={{ color:T.sub, fontSize:11 }}>বিক্রি: {item.qty} {item.unit || ""}{alreadyReturned > 0 ? ` · আগে ফেরত: ${alreadyReturned}` : ""}</div>
-                      </div>
-                      {maxReturnable <= 0 ? (
-                        <div style={{ color:T.sub, fontSize:12 }}>এই পণ্যের সম্পূর্ণ পরিমাণ ইতিমধ্যে ফেরত নেওয়া হয়েছে</div>
-                      ) : (
-                        <>
-                          <div style={{ display:"flex", gap:8, marginBottom:6 }}>
-                            <input
-                              type="number" placeholder={`পরিমাণ (সর্বোচ্চ ${maxReturnable})`}
-                              value={retQty[item.productId] || ""}
-                              onChange={e => setRetQty(m => ({ ...m, [item.productId]: e.target.value }))}
-                              style={{ ...S.input, marginTop:0, flex:1 }}
-                            />
-                            <select
-                              value={retMode[item.productId] || "cash"}
-                              onChange={e => setRetMode(m => ({ ...m, [item.productId]: e.target.value }))}
-                              style={{ ...S.input, marginTop:0, flex:"none", width:130 }}
-                            >
-                              <option value="cash">নগদ ফেরত</option>
-                              {cust && <option value="baki">বাকি সমন্বয়</option>}
-                            </select>
-                          </div>
-                          <input
-                            placeholder="কারণ (ঐচ্ছিক)"
-                            value={retReason[item.productId] || ""}
-                            onChange={e => setRetReason(m => ({ ...m, [item.productId]: e.target.value }))}
-                            style={{ ...S.input, marginTop:0, marginBottom:8 }}
-                          />
-                          <button
-                            onClick={() => processReturn(detailInv, item)}
-                            disabled={retBusy === item.productId}
-                            style={{ ...S.saveBtn, marginTop:0, width:"100%", opacity: retBusy === item.productId ? 0.6 : 1 }}
-                          >
-                            {retBusy === item.productId ? "প্রসেস হচ্ছে..." : "✅ ফেরত নিশ্চিত করুন"}
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
           </div>
         </div>
       )}
