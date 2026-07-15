@@ -2085,14 +2085,23 @@ async function fbCreateRtdbInstanceNew(projectId, locationId) {
     return data.databaseUrl || ('https://' + dbId + '.firebaseio.com');
   } catch (e) {
     if ((e.message || '').toLowerCase().includes('blaze')) {
-      // সাময়িক propagation delay-এর কারণে list খালি এসেছিল কিন্তু আসলে একটা
-      // instance আছে — আরেকবার চেষ্টা করে দেখি।
-      fbLog('একাধিক instance এর কারণে ব্যর্থ — বিদ্যমান instance আবার খোঁজা হচ্ছে...', 'warn');
-      const retryList = await fbApiFetch('https://firebasedatabase.googleapis.com/v1beta/projects/' + projectId + '/locations/-/instances');
-      if (retryList.instance && retryList.instance.length > 0) {
-        fbLog('বিদ্যমান Realtime Database Instance পাওয়া গেছে, সেটাই ব্যবহার করা হচ্ছে।', 'ok');
-        return retryList.instance[0].databaseUrl;
+      // সাময়িক propagation delay-এর কারণে list খালি এসেছিল কিন্তু আসলে Google
+      // ব্যাকগ্রাউন্ডে একটা ডিফল্ট instance বানিয়ে ফেলেছে — সেটা list API-তে
+      // দেখা দিতে কয়েক সেকেন্ড লাগতে পারে, তাই একবার না, বারবার (৫ সেকেন্ড
+      // অন্তর, সর্বোচ্চ ৮ বার) চেষ্টা করে দেখি।
+      fbLog('একাধিক instance এর কারণে ব্যর্থ — বিদ্যমান instance খোঁজা হচ্ছে (পুনরায় চেষ্টা চলছে)...', 'warn');
+      for (let i = 0; i < 8; i++) {
+        await new Promise(r => setTimeout(r, 5000));
+        try {
+          const retryList = await fbApiFetch('https://firebasedatabase.googleapis.com/v1beta/projects/' + projectId + '/locations/-/instances');
+          if (retryList.instance && retryList.instance.length > 0) {
+            fbLog('বিদ্যমান Realtime Database Instance পাওয়া গেছে, সেটাই ব্যবহার করা হচ্ছে।', 'ok');
+            return retryList.instance[0].databaseUrl;
+          }
+        } catch (e2) { /* চেষ্টা চলতে থাকুক */ }
+        fbLog('এখনও instance দেখা যাচ্ছে না — আবার চেষ্টা হচ্ছে (' + (i + 1) + '/8)...', 'warn');
       }
+      fbLog('একাধিকবার চেষ্টার পরও instance পাওয়া যায়নি।', 'err');
     }
     throw e;
   }

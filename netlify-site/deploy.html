@@ -446,8 +446,22 @@ async function getOrCreateRtdbInstance(projectId, locationId) {
     return data.databaseUrl || ('https://' + dbId + '.firebaseio.com');
   } catch (e) {
     if ((e.message || '').toLowerCase().includes('blaze')) {
-      const retry = await apiFetch('https://firebasedatabase.googleapis.com/v1beta/projects/' + projectId + '/locations/-/instances');
-      if (retry.instance && retry.instance.length > 0) return retry.instance[0].databaseUrl;
+      // propagation delay-এর কারণে Google-এর ব্যাকগ্রাউন্ডে তৈরি হওয়া instance
+      // list API-তে দেখা দিতে দেরি হতে পারে — তাই একবার না, বারবার (৫ সেকেন্ড
+      // অন্তর, সর্বোচ্চ ৮ বার) চেষ্টা করা হয়।
+      logLine('একাধিক instance এর কারণে ব্যর্থ — বিদ্যমান instance খোঁজা হচ্ছে (পুনরায় চেষ্টা চলছে)...', 'warn');
+      for (let i = 0; i < 8; i++) {
+        await new Promise(r => setTimeout(r, 5000));
+        try {
+          const retry = await apiFetch('https://firebasedatabase.googleapis.com/v1beta/projects/' + projectId + '/locations/-/instances');
+          if (retry.instance && retry.instance.length > 0) {
+            logLine('বিদ্যমান instance পাওয়া গেছে, সেটাই ব্যবহার করা হচ্ছে।', 'ok');
+            return retry.instance[0].databaseUrl;
+          }
+        } catch (e2) { /* চেষ্টা চলতে থাকুক */ }
+        logLine('এখনও instance দেখা যাচ্ছে না — আবার চেষ্টা হচ্ছে (' + (i + 1) + '/8)...', 'warn');
+      }
+      logLine('একাধিকবার চেষ্টার পরও instance পাওয়া যায়নি।', 'err');
     }
     throw e;
   }
