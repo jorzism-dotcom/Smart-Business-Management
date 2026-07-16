@@ -4033,7 +4033,7 @@ const Haptic = {
 
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "v1";
+const APP_VERSION = "v1-dbg2"; // 🔍 TEMP DEBUG marker — Settings-এ দেখে build fresh কিনা যাচাই করা যাবে
 const APP_BUILD   = "2026-07-11";
 
 // 🔴 সেমান্টিক ভার্সন (x.y.z) — Settings-এর নীরব AppVersionCard (দেখুন
@@ -10757,6 +10757,13 @@ function ruleBasedAnswer(q, data) {
 
 
 function SmartBusinessMgmt() {
+  // 🔍 TEMP DEBUG — unconditional boot marker: শুধু এটা নিশ্চিত করতে যে ফোনে
+  // আসলেই নতুন (instrumented) কোড চলছে, পুরনো কোনো cache/build না — এটা প্রতিটা
+  // app boot-এ একবার, কোনো শর্ত/DBG ফ্ল্যাগ ছাড়াই, debug_trace-এ লেখে।
+  useEffect(() => {
+    traceDebug("BOOT_MARKER_v2", { ts: Date.now(), ua: (typeof navigator !== "undefined" ? navigator.userAgent : "") });
+  }, []);
+
   // ── Temp share file cleanup on app start ────────────────────────────────────
   useEffect(() => {
     if (!window.Capacitor?.isNativePlatform?.()) return;
