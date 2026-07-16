@@ -43,6 +43,7 @@ const useAppStore = create(subscribeWithSelector((set) => ({
   // ── Shop / Auth ───────────────────────────────────────────────────────────
   shopName:          "SBM",
   businessType:      "pharmacy", // "pharmacy" | "veterinary" — দোকানের ধরন, ডেটাসেট/লেবেল এটার উপর নির্ভর করে
+  businessTypeLocked: false, // 🔒 একবার সিলেক্ট করলে আর বদলানো যাবে না (দুই মোডের ডেটাসেট/পণ্য যাতে মিশে না যায়)
   currentUser:       null,
   authSession:       null,
   devContact:        null,
@@ -4080,7 +4081,7 @@ const GDRIVE_REFRESH_ENDPOINT = "https://melodious-axolotl-00b2e7.netlify.app/.n
 const SK = {
   customers: "sbm-customers", products: "sbm-products", invoices: "sbm-invoices",
   smsLog: "sbm-smslog", txns: "sbm-txns", users: "sbm-users",
-  shopName: "sbm-shopname", businessType: "sbm-business-type", darkMode: "sbm-darkmode", activeTheme: "sbm-active-theme", fontSize: "sbm-font-size", deletedCustomers: "sbm-deleted-customers", deletedProducts: "sbm-deleted-products",
+  shopName: "sbm-shopname", businessType: "sbm-business-type", businessTypeLocked: "sbm-business-type-locked", darkMode: "sbm-darkmode", activeTheme: "sbm-active-theme", fontSize: "sbm-font-size", deletedCustomers: "sbm-deleted-customers", deletedProducts: "sbm-deleted-products",
   paymentInvoices: "sbm-payment-invoices", smsGateway: "sbm-sms-gateway",
   lastAutoBackup: "sbm-last-auto-backup", anthropicKey: "sbm-anthropic-key",
   lastLocalBackup: "sbm-last-local-backup",
@@ -5645,6 +5646,24 @@ const FSS = {
     if (!this._db) return () => {};
     const unsub = onSnapshot(doc(this._db, "meta", "resetMarker"), (snap) => {
       callback(snap.exists() ? (snap.data()?.at || 0) : 0);
+    }, () => {});
+    return unsub;
+  },
+
+  // 🆕 businessType/businessTypeLocked — প্রতিটা দোকানের Firestore প্রজেক্টে একটাই
+  // "meta/businessConfig" ডকুমেন্ট, resetMarker-এর ঠিক একই প্যাটার্নে। এর আগে এই
+  // দুইটা মান শুধু ডিভাইস-লোকাল Capacitor Preferences-এ থাকত — owner ও staff-এর
+  // ফোন আলাদা ডিভাইস হওয়ায় স্টাফের ফোন কখনো owner-এর সিলেক্ট করা মোড জানতেই
+  // পারত না, ডিফল্ট "pharmacy"-তে চুপচাপ ভুল ধরে থাকত। এখন real-time listener
+  // দিয়ে সব ডিভাইস (owner + staff, নতুন ইনস্টলসহ) একই মোড পাবে।
+  async setBusinessConfig(businessType, businessTypeLocked) {
+    if (!this._db) return;
+    try { await setDoc(doc(this._db, "meta", "businessConfig"), { businessType, businessTypeLocked, at: Date.now() }); } catch {}
+  },
+  subscribeBusinessConfig(callback) {
+    if (!this._db) return () => {};
+    const unsub = onSnapshot(doc(this._db, "meta", "businessConfig"), (snap) => {
+      callback(snap.exists() ? snap.data() : null);
     }, () => {});
     return unsub;
   },
@@ -8143,6 +8162,11 @@ const VET_SEED_COMPANIES = [
 ];
 const VET_LEARNED_KEY = "sbm-vet-med-learned";
 let _vetLearned = null; // null = এখনো localStorage থেকে পড়া হয়নি
+// 🆕 vetMedicineDataset.json — BDNVF 2023 (DGDA) থেকে বের করা ভেরিফায়েড ব্র্যান্ড-নাম/কোম্পানি
+// ডেটাসেট (~1100 এন্ট্রি)। medicineDataset.json-এর ঠিক একই লেজি-লোড প্যাটার্নে, App.jsx-এর
+// পাশে repo-তে আলাদাভাবে বসবে — না থাকলে শুধু সেলফ-লার্নড ডেটাসেট দিয়েই কাজ চলবে (ফলব্যাক)।
+let _vetDataset = null;  // null = এখনো লোড হয়নি
+let _vetPromise  = null;
 function ensureVetLearnedLoaded() {
   if (_vetLearned === null) {
     try {
@@ -8175,8 +8199,62 @@ function vetLearnEntry(name, unit, company) {
   }
 }
 
+// ─── 💊 ফার্মেসি মোড — সেলফ-লার্নিং ডেটাসেট (medicineDataset.json-এর পরিপূরক) ──────
+// static ২০,৫০০+ এন্ট্রির dataset-এ না থাকা নতুন/লোকাল ব্র্যান্ড দোকানদার এন্ট্রি করলে
+// এখান থেকেই ধীরে ধীরে শেখা হয় (localStorage, ডিভাইসেই) — ভেটেরিনারি মোডের প্যাটার্ন অনুসরণ করে
+const MED_LEARNED_KEY = "sbm-pharm-med-learned";
+let _medLearnedList = null; // null = এখনো localStorage থেকে পড়া হয়নি
+function ensureMedLearnedLoaded() {
+  if (_medLearnedList === null) {
+    try {
+      const raw = localStorage.getItem(MED_LEARNED_KEY);
+      _medLearnedList = raw ? JSON.parse(raw) : [];
+    } catch { _medLearnedList = []; }
+  }
+  return _medLearnedList;
+}
+function saveMedLearned() {
+  try { localStorage.setItem(MED_LEARNED_KEY, JSON.stringify(_medLearnedList || [])); } catch {}
+}
+function medLearnEntry(name, unit, company) {
+  const n = String(name || "").trim();
+  if (!n) return;
+  const u = unit ? String(unit).trim() : "";
+  const c = company ? String(company).trim() : "";
+  const list = ensureMedLearnedLoaded();
+  const row = list.find(([en, eu]) => en === n && (eu || "") === u);
+  if (!row) {
+    list.unshift([n, u, c]);
+    if (list.length > 5000) list.length = 5000; // নিরাপত্তা সীমা
+    saveMedLearned();
+    _medListeners.forEach(fn => fn());
+  } else if (c && !row[2]) {
+    row[2] = c; // নাম আগে থেকেই আছে কিন্তু কোম্পানি ফাঁকা ছিল — এখন যোগ হলো
+    saveMedLearned();
+  }
+}
+// businessType অনুযায়ী সঠিক লার্নিং স্টোরে পাঠায় — নতুন পণ্য/পারচেজ এন্ট্রির সময় কল হয়
+function learnMedicineEntry(businessType, name, unit, company) {
+  if (businessType === "veterinary") vetLearnEntry(name, unit, company);
+  else medLearnEntry(name, unit, company);
+}
+
 function ensureMedicineDataset(businessType = "pharmacy") {
-  if (businessType === "veterinary") { ensureVetLearnedLoaded(); return; } // সিঙ্ক্রোনাস, প্রমিজ লাগে না
+  if (businessType === "veterinary") {
+    ensureVetLearnedLoaded(); // সিঙ্ক্রোনাস, সবসময় সাথে সাথে পাওয়া যায়
+    if (_vetDataset || _vetPromise) return; // static ডেটাসেট আগেই লোড হয়েছে/হচ্ছে
+    _vetPromise = import("./vetMedicineDataset.json")
+      .then(mod => {
+        _vetDataset = mod.default || mod;
+        _medListeners.forEach(fn => fn());
+      })
+      .catch(() => {
+        _vetDataset = EMPTY_MED_ARR; // ফাইল না থাকলেও চুপচাপ সেলফ-লার্নড দিয়েই কাজ চলবে
+        _medListeners.forEach(fn => fn());
+      });
+    return;
+  }
+  ensureMedLearnedLoaded(); // সিঙ্ক্রোনাস — ফার্মেসির সেলফ-লার্নড এন্ট্রি সবসময় সাথে সাথে পাওয়া যায়
   if (_medDataset || _medPromise) return;
   _medPromise = import("./medicineDataset.json")
     .then(mod => {
@@ -8199,7 +8277,7 @@ function useMedicineDataset(businessType = "pharmacy") {
   const [, force] = useState(0);
   useEffect(() => {
     if (businessType === "veterinary") {
-      ensureVetLearnedLoaded();
+      ensureMedicineDataset(businessType); // learned (sync) + static vetMedicineDataset.json (লেজি)
       const listener = () => force(v => v + 1);
       _medListeners.add(listener);
       return () => { _medListeners.delete(listener); };
@@ -8213,16 +8291,63 @@ function useMedicineDataset(businessType = "pharmacy") {
 
   if (businessType === "veterinary") {
     const learned = _vetLearned || EMPTY_MED_ARR;
-    const labelsLC = learned.map(([n, p]) => (p ? `${n} ${p}` : n).toLowerCase());
-    const learnedCompanies = [...new Set(learned.map(([, , c]) => c).filter(Boolean))];
-    const companies = [...new Set([...VET_SEED_COMPANIES, ...learnedCompanies])].sort((a, b) => a.localeCompare(b, "bn"));
-    return { dataset: learned, labelsLC, companies, ready: true };
+    const staticVet = _vetDataset || EMPTY_MED_ARR;
+    // দোকানদার নিজে যা এন্ট্রি করেছেন (learned) সবচেয়ে প্রাসঙ্গিক — আগে রাখা হলো, তারপর
+    // static BDNVF ডেটাসেট থেকে বাকিটা, নাম+স্ট্রেংথ ডুপ্লিকেট (case-insensitive) বাদ দিয়ে
+    const seen = new Set();
+    const merged = [];
+    for (const row of learned) {
+      const key = `${row[0]}|${row[1] || ""}`.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(row);
+    }
+    for (const row of staticVet) {
+      const key = `${row[0]}|${row[1] || ""}`.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(row);
+    }
+    const labelsLC = merged.map(([n, p]) => (p ? `${n} ${p}` : n).toLowerCase());
+    const staticCompanies = staticVet.map(([, , c]) => c).filter(Boolean);
+    const learnedCompanies = learned.map(([, , c]) => c).filter(Boolean);
+    const companies = [...new Set([...VET_SEED_COMPANIES, ...staticCompanies, ...learnedCompanies])].sort((a, b) => a.localeCompare(b, "bn"));
+    return { dataset: merged, labelsLC, companies, ready: true };
   }
+  const learnedMed = _medLearnedList || EMPTY_MED_ARR;
+  const staticMed = _medDataset || EMPTY_MED_ARR;
+  if (learnedMed.length === 0) {
+    return {
+      dataset:   staticMed,
+      labelsLC:  _medLabelsLC  || EMPTY_MED_ARR,
+      companies: _medCompanies || EMPTY_MED_ARR,
+      ready: !!_medDataset,
+    };
+  }
+  // দোকানদার নিজে নতুন যা এন্ট্রি করেছেন (learnedMed) — static ২০,৫০০+ dataset-এ না থাকা
+  // ব্র্যান্ড/নাম এখান থেকেও সাজেশনে আসবে, আগে রাখা হলো, তারপর static, ডুপ্লিকেট বাদ দিয়ে
+  const seenM = new Set();
+  const mergedMed = [];
+  for (const row of learnedMed) {
+    const key = `${row[0]}|${row[1] || ""}`.toLowerCase();
+    if (seenM.has(key)) continue;
+    seenM.add(key);
+    mergedMed.push(row);
+  }
+  for (const row of staticMed) {
+    const key = `${row[0]}|${row[1] || ""}`.toLowerCase();
+    if (seenM.has(key)) continue;
+    seenM.add(key);
+    mergedMed.push(row);
+  }
+  const mergedLabelsLC = mergedMed.map(([n, p]) => (p ? `${n} ${p}` : n).toLowerCase());
+  const learnedCompaniesMed = learnedMed.map(([, , c]) => c).filter(Boolean);
+  const mergedCompanies = [...new Set([...(_medCompanies || EMPTY_MED_ARR), ...learnedCompaniesMed])].sort((a, b) => a.localeCompare(b));
   return {
-    dataset:   _medDataset   || EMPTY_MED_ARR,
-    labelsLC:  _medLabelsLC  || EMPTY_MED_ARR,
-    companies: _medCompanies || EMPTY_MED_ARR,
-    ready: !!_medDataset,
+    dataset:   mergedMed,
+    labelsLC:  mergedLabelsLC,
+    companies: mergedCompanies,
+    ready: true,
   };
 }
 
@@ -10896,6 +11021,7 @@ function SmartBusinessMgmt() {
   // Group B: Auth / shop
   const shopName         = useAppStore(s => s.shopName);
   const businessType     = useAppStore(s => s.businessType);
+  const businessTypeLocked = useAppStore(s => s.businessTypeLocked);
   const currentUser      = useAppStore(s => s.currentUser);
   const authSession      = useAppStore(s => s.authSession);
   const devContact       = useAppStore(s => s.devContact);
@@ -10961,6 +11087,7 @@ function SmartBusinessMgmt() {
   const setUsers            = useCallback((v) => _set("users",            v), [_set]);
   const setShopName         = useCallback((v) => _set("shopName",         v), [_set]);
   const setBusinessType     = useCallback((v) => _set("businessType",     v), [_set]);
+  const setBusinessTypeLocked = useCallback((v) => _set("businessTypeLocked", v), [_set]);
   const setLoaded           = useCallback((v) => _set("loaded",           v), [_set]);
   const setAuthChecked      = useCallback((v) => _set("authChecked",      v), [_set]);
   const setToast            = useCallback((v) => _set("toast",            v), [_set]);
@@ -11207,7 +11334,7 @@ function SmartBusinessMgmt() {
         SK.lastAutoBackup, SK.anthropicKey, SK.smsTemplates, SK.autoBackupEnabled,
         SK.lastMasterSync, SK.autoMasterSyncEnabled, SK.suppliers, SK.purchaseOrders,
         SK.stockMovements, SK.cashLogs, SK.expenses, SK.returns, SK.auditLogs,
-        SK.quotations, SK.supplierPayments, SK.businessType,
+        SK.quotations, SK.supplierPayments, SK.businessType, SK.businessTypeLocked,
       ];
       const boot1 = await loadMany(CRITICAL_KEYS);
       const rawCustomers    = boot1[SK.customers];
@@ -11326,6 +11453,7 @@ function SmartBusinessMgmt() {
           quotations:            boot2[SK.quotations]           || [],
           supplierPayments:      boot2[SK.supplierPayments]     || [],
           businessType:          boot2[SK.businessType]         || "pharmacy",
+          businessTypeLocked:    boot2[SK.businessTypeLocked]   || false,
           settingsLoaded:        true, // 🔴 এখন থেকেই autoBackupEnabled/autoMasterSyncEnabled-এর real value store-এ বসলো — persistence effect চালু করা নিরাপদ
         });
       }, 0);
@@ -11439,6 +11567,25 @@ function SmartBusinessMgmt() {
     const unsub = FSS.subscribeResetMarker((at) => { GLOBAL_RESET_MARKER_AT = at || 0; });
     return () => unsub();
   }, [fssReady, appResyncTick]);
+
+  // 🆕 businessType/businessTypeLocked — Firestore meta/businessConfig রিয়েল-টাইম সিংক
+  // (owner যেই মোড সেট করবে, staff-এর ফোনেও অ্যাপ রিস্টার্ট ছাড়াই সাথে সাথে সেই মোড আসবে)
+  useEffect(() => {
+    if (!fssReady || !FSS._db || !settingsLoaded) return;
+    const unsub = FSS.subscribeBusinessConfig((data) => {
+      if (data) {
+        // remote-এ ডেটা আছে — এটাই সত্য উৎস, লোকাল স্টেট এর সাথে মিলিয়ে নাও
+        if (typeof data.businessType === "string" && data.businessType !== businessType) setBusinessType(data.businessType);
+        if (typeof data.businessTypeLocked === "boolean" && data.businessTypeLocked !== businessTypeLocked) setBusinessTypeLocked(data.businessTypeLocked);
+      } else if (businessTypeLocked) {
+        // 🔴 এই দোকানের জন্য এখনো কোনো meta/businessConfig ডকুমেন্ট নেই (আপডেটের পর
+        // প্রথমবার) — এই ডিভাইসের বর্তমান লক করা মোডটাই "seed" হিসেবে Firestore-এ
+        // লিখে দাও, যাতে ডেটা হারানোর কোনো ঝুঁকি না থাকে
+        FSS.setBusinessConfig(businessType, businessTypeLocked);
+      }
+    });
+    return () => unsub();
+  }, [fssReady, settingsLoaded, businessType, businessTypeLocked]);
 
   // ── প্রতিটা collection — local array ↔ Firestore (record-level, real-time) ──
   // 🔴 ফিক্স: customers-এও products-এর মতো একই bug ছিল — diff-ভিত্তিক অটো-ডিলিট
@@ -11759,6 +11906,15 @@ function SmartBusinessMgmt() {
   // পারত — এটাই ছিল "Auto Sync/Auto Backup টগল নিজে নিজে অফ হয়ে যাওয়া"র কারণ।
   useEffect(() => { if (settingsLoaded) save(SK.autoBackupEnabled, autoBackupEnabled); }, [autoBackupEnabled, settingsLoaded]);
   useEffect(() => { if (settingsLoaded) save(SK.businessType, businessType); }, [businessType, settingsLoaded]);
+  useEffect(() => { if (settingsLoaded) save(SK.businessTypeLocked, businessTypeLocked); }, [businessTypeLocked, settingsLoaded]);
+  // 🔒 সুরক্ষা: ইতিমধ্যে পণ্য যোগ করা (অর্থাৎ ইতিমধ্যে ব্যবহৃত হচ্ছে এমন) দোকানে
+  // businessTypeLocked এখনো false থাকলে (পুরোনো/আগে থেকে চলা দোকান, এই ফিচার
+  // আসার আগে থেকেই ব্যবহার হচ্ছিল) — নিঃশব্দে বর্তমান মোডেই লক করে দেওয়া হয়,
+  // যাতে কেউ ভুল করে মোড পাল্টে পুরোনো পণ্য/ডেটাসেটের সাথে অন্য মোডের ডেটা মিশিয়ে না ফেলে।
+  // একদম নতুন (এখনো কোনো পণ্য নেই) দোকান প্রথমবার নিজে বেছে নেওয়ার সুযোগ পাবে।
+  useEffect(() => {
+    if (settingsLoaded && !businessTypeLocked && products.length > 0) setBusinessTypeLocked(true);
+  }, [settingsLoaded, businessTypeLocked, products.length]);
   useEffect(() => { if (settingsLoaded) save(SK.autoMasterSyncEnabled, autoMasterSyncEnabled); }, [autoMasterSyncEnabled, settingsLoaded]);
   useEffect(() => { if (loaded && lastMasterSync) save(SK.lastMasterSync, lastMasterSync); }, [lastMasterSync, loaded]);
   useEffect(() => { if (loaded) save(SK.firebaseConfig,  firebaseConfig);  }, [firebaseConfig, loaded]);   // 🔥
@@ -12553,7 +12709,13 @@ function SmartBusinessMgmt() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded, firebaseEnabled, firebaseConfig, currentUser?.role]);
 
+  // 🔴 ত্রি-র অনুরোধে (Jul 16, 2026) SMS পাঠানো সাময়িকভাবে বন্ধ — invoice/জমা
+  // তৈরির সময় SMS gateway/Claude API কল UI ব্লক করছিল বলে ডায়াগনস্টিকের সময়
+  // এই টগল যোগ করা হলো। সুবিধামতো আবার চালু করতে শুধু নিচের লাইনটা true করে দিন।
+  const SMS_ENABLED = false;
+
   const sendSMS = useCallback(async (customer, type, amount) => {
+    if (!SMS_ENABLED) return; // সব জায়গা থেকে SMS বন্ধ — কোনো Claude/gateway কল হবে না, smsCount-ও কমবে না
     const text = await generateSMS(customer, type, amount, customer.balance, shopName, anthropicKey, smsTemplates);
     const logEntry = { id: uid(), to: customer.mobile, name: customer.name, text, time: nowStr(), type, dateKey: todayEn(), delivered: false };
     if (smsGateway?.apiKey) {
@@ -13440,6 +13602,7 @@ function SmartBusinessMgmt() {
             <Settings T={T} S={S}
               shopName={shopName} setShopName={setShopName}
               businessType={businessType} setBusinessType={setBusinessType}
+              businessTypeLocked={businessTypeLocked} setBusinessTypeLocked={setBusinessTypeLocked}
               users={users} setUsers={setUsers}
               currentUser={currentUser} setCurrentUser={setCurrentUser}
               showToast={showToast}
@@ -22410,8 +22573,10 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
   const [peSearchOpen,    setPeSearchOpen]    = useState(false);
   const [peNewProduct,    setPeNewProduct]    = useState(null);
   const [peCompanyCustom, setPeCompanyCustom] = useState(false);
-  const [peFilter,        setPeFilter]        = useState("today"); // "today" | "date" | "all"
-  const [peHistDate,      setPeHistDate]      = useState("");
+  // ── দিন/মাস নেভিগেটর (এক্সপেন্স ট্রেকারের প্যাটার্নে ইউনিফাইড) ──────────────
+  const [peViewMode,      setPeViewMode]      = useState("day"); // "day" | "month"
+  const [peNavDate,       setPeNavDate]       = useState(_dateKeyOf(new Date()));
+  const [peNavMonth,      setPeNavMonth]      = useState(_monthKeyOf(new Date()));
   const [peSearch,        setPeSearch]        = useState("");
   // ── #৭ AI ফিচার — চালান/ইনভয়েসের ছবি → বাল্ক ক্রয় এন্ট্রি ──────────────────
   const [peInvoiceBusy,   setPeInvoiceBusy]   = useState(false);
@@ -22451,16 +22616,20 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
     peForm.productId ? calcNextBatch(peForm.productId, products, purchaseOrders) : "—"
   ), [peForm.productId, products, purchaseOrders]);
   const peDisplayed = useMemo(() => {
-    const todayKey = _dateKeyOf(new Date());
     return peAllEntries
-      .filter(e => {
-        if (peFilter === "today") return e.dateKey === todayKey;
-        if (peFilter === "date")  return e.dateKey === peHistDate;
-        return true;
-      })
+      .filter(e => peViewMode === "day" ? e.dateKey === peNavDate : (e.dateKey || "").startsWith(peNavMonth))
       .filter(e => !peSearch || e.productName?.includes(peSearch) || (e.batch || "").includes(peSearch));
-  }, [peAllEntries, peFilter, peHistDate, peSearch]);
+  }, [peAllEntries, peViewMode, peNavDate, peNavMonth, peSearch]);
   const peDisplayedTotal = useMemo(() => peDisplayed.reduce((s, e) => s + (e.totalCost || 0), 0), [peDisplayed]);
+  // ── নেভিগেশন হ্যান্ডলার (দিন/মাস শিফট — এক্সপেন্স ট্রেকারের প্যাটার্নে) ──
+  const peShiftDay = useCallback((delta) => {
+    setPeNavDate(prev => { const d = new Date(prev); d.setDate(d.getDate() + delta); return _dateKeyOf(d); });
+  }, []);
+  const peShiftMonth = useCallback((delta) => {
+    setPeNavMonth(prev => { const [y, m] = prev.split("-").map(Number); const d = new Date(y, (m - 1) + delta, 1); return _monthKeyOf(d); });
+  }, []);
+  const peDayLabel   = (dk) => { const d = new Date(dk); if (isNaN(d.getTime())) return dk; return `${d.getDate()} ${MONTH_NAMES_BN[d.getMonth()]}, ${d.getFullYear()}`; };
+  const peMonthLabel = (mk) => { const [y, m] = (mk || "").split("-"); return m ? `${MONTH_NAMES_BN[parseInt(m, 10) - 1]} ${y}` : mk; };
   const retailTodayPurchases = useMemo(() => {
     const todayKey2 = _dateKeyOf(new Date());
     return peAllEntries.filter(p => p.dateKey === todayKey2 || (p.createdAt && p.createdAt.startsWith(todayKey2)));
@@ -22698,7 +22867,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
       });
       const prod = { ...prodFields, stock: totalStockVal, batches: initialBatches };
       setProducts(prev => [...prev, { id: newId, ...prod }]);
-      if (businessType === "veterinary") vetLearnEntry(form.name, form.unit === "__typing__" ? "" : form.unit, form.company); // 🐄 সেলফ-লার্নিং সাজেশন
+      learnMedicineEntry(businessType, form.name, form.unit === "__typing__" ? "" : form.unit, form.company); // 💊🐄 সেলফ-লার্নিং সাজেশন (দুই মোডেই)
       // নতুন পণ্যে initial stock লগ করো (delta = totalStockVal, prevStock = 0)
       if (totalStockVal > 0) {
         const mvNew = pushStockMovement({
@@ -22787,7 +22956,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
         const _peBatchOffset = {};
         // ── একটা পণ্যে একটা ব্যাচ যোগ করার কেন্দ্রীয় লজিক (Weighted Average Cost) —
         // এককভাবে savePE (নিচে) থেকে, আর বাল্ক চালান-কনফার্ম থেকেও এই একই ফাংশন কল হয় ──
-        const applyPurchaseBatch = async ({ productId, qty, unitCost, unitSell, expiryDate, supplier, note, isFreeStock }) => {
+        const applyPurchaseBatch = async ({ productId, qty, unitCost, unitSell, expiryDate, supplier, note, isFreeStock, spPrice }) => {
           const prod = products.find(p => p.id === productId);
           if (!prod || !qty || qty <= 0) return null;
           const cost    = isFreeStock ? 0 : (unitCost || prod.costPrice || 0);
@@ -22837,6 +23006,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
             newStock = txResult.stock;
             setProducts(prev => prev.map(p => p.id === productId
               ? { ...p, stock: txResult.stock, costPrice: txResult.costPrice, price: sell || p.price,
+                  spPrice: (spPrice !== undefined && spPrice !== "") ? (parseFloat(spPrice) || 0) : p.spPrice,
                   lastUpdated: now, expiryDate: expiryDate || p.expiryDate, batches: txResult.batches }
               : p));
           } else {
@@ -22866,6 +23036,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                 stock: newStock,
                 costPrice: Math.round(newCostPrice * 10000) / 10000,
                 price: sell || p.price,
+                spPrice: (spPrice !== undefined && spPrice !== "") ? (parseFloat(spPrice) || 0) : p.spPrice,
                 lastUpdated: now,
                 expiryDate: expiryDate || p.expiryDate,
                 batches: [...(p.batches || []), newBatch],
@@ -22904,6 +23075,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
             supplier: peForm.supplier,
             note: peForm.note,
             isFreeStock: peForm.isFreeStock,
+            spPrice: peForm.spPrice,
           });
           if (!result) return;
           setPeForm(f => ({ ...EMPTY_PE, supplier: f.supplier }));
@@ -23305,6 +23477,15 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                   onChange={v => setPeForm(f => ({ ...f, supplier: v }))} />
               </div>
 
+              {/* SP — শুধু রেফারেন্সের জন্য, ঐচ্ছিক — শুধু ভেটেরিনারি মোডে দেখানো হয় */}
+              {businessType === "veterinary" && (
+                <div>
+                  <label style={S.label}>🏷️ SP (৳) <span style={{ color:T.sub, fontWeight:500, fontSize:11 }}>— শুধু রেফারেন্সের জন্য, ঐচ্ছিক</span></label>
+                  <input style={S.input} type="number" placeholder="" inputMode="numeric"
+                    value={peForm.spPrice || ""} onChange={e => setPeForm(f => ({ ...f, spPrice: e.target.value }))} />
+                </div>
+              )}
+
               {/* পরিমাণ + নতুন একক ক্রয়মূল্য */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                 <div>
@@ -23432,7 +23613,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                       at: now, dateKey: todayK, source: "purchase",
                     });
                     setStockMovements(prev => [mvNewProd, ...prev]);
-                    if (businessType === "veterinary") vetLearnEntry(name, unitFinal, company); // 🐄 সেলফ-লার্নিং সাজেশন
+                    learnMedicineEntry(businessType, name, unitFinal, company); // 💊🐄 সেলফ-লার্নিং সাজেশন (দুই মোডেই)
                     setPurchaseOrders(prev => [{
                       id: uid(), _type: "pe",
                       productId: newId, productName: name, unit: unitFinal,
@@ -23457,28 +23638,45 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
             )}{/* end peShowForm */}
 
             {/* ── ইতিহাস ──────────────────────────────────────────────────────── */}
-            {/* তারিখ ফিল্টার */}
-            <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:10, marginTop:4 }}>
-              {[{ k:"today", l:"আজ" }, { k:"all", l:"সব" }].map(f => (
-                <button key={f.k}
-                  onClick={() => setPeFilter(f.k)}
-                  style={{ background: peFilter===f.k ? "linear-gradient(135deg,#7c3aed,#a78bfa)" : T.bg, color: peFilter===f.k ? "#fff" : T.sub, border: `1px solid ${peFilter===f.k?"#a78bfa":T.border}`, borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink:0 }}>
-                  {f.l}
-                </button>
-              ))}
-              {/* Date picker — নির্দিষ্ট দিন */}
-              <div style={{ flex:1, display:"flex", alignItems:"center", gap:6, background: peFilter==="date" ? "#a78bfa18" : T.card, border:`1px solid ${peFilter==="date"?"#a78bfa44":T.border}`, borderRadius:10, padding:"5px 10px", cursor:"pointer" }}
-                onClick={() => setPeFilter("date")}>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={peFilter==="date"?"#a78bfa":T.sub} strokeWidth="2.5" strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                <input type="date" value={peHistDate}
-                  max={todayKey}
-                  onChange={e => { if (e.target.value) { setPeHistDate(e.target.value); setPeFilter("date"); } }}
-                  style={{ flex:1, border:"none", background:"transparent", color: peFilter==="date" ? "#a78bfa" : T.text, fontSize:12, fontWeight:700, fontFamily:"inherit", outline:"none", cursor:"pointer", minWidth:0 }} />
+            {/* ── দিন/মাস নেভিগেটর (এক্সপেন্স ট্রেকারের প্যাটার্নে ইউনিফাইড) ── */}
+            <div className="qc-gradient-card" style={{ ...S.card, padding: "10px 12px", marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "center", gap: 6, marginBottom: 10 }}>
+                {[["day", "দিন"], ["month", "মাস"]].map(([key, label]) => (
+                  <button key={key} onClick={() => setPeViewMode(key)}
+                    style={{ padding: "5px 18px", borderRadius: 16, border: `1.5px solid ${peViewMode === key ? "#a78bfa" : T.border}`,
+                      background: peViewMode === key ? "#a78bfa22" : "transparent",
+                      color: peViewMode === key ? "#a78bfa" : T.sub,
+                      fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <button onClick={() => peViewMode === "day" ? peShiftDay(-1) : peShiftMonth(-1)}
+                  style={{ background: T.border, border: "none", borderRadius: 8, width: 32, height: 32, flexShrink: 0,
+                    color: T.text, fontSize: 17, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>‹</button>
+
+                <div style={{ position: "relative", flex: 1, textAlign: "center" }}>
+                  <div style={{ color: T.text, fontWeight: 800, fontSize: 13.5 }}>
+                    📅 {peViewMode === "day" ? peDayLabel(peNavDate) : peMonthLabel(peNavMonth)}
+                  </div>
+                  <input
+                    type={peViewMode === "day" ? "date" : "month"}
+                    value={peViewMode === "day" ? peNavDate : peNavMonth}
+                    max={peViewMode === "day" ? todayKey : undefined}
+                    onChange={e => { if (!e.target.value) return; peViewMode === "day" ? setPeNavDate(e.target.value) : setPeNavMonth(e.target.value); }}
+                    style={{ position: "absolute", inset: 0, opacity: 0, width: "100%", height: "100%", cursor: "pointer", border: "none" }}
+                  />
+                </div>
+
+                <button onClick={() => peViewMode === "day" ? peShiftDay(1) : peShiftMonth(1)}
+                  style={{ background: T.border, border: "none", borderRadius: 8, width: 32, height: 32, flexShrink: 0,
+                    color: T.text, fontSize: 17, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>›</button>
               </div>
             </div>
 
-            {/* সারসংক্ষেপ — নির্বাচিত তারিখের (প্রিমিয়াম/ফিউচারিস্টিক কার্ড) */}
-            {(peFilter === "today" || peFilter === "date") && (
+            {/* সারসংক্ষেপ — নির্বাচিত দিন/মাসের (প্রিমিয়াম/ফিউচারিস্টিক কার্ড) */}
+            {
               <div className="qc-gradient-card" style={{
                 background:"linear-gradient(135deg,#2d1a5e,#1e1040 60%,#1a0f33)",
                 borderRadius:18, padding:"16px 18px", marginBottom:10,
@@ -23489,7 +23687,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               }}>
                 <div>
                   <div style={{ color:"#c4b5fd", fontSize:11, fontWeight:700, marginBottom:2, letterSpacing:0.3 }}>
-                    মোট ক্রয় ({peFilter==="today" ? todayKey : peHistDate})
+                    মোট ক্রয় ({peViewMode==="day" ? peDayLabel(peNavDate) : peMonthLabel(peNavMonth)})
                   </div>
                   <div style={{ color:"#c4b5fd", fontWeight:900, fontSize:26, textShadow:"0 0 18px #a78bfa66", background:"linear-gradient(135deg,#e9d5ff,#c4b5fd)", WebkitBackgroundClip:"text", backgroundClip:"text", WebkitTextFillColor:"transparent" }}>৳{displayedTotal.toLocaleString()}</div>
                   <div style={{ color:"#94a3b8", fontSize:11, marginTop:2 }}>{displayed.length}টি এন্ট্রি</div>
@@ -23497,7 +23695,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                 <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
                   {/* Print — buildPdfHtml + openPrintWindow ব্যবহার করে (Capacitor/WebView-compatible) */}
                   <button onClick={() => {
-                    const dateLabel = peFilter==="today" ? todayKey : peHistDate;
+                    const dateLabel = peViewMode==="day" ? peDayLabel(peNavDate) : peMonthLabel(peNavMonth);
                     const rows = displayed.map((e,i) => `<tr>
                       <td class="num" style="text-align:center;">${i+1}</td>
                       <td style="font-weight:600;">${e.productName||"—"}</td>
@@ -23522,7 +23720,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                   </button>
                   {/* WhatsApp */}
                   <button onClick={() => {
-                    const dateLabel = peFilter==="today" ? todayKey : peHistDate;
+                    const dateLabel = peViewMode==="day" ? peDayLabel(peNavDate) : peMonthLabel(peNavMonth);
                     const rows = displayed.map((e,i) => `<tr>
                       <td class="num" style="text-align:center;">${i+1}</td>
                       <td style="font-weight:600;">${e.productName||"—"}</td>
@@ -23547,10 +23745,10 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                   </button>
                 </div>
               </div>
-            )}
+            }
 
             {displayed.length === 0 && (
-              <div style={S.empty}>{peFilter==="all" ? "কোনো ক্রয় এন্ট্রি নেই" : `${peFilter==="today" ? todayKey : peHistDate} তারিখে কোনো ক্রয় এন্ট্রি নেই`}</div>
+              <div style={S.empty}>{`${peViewMode==="day" ? peDayLabel(peNavDate) : peMonthLabel(peNavMonth)} এ কোনো ক্রয় এন্ট্রি নেই`}</div>
             )}
 
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -24647,9 +24845,20 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
   const [ihCustText,   setIhCustText]   = React.useState("");
   const [ihCustId,     setIhCustId]     = React.useState("");
   const [ihShowSuggest, setIhShowSuggest] = React.useState(false);
+  const [ihViewMode,   setIhViewMode]   = React.useState("all"); // all|date|month — দিন/মাস নেভিগেটর টগল
   const [ihDate,       setIhDate]       = React.useState("");   // exact dateKey
   const [ihMonth,      setIhMonth]      = React.useState("");   // YYYY-MM
   const [ihPayType,    setIhPayType]    = React.useState("all"); // all|cash|baki|partial
+
+  // ── ihViewMode বদলালে ihDate/ihMonth সিংক করা (এক্সপেন্স ট্রেকার/vh-এর প্যাটার্নে) ──
+  const setIhMode = React.useCallback((mode) => {
+    setIhViewMode(mode);
+    if (mode === "date")  { setIhDate(d => d || todayKey); setIhMonth(""); }
+    else if (mode === "month") { setIhMonth(m => m || monthKeyNow); setIhDate(""); }
+    else { setIhDate(""); setIhMonth(""); }
+  }, [todayKey, monthKeyNow]);
+  const ihShiftDay   = (delta) => setIhDate(prev => { const d = new Date(prev || todayKey); d.setDate(d.getDate()+delta); return _dateKeyOf(d); });
+  const ihShiftMonth = (delta) => setIhMonth(prev => { const [y,m] = (prev || monthKeyNow).split("-").map(Number); const d = new Date(y,(m-1)+delta,1); return _monthKeyOf(d); });
 
   const ihCustSuggestions = React.useMemo(() => {
     const q = ihCustText.trim().toLowerCase();
@@ -24701,7 +24910,7 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
     loadInvHistPage(true);
   };
   const resetInvHistFilter = () => {
-    setIhCustText(""); setIhCustId(""); setIhDate(""); setIhMonth(""); setIhPayType("all");
+    setIhCustText(""); setIhCustId(""); setIhViewMode("all"); setIhDate(""); setIhMonth(""); setIhPayType("all");
     invHistCursorRef.current = null;
     setInvHistRows([]); setInvHistDone(false); setInvHistError(null);
     if (showInvHist) loadInvHistPage(true);
@@ -24991,20 +25200,39 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
                   )}
                 </div>
 
-                <div style={{ display:"flex", gap:8, marginBottom:8 }}>
-                  <div style={{ flex:1 }}>
-                    <div style={{ color:T.sub, fontSize:10.5, fontWeight:700, marginBottom:3 }}>📅 নির্দিষ্ট দিন</div>
-                    <input type="date" value={ihDate}
-                      onChange={e => { setIhDate(e.target.value); if (e.target.value) setIhMonth(""); }}
-                      style={{ ...S.input, marginTop:0, width:"100%", fontSize:12 }} />
-                  </div>
-                  <div style={{ flex:1 }}>
-                    <div style={{ color:T.sub, fontSize:10.5, fontWeight:700, marginBottom:3 }}>🗓️ নির্দিষ্ট মাস</div>
-                    <input type="month" value={ihMonth}
-                      onChange={e => { setIhMonth(e.target.value); if (e.target.value) setIhDate(""); }}
-                      style={{ ...S.input, marginTop:0, width:"100%", fontSize:12 }} />
-                  </div>
+                {/* ── দিন/মাস নেভিগেটর (এক্সপেন্স ট্রেকার/বাতিলকৃত-ইনভয়েস-হিস্ট্রির প্যাটার্নে) ── */}
+                <div style={{ display:"flex", justifyContent:"center", gap:6, marginBottom:8 }}>
+                  {[["all","সব"],["date","দিন"],["month","মাস"]].map(([k,l]) => (
+                    <button key={k} onClick={() => setIhMode(k)}
+                      style={{ padding:"5px 16px", borderRadius:16, border:`1.5px solid ${ihViewMode===k?"#6366f1":T.border}`,
+                        background: ihViewMode===k?"#6366f122":"transparent",
+                        color: ihViewMode===k?"#6366f1":T.sub,
+                        fontSize:11.5, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>
+                      {l}
+                    </button>
+                  ))}
                 </div>
+                {ihViewMode !== "all" && (
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, marginBottom:8 }}>
+                    <button onClick={() => ihViewMode==="date" ? ihShiftDay(-1) : ihShiftMonth(-1)}
+                      style={{ background:T.border, border:"none", borderRadius:8, width:30, height:30, flexShrink:0,
+                        color:T.text, fontSize:16, fontWeight:800, cursor:"pointer", fontFamily:"inherit" }}>‹</button>
+                    <div style={{ position:"relative", flex:1, textAlign:"center" }}>
+                      <div style={{ color:T.text, fontWeight:800, fontSize:12.5 }}>
+                        📅 {ihViewMode==="date" ? rhDayLabel(ihDate || todayKey) : rhMonthLabel(ihMonth || monthKeyNow)}
+                      </div>
+                      <input
+                        type={ihViewMode==="date" ? "date" : "month"}
+                        value={ihViewMode==="date" ? (ihDate || todayKey) : (ihMonth || monthKeyNow)}
+                        onChange={e => { if (!e.target.value) return; ihViewMode==="date" ? setIhDate(e.target.value) : setIhMonth(e.target.value); }}
+                        style={{ position:"absolute", inset:0, opacity:0, width:"100%", height:"100%", cursor:"pointer", border:"none" }}
+                      />
+                    </div>
+                    <button onClick={() => ihViewMode==="date" ? ihShiftDay(1) : ihShiftMonth(1)}
+                      style={{ background:T.border, border:"none", borderRadius:8, width:30, height:30, flexShrink:0,
+                        color:T.text, fontSize:16, fontWeight:800, cursor:"pointer", fontFamily:"inherit" }}>›</button>
+                  </div>
+                )}
 
                 <div style={{ display:"flex", gap:6, marginBottom:10, flexWrap:"wrap" }}>
                   {[["all","সব"],["cash","নগদ"],["baki","বাকি"],["partial","আংশিক"]].map(([k,l]) => (
@@ -27528,7 +27756,7 @@ function AppVersionCard({ T, S }) {
 }
 
 function Settings_({ T, S, shopName,
- setShopName, businessType = "pharmacy", setBusinessType, users, setUsers, currentUser, setCurrentUser, showToast, customers, setCustomers, products, setProducts, invoices, setInvoices, txns, setTxns, smsLog, setSmsLog, sendSMS, darkMode, setDarkMode, activeTheme, setActiveTheme, fontSize, setFontSize, deletedCustomers, setDeletedCustomers, deletedProducts = [], setDeletedProducts, smsGateway, setSmsGateway, btConnected, btDevice, onConnectBluetooth, onDisconnectBluetooth, paymentInvoices, setPaymentInvoices, purchaseOrders = [], setPurchaseOrders, stockMovements = [], setStockMovements, lastAutoBackup, lastLocalBackup, driveStatus, backupNeeded, backupFailStreak, lastBackupError, restoreTestAt, restoreTestOk, restoreTestDetail, restoreTestFailStreak, onRunRestoreTest, performDriveBackup, buildBackupData, buildManualBackupData, manualBackupSetters, setBackupNeeded, performMasterSync, masterSyncStatus, masterSyncDetail, lastMasterSync, autoMasterSyncEnabled, setAutoMasterSyncEnabled, googleDriveToken, setGoogleDriveToken, anthropicKey, setAnthropicKey, smsTemplates, setSmsTemplates, autoBackupEnabled, setAutoBackupEnabled, firebaseConfig, setFirebaseConfig, firebaseEnabled, setFirebaseEnabled, setAuthSession, devContact, setDevContact, masterResetHash, setMasterResetHash, activeDevices = [], setActiveDevices, recoveryPhone, setRecoveryPhone, recoveryPinHash, setRecoveryPinHash, cashLogs = [], setCashLogs, suppliers = [], setSuppliers, expenses = [], setExpenses, returns = [], setReturns, quotations = [], setQuotations, supplierPayments = [], setSupplierPayments, auditLogs = [], setAuditLogs, hasPerm, fssReady = false, pendingConflicts = [] }) {
+ setShopName, businessType = "pharmacy", setBusinessType, businessTypeLocked = false, setBusinessTypeLocked, users, setUsers, currentUser, setCurrentUser, showToast, customers, setCustomers, products, setProducts, invoices, setInvoices, txns, setTxns, smsLog, setSmsLog, sendSMS, darkMode, setDarkMode, activeTheme, setActiveTheme, fontSize, setFontSize, deletedCustomers, setDeletedCustomers, deletedProducts = [], setDeletedProducts, smsGateway, setSmsGateway, btConnected, btDevice, onConnectBluetooth, onDisconnectBluetooth, paymentInvoices, setPaymentInvoices, purchaseOrders = [], setPurchaseOrders, stockMovements = [], setStockMovements, lastAutoBackup, lastLocalBackup, driveStatus, backupNeeded, backupFailStreak, lastBackupError, restoreTestAt, restoreTestOk, restoreTestDetail, restoreTestFailStreak, onRunRestoreTest, performDriveBackup, buildBackupData, buildManualBackupData, manualBackupSetters, setBackupNeeded, performMasterSync, masterSyncStatus, masterSyncDetail, lastMasterSync, autoMasterSyncEnabled, setAutoMasterSyncEnabled, googleDriveToken, setGoogleDriveToken, anthropicKey, setAnthropicKey, smsTemplates, setSmsTemplates, autoBackupEnabled, setAutoBackupEnabled, firebaseConfig, setFirebaseConfig, firebaseEnabled, setFirebaseEnabled, setAuthSession, devContact, setDevContact, masterResetHash, setMasterResetHash, activeDevices = [], setActiveDevices, recoveryPhone, setRecoveryPhone, recoveryPinHash, setRecoveryPinHash, cashLogs = [], setCashLogs, suppliers = [], setSuppliers, expenses = [], setExpenses, returns = [], setReturns, quotations = [], setQuotations, supplierPayments = [], setSupplierPayments, auditLogs = [], setAuditLogs, hasPerm, fssReady = false, pendingConflicts = [] }) {
   const [editName,    setEditName]    = useState(false);
   const [nameInput,   setNameInput]   = useState(shopName);
   const [showRecoveryExpanded, setShowRecoveryExpanded] = useState(false);
@@ -28664,25 +28892,50 @@ function Settings_({ T, S, shopName,
         )}
       </div>
 
-      {/* ① Business Type — ফার্মেসি / ভেটেরিনারি */}
+      {/* ① Business Type — ফার্মেসি / ভেটেরিনারি — owner/admin এডিট করতে পারে, staff শুধু read-only ব্যাজ দেখে */}
       <div className="qc-gradient-card" style={{ ...S.card }}>
         <div style={{ color: T.text, fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0ea5e9" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
           ব্যবসার ধরন
         </div>
-        <div style={{ display:"flex", gap:10 }}>
-          <label style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, flex:1, padding:"11px 10px", borderRadius:10, border:`1.5px solid ${businessType === "pharmacy" ? "#0ea5e9" : T.border}`, background: businessType === "pharmacy" ? "#0ea5e915" : "transparent", cursor:"pointer" }}>
-            <input type="checkbox" checked={businessType === "pharmacy"} onChange={() => { setBusinessType?.("pharmacy"); showToast("ফার্মেসি মোড চালু হয়েছে"); }} style={{ width:16, height:16, accentColor:"#0ea5e9", cursor:"pointer" }} />
+        {currentUser?.role === "staff" ? (
+          // 🆕 স্টাফ ডিভাইস — শুধু read-only ব্যাজ, meta/businessConfig থেকে real-time সিংক হওয়া মোড দেখায়
+          <div style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 12px", borderRadius:10, border:`1.5px solid ${businessType === "veterinary" ? "#16a34a44" : "#0ea5e944"}`, background: businessType === "veterinary" ? "#16a34a12" : "#0ea5e912" }}>
+            <span style={{ fontSize:18 }}>{businessType === "veterinary" ? "🐄" : "💊"}</span>
+            <div>
+              <div style={{ color: businessType === "veterinary" ? "#16a34a" : "#0ea5e9", fontWeight:800, fontSize:13 }}>
+                {businessType === "veterinary" ? "ভেটেরিনারি মোড" : "ফার্মেসি মোড"}
+              </div>
+              <div style={{ color:T.sub, fontSize:10.5, marginTop:1 }}>🔒 শুধু মালিক/এডমিন এই সেটিং পরিবর্তন করতে পারবেন</div>
+            </div>
+          </div>
+        ) : (
+        <>
+        <div style={{ display:"flex", gap:10, opacity: businessTypeLocked ? 0.6 : 1 }}>
+          <label style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, flex:1, padding:"11px 10px", borderRadius:10, border:`1.5px solid ${businessType === "pharmacy" ? "#0ea5e9" : T.border}`, background: businessType === "pharmacy" ? "#0ea5e915" : "transparent", cursor: businessTypeLocked ? "not-allowed" : "pointer" }}>
+            <input type="checkbox" disabled={businessTypeLocked} checked={businessType === "pharmacy"}
+              onChange={() => { if (businessTypeLocked) return; setBusinessType?.("pharmacy"); setBusinessTypeLocked?.(true); if (FSS.isReady()) FSS.setBusinessConfig("pharmacy", true); showToast("ফার্মেসি মোড নির্বাচন করা হলো — এখন থেকে এটা লক থাকবে"); }}
+              style={{ width:16, height:16, accentColor:"#0ea5e9", cursor: businessTypeLocked ? "not-allowed" : "pointer" }} />
             <span style={{ color: businessType === "pharmacy" ? "#0ea5e9" : T.sub, fontWeight:700, fontSize:13 }}>💊 ফার্মেসি</span>
           </label>
-          <label style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, flex:1, padding:"11px 10px", borderRadius:10, border:`1.5px solid ${businessType === "veterinary" ? "#16a34a" : T.border}`, background: businessType === "veterinary" ? "#16a34a15" : "transparent", cursor:"pointer" }}>
-            <input type="checkbox" checked={businessType === "veterinary"} onChange={() => { setBusinessType?.("veterinary"); showToast("ভেটেরিনারি মোড চালু হয়েছে"); }} style={{ width:16, height:16, accentColor:"#16a34a", cursor:"pointer" }} />
+          <label style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, flex:1, padding:"11px 10px", borderRadius:10, border:`1.5px solid ${businessType === "veterinary" ? "#16a34a" : T.border}`, background: businessType === "veterinary" ? "#16a34a15" : "transparent", cursor: businessTypeLocked ? "not-allowed" : "pointer" }}>
+            <input type="checkbox" disabled={businessTypeLocked} checked={businessType === "veterinary"}
+              onChange={() => { if (businessTypeLocked) return; setBusinessType?.("veterinary"); setBusinessTypeLocked?.(true); if (FSS.isReady()) FSS.setBusinessConfig("veterinary", true); showToast("ভেটেরিনারি মোড নির্বাচন করা হলো — এখন থেকে এটা লক থাকবে"); }}
+              style={{ width:16, height:16, accentColor:"#16a34a", cursor: businessTypeLocked ? "not-allowed" : "pointer" }} />
             <span style={{ color: businessType === "veterinary" ? "#16a34a" : T.sub, fontWeight:700, fontSize:13 }}>🐄 ভেটেরিনারি</span>
           </label>
         </div>
-        <div style={{ color:T.sub, fontSize:11, marginTop:8, lineHeight:1.5 }}>
-          এই সিলেকশন অনুযায়ী পণ্যের নাম-সাজেশন ডেটাসেট বদলে যাবে। ভেটেরিনারি মোডে আপনি যত পণ্য/সাপ্লায়ার যোগ করবেন, অ্যাপ নিজে থেকেই সেগুলো মনে রেখে ভবিষ্যতে সাজেশনে দেখাবে।
-        </div>
+        {businessTypeLocked ? (
+          <div style={{ color:"#f59e0b", fontSize:11, marginTop:8, lineHeight:1.5, fontWeight:700, display:"flex", alignItems:"center", gap:6 }}>
+            🔒 ব্যবসার ধরন একবার সিলেক্ট করার পর আর পরিবর্তন করা যায় না — দুই মোডের পণ্য/সাজেশন ডেটা যেন কখনো একসাথে মিশে না যায় তাই এই সুরক্ষা।
+          </div>
+        ) : (
+          <div style={{ color:T.sub, fontSize:11, marginTop:8, lineHeight:1.5 }}>
+            এই সিলেকশন অনুযায়ী পণ্যের নাম-সাজেশন ডেটাসেট বদলে যাবে। ভেটেরিনারি মোডে আপনি যত পণ্য/সাপ্লায়ার যোগ করবেন, অ্যাপ নিজে থেকেই সেগুলো মনে রেখে ভবিষ্যতে সাজেশনে দেখাবে। ⚠️ একবার সিলেক্ট করলে পরে আর বদলানো যাবে না।
+          </div>
+        )}
+        </>
+        )}
       </div>
 
       {/* ⑦ Bluetooth Printer */}
