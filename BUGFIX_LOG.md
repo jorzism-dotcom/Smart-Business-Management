@@ -25,6 +25,50 @@
 
 ## এন্ট্রি
 
+### [পূরণ করুন] — Safety-net সম্প্রসারণ: fuzz testing, mutation testing, pre-commit gate, schema validation, dependency scanning
+- উপসর্গ/উদ্দেশ্য: এটা কোনো বাগ-ফিক্স না — এন্টারপ্রাইজ-লেভেল অ্যাপ (Stripe/Shopify-সমতুল্য)
+  সাধারণত যা করে তার সাথে এখনো যা বাকি ছিল, তার ৪টা যোগ করা হলো (branch protection
+  আগেই, ব্যবহারকারী নিজে GitHub Settings-এ সেট করেছেন)।
+- কী যোগ হলো:
+  1. **`tests/logic-fuzz.mjs`** (fast-check) — fixed উদাহরণের বদলে হাজার হাজার
+     random ইনপুট (negative qty, extreme discount, garbage date string ইত্যাদি)
+     দিয়ে `calcInvoiceTotal`, `calcCashDrawer`, `restoreBatchQty`, `isBatchExpired`,
+     `getSortedActiveBatches`, `computeSupplierDueMap`-এর invariant (যেমন "total
+     কখনো নেগেটিভ হয় না") যাচাই করে। রান: `npm run test:fuzz`।
+  2. **`stryker.conf.json`** (Stryker mutation testing) — `src/logic.js`-এ
+     ইচ্ছাকৃত ছোট বাগ ঢুকিয়ে দেখে regression suite সেটা ধরে কিনা। রান:
+     `npm run test:mutation`।
+  3. **`.husky/pre-commit`** — commit করার আগেই লোকাল মেশিনে `npm test` চলে;
+     সমস্যা GitHub Actions পর্যন্ত পৌঁছানোরও আগে ধরা পড়ে। `npm install`-এর পর
+     স্বয়ংক্রিয়ভাবে সক্রিয় হয় (`prepare` script দিয়ে)।
+  4. **`src/schemas.js`** (zod) + `FSS.setRecord()`-এ hook — Firestore-এ যেকোনো
+     write-এর আগে টাকা/স্টক-সংক্রান্ত ফিল্ড (invoice.total, product.stock,
+     cashLog.amount ইত্যাদি) NaN/undefined/Infinity কিনা যাচাই করে।
+  5. **`.github/dependabot.yml`** — npm ও GitHub Actions dependency-তে security
+     vulnerability এলে স্বয়ংক্রিয় PR।
+- ⚠️ ইচ্ছাকৃত ডিজাইন সিদ্ধান্ত (গুরুত্বপূর্ণ, ভবিষ্যতে মনে রাখা দরকার):
+  - Schema validation এই মুহূর্তে **soft mode** — invalid data পেলেও write আটকায়
+    না, শুধু `console.warn` + `app_errors`-এ লগ করে। কারণ: strict validation
+    ভুল করে বৈধ-কিন্তু-নতুন-শেপের ডেটা ব্লক করে লাইভ দোকানে বিক্রি আটকে দিতে
+    পারত — সেই ঝুঁকি না নিয়ে আগে কিছুদিন লগ পর্যবেক্ষণ করে, false-positive না
+    থাকলে তারপর hard-reject মোডে পাল্টানো উচিত (দেখুন `src/schemas.js`-এর
+    শুরুর কমেন্ট)।
+  - fuzz ও mutation টেস্ট **এখনো CI gate-এ (`build-apk.yml`) ব্লকিং না** —
+    `npm test`-এ যোগ করা হয়নি ইচ্ছাকৃতভাবে, কারণ network-বিহীন পরিবেশে এই
+    সেশনে নতুন dependency (fast-check, Stryker) বাস্তব GitHub Actions রানে
+    কখনো সত্যিকারভাবে চালিয়ে দেখা যায়নি। প্রথমবার ম্যানুয়ালি রান করে ফলাফল
+    দেখে নিশ্চিত হওয়ার পরই এগুলোকে ব্লকিং করা উচিত।
+  - `src/schemas.js` ও `tests/schema-tests.mjs` স্থানীয়ভাবে zod (v3.23.8, একটা
+    ইতিমধ্যে-ইনস্টল-করা কপি দিয়ে) দিয়ে সত্যিকারভাবে চালিয়ে ১৪টা কেস পাস
+    কনফার্ম করা হয়েছে। fast-check ও Stryker নেটওয়ার্ক-বিহীন এই কন্টেইনারে
+    ইনস্টল করা সম্ভব হয়নি বলে সেগুলো `npm install` করার পর প্রথমবার
+    ম্যানুয়ালি রান করে নিশ্চিত হওয়া দরকার।
+- ব্লাস্ট রেডিয়াস: `FSS.setRecord()` সব কালেকশনের (invoices, products,
+  purchaseOrders, cashLogs, supplierPayments, customers) জন্য একই choke-point,
+  তাই schema validation এক জায়গায় বসিয়েই সব কভার হয়ে গেছে।
+- রিগ্রেশন টেস্ট যোগ হয়েছে কি: হ্যাঁ — `tests/schema-tests.mjs` (১৪টা কেস, `npm
+  test`-এর অংশ) এবং `tests/logic-fuzz.mjs` (আলাদা স্ক্রিপ্ট, `npm run test:fuzz`)।
+
 ### [পূরণ করুন] — computeSupplierDueMap ডাবল-কাউন্টিং বাগ
 - উপসর্গ: ম্যানুয়ালি "বাকি যোগ" না করলেও, শুধু ক্রয় অর্ডার থাকলেই সাপ্লায়ার
   পেজে বাকি দেখাত।

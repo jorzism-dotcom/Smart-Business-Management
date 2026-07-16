@@ -1,0 +1,34 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "packageManager": "npm",
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "node tests/logic-tests.mjs"
+  },
+  "mutate": [
+    "src/logic.js"
+  ],
+  "reporters": ["clear-text", "progress", "html"],
+  "htmlReporter": {
+    "fileName": "reports/mutation/index.html"
+  },
+  "coverageAnalysis": "off",
+  "thresholds": {
+    "high": 80,
+    "low": 60,
+    "break": null
+  },
+  "timeoutMS": 10000,
+  "concurrency": 2,
+  "_comment": [
+    "এই কনফিগ ইচ্ছাকৃতভাবে শুধু src/logic.js মিউটেট করে — App.jsx-এর বাকি বিশাল",
+    "অংশ (React/Firebase/DOM-নির্ভর) command-runner দিয়ে মিউটেশন-টেস্ট করা যায় না।",
+    "testRunner:'command' ব্যবহার করা হয়েছে কারণ এই প্রজেক্টে jest/mocha/vitest",
+    "নেই — plain Node script (tests/logic-tests.mjs) দিয়েই regression টেস্ট চলে,",
+    "সেটাকেই Stryker প্রতিটা মিউটেশনের পর রান করে exit-code দেখে pass/fail বোঝে।",
+    "thresholds.break:null মানে এখনই কোনো স্কোরের নিচে গেলে CI ব্যর্থ হবে না —",
+    "এটা প্রথম রান, তাই baseline score কত আসে সেটা দেখার পরই একটা বাস্তবসম্মত",
+    "threshold (যেমন ৭০%) বসানো উচিত, নাহলে গুরুত্বপূর্ণ কাজ অকারণে আটকে যেতে পারে।",
+    "রান করুন: npm run test:mutation (এই মুহূর্তে CI gate-এর অংশ না, ম্যানুয়ালি রান করার জন্য)।"
+  ]
+}

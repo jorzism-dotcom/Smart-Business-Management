@@ -7,8 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node tests/logic-tests.mjs",
-    "test:coverage": "c8 --reporter=text --reporter=html --include=src/logic.js -- node tests/logic-tests.mjs"
+    "test": "node tests/logic-tests.mjs && node tests/schema-tests.mjs",
+    "test:coverage": "c8 --reporter=text --reporter=html --include=src/logic.js -- node tests/logic-tests.mjs",
+    "test:fuzz": "node tests/logic-fuzz.mjs",
+    "test:mutation": "stryker run",
+    "prepare": "husky"
   },
   "dependencies": {
     "@capacitor-mlkit/barcode-scanning": "^6.2.0",
@@ -29,12 +32,16 @@
     "react-dom": "^18.3.1",
     "react-virtuoso": "^4.10.4",
     "recharts": "^2.15.3",
+    "zod": "^3.23.8",
     "zustand": "^5.0.0"
   },
   "devDependencies": {
     "c8": "^10.1.2",
     "@capacitor/cli": "^6.2.0",
+    "@stryker-mutator/core": "^8.6.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "fast-check": "^3.21.0",
+    "husky": "^9.1.5",
     "vite": "^5.4.2"
   }
 }
