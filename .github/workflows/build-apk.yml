@@ -47,6 +47,13 @@ jobs:
       - name: 🧪 Run logic tests (fails build if any core formula is broken)
         run: npm test
 
+      - name: 🔀 Fuzz tests (informational only — does not block build yet)
+        # নতুন যোগ করা হয়েছে, এখনো ব্লকিং না — GitHub Actions-এ কয়েকবার
+        # সত্যিকারভাবে সবুজ দেখে নিশ্চিত হওয়ার পর continue-on-error সরিয়ে
+        # এটাকেও build-gate-এর অংশ করা যায় (দেখুন BUGFIX_LOG.md)।
+        run: npm run test:fuzz
+        continue-on-error: true
+
       - name: Bundle GSI client locally (Capacitor WebView fix)
         run: |
           # Download Google Identity Services script so Capacitor WebView
