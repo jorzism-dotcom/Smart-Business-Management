@@ -1900,13 +1900,28 @@ async function fbDeployIndexes(projectId, indexesJsonText) {
 async function fbDeployRtdbRules(databaseURL, rtdbJsonText) {
   if (!databaseURL) { fbLog('Database URL পাওয়া যায়নি, RTDB rules স্কিপ করা হলো।', 'warn'); return; }
   JSON.parse(rtdbJsonText); // validate
-  // RTDB REST API শুধু access_token query parameter মানে, Authorization header মানে না
-  const url = databaseURL.replace(/\/$/, '') + '/.settings/rules.json?access_token=' + encodeURIComponent(fbAccessToken);
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: rtdbJsonText
-  });
+  const base = databaseURL.replace(/\/$/, '');
+  // নতুন regional RTDB instance (asia-southeast1 ইত্যাদি, .firebasedatabase.app ডোমেইন)
+  // access_token query parameter মানে না — Authorization: Bearer header লাগে।
+  // পুরোনো legacy (.firebaseio.com, us-central1) instance access_token মানে।
+  const isRegional = /\.firebasedatabase\.app$/i.test(new URL(base).hostname);
+  let res;
+  if (isRegional) {
+    res = await fetch(base + '/.settings/rules.json', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + fbAccessToken
+      },
+      body: rtdbJsonText
+    });
+  } else {
+    res = await fetch(base + '/.settings/rules.json?access_token=' + encodeURIComponent(fbAccessToken), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: rtdbJsonText
+    });
+  }
   if (!res.ok) {
     const t = await res.text();
     throw new Error('RTDB rules deploy ব্যর্থ: ' + t);
