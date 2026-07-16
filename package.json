@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node tests/logic-tests.mjs && node tests/schema-tests.mjs",
+    "lint": "eslint src/**/*.{js,jsx}",
+    "typecheck": "tsc --noEmit -p jsconfig.json",
+    "test": "node tests/logic-tests.mjs && node tests/schema-tests.mjs && node tests/integration-tests.mjs",
     "test:coverage": "c8 --reporter=text --reporter=html --include=src/logic.js -- node tests/logic-tests.mjs",
     "test:fuzz": "node tests/logic-fuzz.mjs",
     "test:mutation": "stryker run",
@@ -36,12 +38,18 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
-    "c8": "^10.1.2",
     "@capacitor/cli": "^6.2.0",
+    "@eslint/js": "^9.39.5",
     "@stryker-mutator/core": "^8.6.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "c8": "^10.1.2",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.26",
     "fast-check": "^3.21.0",
+    "globals": "^15.15.0",
     "husky": "^9.1.5",
+    "typescript": "^5.9.3",
     "vite": "^5.4.2"
   }
 }
