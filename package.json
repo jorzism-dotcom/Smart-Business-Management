@@ -9,10 +9,13 @@
     "preview": "vite preview",
     "lint": "eslint src/**/*.{js,jsx}",
     "typecheck": "tsc --noEmit -p jsconfig.json",
-    "test": "node tests/logic-tests.mjs && node tests/schema-tests.mjs && node tests/integration-tests.mjs && node tests/sync-tests.mjs",
+    "test": "node tests/logic-tests.mjs && node tests/schema-tests.mjs && node tests/integration-tests.mjs && node tests/sync-tests.mjs && node scripts/check-rules-sync.mjs",
     "test:coverage": "c8 --reporter=text --reporter=html --include=src/logic.js -- node tests/logic-tests.mjs",
     "test:fuzz": "node tests/logic-fuzz.mjs",
     "test:mutation": "stryker run",
+    "test:rules-sync": "node scripts/check-rules-sync.mjs",
+    "test:rules": "firebase emulators:exec --only firestore \"node tests/rules-tests.mjs\" --project demo-sbm-test",
+    "emulators": "firebase emulators:start --only firestore,database --project demo-sbm-test",
     "prepare": "husky"
   },
   "dependencies": {
@@ -40,6 +43,7 @@
   "devDependencies": {
     "@capacitor/cli": "^6.2.0",
     "@eslint/js": "^9.39.5",
+    "@firebase/rules-unit-testing": "^5.0.1",
     "@stryker-mutator/core": "^8.6.0",
     "@vitejs/plugin-react": "^4.3.1",
     "c8": "^10.1.2",
@@ -47,6 +51,7 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.26",
     "fast-check": "^3.21.0",
+    "firebase-tools": "^15.24.0",
     "globals": "^15.15.0",
     "husky": "^9.1.5",
     "typescript": "^5.9.3",

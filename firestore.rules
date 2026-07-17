@@ -1,0 +1,139 @@
+rules_version = '2';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SBM (Smart Business Manager) — প্রতিটা দোকানের নিজস্ব Firebase project-এ বসবে
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ⚠️ গুরুত্বপূর্ণ প্রেক্ষাপট (এই rules লেখার আগে জানা দরকার):
+// এই অ্যাপ Firebase Auth ব্যবহার করে না — PIN/login সম্পূর্ণ client-side (local),
+// Firebase নিজে কোনো ইউজার identity verify করে না। তাই `request.auth` দিয়ে
+// "কে" read/write করতে পারবে সেটা নিয়ন্ত্রণ করা এই architecture-এ সম্ভব না।
+//
+// এই rules তাই দুটো নির্দিষ্ট কাজ করে (যেটা সম্ভব, বাস্তবসম্মত):
+//   ১. Schema/shape validation — ভুল টাইপ বা অসম্ভব ভ্যালু (যেমন ঋণাত্মক balance,
+//      অসংজ্ঞায়িত status) ডাটাবেজ পর্যন্ত পৌঁছাতেই পারবে না, client-code-এ নতুন
+//      bug এলেও এটা শেষ প্রতিরক্ষা স্তর হিসেবে কাজ করবে।
+//   ২. read/write আগের মতোই খোলা থাকছে (`if true`) — বর্তমান আচরণ বদলাচ্ছি না,
+//      শুধু "কী লেখা যাবে" তার উপর কড়াকড়ি বসাচ্ছি।
+//
+// প্রকৃত "কে" নিয়ন্ত্রণ (কেউ APK reverse-engineer করে ভুয়া ক্লায়েন্ট দিয়ে লিখতে
+// না পারে) — সেটার জন্য Firebase App Check (আলাদাভাবে সেটআপ করা প্রয়োজন,
+// client-code-এ ইতিমধ্যে integration যোগ করা হয়েছে, দেখুন App Check নোট নিচে)।
+//
+// ── এই ফাইল কীভাবে বসাবেন ──
+// প্রতিটা দোকানের Firebase Console → Firestore Database → Rules ট্যাব → এই
+// পুরো কন্টেন্ট paste করে "Publish" চাপুন। ৫০০টা প্রজেক্টে ম্যানুয়ালি একই কাজ,
+// Firebase Management API script দিয়ে automate করা সম্ভব (আলাদা কাজ)।
+// ═══════════════════════════════════════════════════════════════════════════
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── সাধারণ helper ──
+    function isNum(v)      { return v is int || v is float; }
+    function isNonNegNum(v){ return isNum(v) && v >= 0; }
+    function isStr(v)      { return v is string; }
+
+    // ── customers ── balance/loyaltyPoints ঋণাত্মক হতে পারবে না
+    match /customers/{id} {
+      allow read: if true;
+      allow create, update: if
+        (!("balance" in request.resource.data) || isNonNegNum(request.resource.data.balance)) &&
+        (!("loyaltyPoints" in request.resource.data) || isNonNegNum(request.resource.data.loyaltyPoints)) &&
+        (!("name" in request.resource.data) || isStr(request.resource.data.name));
+      allow delete: if true;
+    }
+
+    // ── products ── stock ঋণাত্মক হতে পারবে না, price/costPrice সংখ্যা হতে হবে
+    match /products/{id} {
+      allow read: if true;
+      allow create, update: if
+        (!("stock" in request.resource.data) || isNonNegNum(request.resource.data.stock)) &&
+        (!("price" in request.resource.data) || isNonNegNum(request.resource.data.price)) &&
+        (!("costPrice" in request.resource.data) || isNonNegNum(request.resource.data.costPrice));
+      allow delete: if true;
+    }
+
+    // ── invoices ── total/status অবশ্যই সঠিক shape-এ, status শুধু নির্দিষ্ট মান
+    match /invoices/{id} {
+      allow read: if true;
+      allow create, update: if
+        (!("total" in request.resource.data) || isNonNegNum(request.resource.data.total)) &&
+        (!("status" in request.resource.data) ||
+          request.resource.data.status in ["active", "voided"]) &&
+        (!("payType" in request.resource.data) ||
+          request.resource.data.payType in ["cash", "baki", "partial", "walkin", "selfuse"]);
+      allow delete: if true;
+    }
+
+    // ── txns ── amount ঋণাত্মক না, type সীমিত মানের মধ্যে
+    match /txns/{id} {
+      allow read: if true;
+      allow create, update: if
+        (!("amount" in request.resource.data) || isNonNegNum(request.resource.data.amount)) &&
+        (!("type" in request.resource.data) ||
+          request.resource.data.type in ["baki", "joma"]);
+      allow delete: if true;
+    }
+
+    // ── purchaseOrders / stockMovements / cashLogs / paymentInvoices ──
+    // এখনো সাধারণ shape validation (amount/qty ঋণাত্মক না) — বিস্তারিত rule পরে বাড়ানো যায়
+    match /purchaseOrders/{id} {
+      allow read: if true;
+      allow create, update: if !("totalAmount" in request.resource.data) || isNonNegNum(request.resource.data.totalAmount);
+      allow delete: if true;
+    }
+    match /stockMovements/{id} {
+      allow read: if true;
+      allow create, update: if !("qty" in request.resource.data) || isNum(request.resource.data.qty);
+      allow delete: if true;
+    }
+    match /cashLogs/{id} {
+      allow read: if true;
+      allow create, update: if !("amount" in request.resource.data) || isNonNegNum(request.resource.data.amount);
+      allow delete: if true;
+    }
+    match /paymentInvoices/{id} {
+      allow read: if true;
+      allow create, update: if !("amount" in request.resource.data) || isNonNegNum(request.resource.data.amount);
+      allow delete: if true;
+    }
+
+    // ── users (staff/admin permission) ── role সীমিত মানের মধ্যে
+    match /users/{id} {
+      allow read: if true;
+      allow create, update: if !("role" in request.resource.data) ||
+        request.resource.data.role in ["admin", "staff"];
+      allow delete: if true;
+    }
+
+    // ── meta (resetMarker, businessConfig) ── কোনো Auth সম্ভব না (client-side PIN),
+    // তাই বাকি সব collection-এর মতোই read/write খোলা রাখা হলো। শুধু
+    // businessConfig ডকুমেন্টের জন্য হালকা shape validation — businessType শুধু
+    // "pharmacy"/"veterinary" আর businessTypeLocked শুধু boolean হতে পারবে,
+    // ভুল টাইপ/মান ডাটাবেজ পর্যন্ত পৌঁছাতে পারবে না।
+    match /meta/{id} {
+      allow read: if true;
+      allow write: if id != "businessConfig" ||
+        ((!("businessType" in request.resource.data) ||
+          request.resource.data.businessType in ["pharmacy", "veterinary"]) &&
+         (!("businessTypeLocked" in request.resource.data) ||
+          request.resource.data.businessTypeLocked is bool));
+    }
+
+    // ── বাকি সব collection (suppliers, smsLog, expenses, returns, auditLogs, settings) ──
+    // এখনো নির্দিষ্ট schema rule লেখা হয়নি — খোলা থাকছে, ভবিষ্যতে বাড়ানো যায়
+    match /suppliers/{id}   { allow read, write: if true; }
+    match /smsLog/{id}      { allow read, write: if true; }
+    match /expenses/{id}    { allow read, write: if true; }
+    match /returns/{id}     { allow read, write: if true; }
+    match /auditLogs/{id}   { allow read, write: if true; }
+    match /settings/{id}    { allow read, write: if true; }
+
+    match /deletedCustomers/{id}  { allow read, write: if true; }
+    match /deletedProducts/{id}   { allow read, write: if true; }
+    match /quotations/{id}        { allow read, write: if true; }
+    match /supplierPayments/{id}  { allow read, write: if true; }
+    match /stats/{id}             { allow read, write: if true; }
+  }
+}
