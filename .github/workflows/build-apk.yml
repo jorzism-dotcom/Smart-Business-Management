@@ -6,8 +6,41 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ── ফেজ ০: Firestore Emulator + Security Rules টেস্ট ──────────────────────
+  # firestore.rules-এর বিরুদ্ধে আসল emulator চালিয়ে schema-validation টেস্ট
+  # করে (tests/rules-tests.mjs)। এটা build জবের আগে চলে এবং build এর উপর
+  # নির্ভরশীল (needs) — কেউ ভুল করে rules ঢিলা/ভাঙা করলে APK build-ই আটকে
+  # যাবে, ভুল rules নিয়ে release বেরোবে না।
+  firestore-rules:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java (JDK 17 — Firestore emulator-এর জন্য দরকার)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: 🔒 firestore.rules ↔ admin.html sync-check (drift থাকলে fail)
+        run: npm run test:rules-sync
+
+      - name: 🔥 Firestore Emulator rules টেস্ট (shape/schema validation)
+        run: npm run test:rules
+
   build:
     runs-on: ubuntu-latest
+    needs: firestore-rules
 
     steps:
       - name: Checkout code
