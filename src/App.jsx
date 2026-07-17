@@ -8,6 +8,13 @@ import {
   query, where, orderBy, limit, startAfter, increment, runTransaction,
   writeBatch, serverTimestamp,
 } from "firebase/firestore";
+// 🔐 Firebase Auth — ফেজ ১ (Anonymous Auth wiring, দেখুন FIREBASE_AUTH_ROADMAP.md)।
+// এখনো কোনো UI/PIN ফ্লো বদলায়নি, rules-ও এখনো auth.uid চেক করে না — শুধু
+// প্রতিটা ডিভাইসকে একটা স্থায়ী Firebase Auth identity (UID) দেওয়া হচ্ছে,
+// যাতে পরের ফেজে (users/{uid} মাইগ্রেশন + rules enforce) সেটার উপর বিল্ড
+// করা যায়। App Check-এর মতোই সম্পূর্ণ fallback-সহ — sign-in ব্যর্থ হলেও
+// অ্যাপ আগের মতোই (auth ছাড়া) কাজ করতে থাকবে।
+import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import { Virtuoso, VirtuosoGrid } from "react-virtuoso";
@@ -4825,8 +4832,48 @@ const FSS = {
   _cfg: null,
   _unsubs: {},
   _persistTried: false,
+  // 🔐 ফেজ ১ Anonymous Auth state — দেখুন FIREBASE_AUTH_ROADMAP.md
+  _auth: null,
+  _authUid: null,
+  _authInitTried: false,
 
   isReady() { return !!this._db; },
+
+  // ফেজ ১: এই শপের Firebase project-এ বর্তমান ডিভাইসের Auth UID (এখনো কোনো
+  // rules/permission এটার উপর নির্ভর করে না — শুধু availability দিলাম যাতে
+  // পরের ফেজে ব্যবহার করা যায়)। Auth এখনো resolve না হলে null।
+  getAuthUid() { return this._authUid; },
+
+  // 🔐 প্রতিটা ডিভাইসকে একটা স্থায়ী Anonymous Auth identity দেওয়ার চেষ্টা।
+  // ইচ্ছাকৃতভাবে fire-and-forget (await করা হয় না init()-এ) — App Check-এর
+  // মতোই, sign-in ব্যর্থ/ধীর হলেও Firestore read/write (যেগুলো এখনো auth
+  // ছাড়াই কাজ করে, rules অপরিবর্তিত) আটকে থাকবে না।
+  _ensureAnonAuth() {
+    if (!this._app) return;
+    try {
+      this._auth = getAuth(this._app);
+    } catch (e) {
+      return; // Auth init ব্যর্থ হলেও Firestore/App Check অংশ চলতে থাকুক
+    }
+    try {
+      onAuthStateChanged(this._auth, (user) => {
+        this._authUid = user ? user.uid : null;
+      });
+    } catch (e) { /* no-op — শুধু UID cache, ব্যর্থ হলে getAuthUid() null-ই থাকবে */ }
+    if (this._authInitTried) return;
+    this._authInitTried = true;
+    if (this._auth.currentUser) {
+      this._authUid = this._auth.currentUser.uid;
+      return;
+    }
+    signInAnonymously(this._auth).catch(() => {
+      // 🔴 ব্যর্থ হলে silent — নেটওয়ার্ক নেই, বা Firebase Console-এ Anonymous
+      // provider এখনো Enable করা হয়নি (per-shop ম্যানুয়াল ধাপ, ফেজ ৫-এ
+      // রোলআউট করার সময় admin.html-এর চেকলিস্টে যোগ করতে হবে)। এই ফেজে
+      // rules এটার উপর নির্ভর করে না, তাই ব্যর্থ হলেও অ্যাপ স্বাভাবিকভাবেই
+      // চলবে — শুধু getAuthUid() null থেকে যাবে।
+    });
+  },
 
   // (Re)initialise the Firestore app for a given shop config. Safe to call
   // repeatedly — if config unchanged, no-op; if changed, tears down first.
@@ -4882,6 +4929,8 @@ const FSS = {
         this._persistTried = true;
         try { enableIndexedDbPersistence(this._db).catch(() => {}); } catch {}
       }
+      // 🔐 ফেজ ১ Anonymous Auth — non-blocking, দেখুন FIREBASE_AUTH_ROADMAP.md
+      this._ensureAnonAuth();
       this._cfg = cfg;
       return true;
     } catch (e) {
@@ -4904,6 +4953,12 @@ const FSS = {
     // persistence নীরবে বন্ধ থেকে যেত — নেট ছাড়া কাজ করত না যতক্ষণ না অ্যাপ পুরো
     // রিস্টার্ট হয়। এখন প্রতিটা নতুন init()-এর জন্য আবার চেষ্টা হবে।
     this._persistTried = false;
+    // 🔐 ফেজ ১ Anonymous Auth state রিসেট — নতুন config দিয়ে init() হলে নতুন
+    // app instance-এর জন্য আবার sign-in চেষ্টা হওয়া উচিত (পুরনো UID অন্য
+    // project-এর, এখানে অচল)।
+    this._auth = null;
+    this._authUid = null;
+    this._authInitTried = false;
   },
 
   // একটা collection-এর সব ডকুমেন্ট রিয়েল-টাইমে শোনে — যেকোনো ফোনে কোনো রেকর্ড
