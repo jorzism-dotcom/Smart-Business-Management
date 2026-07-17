@@ -23,10 +23,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Setup Java (JDK 17 — Firestore emulator-এর জন্য দরকার)
+      - name: Setup Java (JDK 21 — firebase-tools-এর নতুন ভার্সন এখন Java 21+ চায়, JDK 17-এ emulator চলে না)
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
 
       - name: Install dependencies
