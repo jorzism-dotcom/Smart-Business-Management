@@ -25,9 +25,30 @@
 
 ## এন্ট্রি
 
+### ২০২৬-০৭-১৭ — CI-তে নতুন `firestore-rules` জব ফেইল করছিল (JDK 17 vs firebase-tools-এর Java 21+ চাহিদা)
+- উপসর্গ (Symptom): `.github/workflows/build-apk.yml`-এ নতুন যোগ করা
+  `firestore-rules` জব প্রতিবার ফেইল করছিল (`Add files via upload #283`,
+  `#282`), `npm run test:rules` ধাপে exit code 1, `build` জব `needs`-এর
+  কারণে সম্পূর্ণ skip হয়ে যাচ্ছিল।
+- মূল কারণ (Root cause): `firebase-tools`-এর বর্তমান ভার্সন Firestore
+  Emulator চালাতে JDK 21+ চায়, কিন্তু জব-এ Gradle-এর সাথে মিলিয়ে ভুলবশত
+  JDK 17 সেট করা হয়েছিল। এরর স্পষ্টই ছিল: "firebase-tools no longer
+  supports Java version before 21."
+- ফিক্স কোথায়: `.github/workflows/build-apk.yml` → `firestore-rules` জবের
+  "Setup Java" ধাপ, `java-version: '17'` → `'21'`। **শুধু এই জবেই বদলানো
+  হয়েছে** — `build` জবের Gradle Java 17 অপরিবর্তিত (আলাদা প্রয়োজন, ছোঁয়া
+  হয়নি)।
+- ব্লাস্ট রেডিয়াস: শুধু CI workflow ফাইল, প্রোডাকশন কোড/APK অপ্রভাবিত।
+- রিগ্রেশন টেস্ট যোগ হয়েছে কি: প্রযোজ্য না (CI কনফিগ বাগ, unit test দিয়ে
+  ধরার মতো না) — তবে এই sandbox-এ Java 21 কনফার্ম করে `firebase
+  emulators:exec` চালিয়ে দেখা হয়েছে যে Java-সংক্রান্ত এরর আর নেই (এমুলেটর
+  jar ডাউনলোডে আটকেছে, যেটা sandbox network policy-জনিত, GitHub Actions-এ
+  হবে না)।
+
 ### [পূরণ করুন] — #৮-এর এন্টারপ্রাইজ ধাপ: সিঙ্ক/ব্যাকআপ লজিক আলাদা করে টেস্টযোগ্য বানানো হলো (src/sync.js)
 - সমস্যা যা ছিল: সিঙ্ক/ব্যাকআপের পুরো লজিক (checksum, `pickBackupFields`,
   `diffBackupFields`, Master Sync-এর মাল্টি-ডিভাইস merge/conflict-resolution)
+
   App.jsx-এর ভেতরে React hooks/Firebase-এর সাথে জড়ানো ছিল — তাই
   `tests/logic-tests.mjs`, fuzz test, `@ts-check` কোনোটাই এগুলো ছুঁতে পারত না।
   এই এলাকায় এডিট করলে অন্য কোথাও ভাঙল কিনা ধরার কোনো অটোমেটেড উপায় ছিল না,
