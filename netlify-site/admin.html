@@ -623,7 +623,7 @@
           দোকানের Firebase-এ Rules/Indexes Deploy
         </h4>
         <p style="font-size:12px;color:var(--sub);line-height:1.7;margin-bottom:14px">
-          দোকানদারের নিজের Google account দিয়ে sign-in করিয়ে (তার সামনে বসে বা screen share করে), তার Firebase project-এ এক ক্লিকে Firestore Rules + Indexes বসিয়ে দিন। Realtime Database Rules Google-এর সীমাবদ্ধতার কারণে অটো-ডিপ্লয় হয় না — নিচে JSON কপি করে Console-এ একবার ম্যানুয়ালি বসাতে হবে। কোনো কিছু স্থায়ীভাবে সংরক্ষণ হয় না — session শেষে token নিজে থেকেই অকেজো হয়ে যায়।
+          দোকানদারের নিজের Google account দিয়ে sign-in করিয়ে (তার সামনে বসে বা screen share করে), তার Firebase project-এ এক ক্লিকে Firestore Database/Rules/Indexes বসিয়ে দিন। দোকানের ফোন নম্বর দিলে Deploy শেষে config নিজে থেকেই সেই দোকানের একাউন্টে সংরক্ষণ হয়ে যাবে (App.jsx প্রথম ওপেনে অটো-ডিটেক্ট করবে)। Realtime Database Rules Google-এর সীমাবদ্ধতার কারণে অটো-ডিপ্লয় হয় না — নিচে JSON কপি করে Console-এ একবার ম্যানুয়ালি বসাতে হবে। Google token কোথাও স্থায়ীভাবে সংরক্ষণ হয় না — session শেষে নিজে থেকেই অকেজো হয়ে যায়।
         </p>
 
         <div id="fbAuthBox">
@@ -639,6 +639,10 @@
           <div class="form-group">
             <label>Firebase Project ID *</label>
             <input id="fbProjectId" placeholder="যেমন: chiren-eff4c">
+          </div>
+          <div class="form-group">
+            <label>দোকানের ফোন নম্বর (কনফিগ সংরক্ষণের জন্য, ঐচ্ছিক)</label>
+            <input id="fbShopPhone" placeholder="যেমন: 01712345678">
           </div>
           <button class="btn-primary" style="margin-bottom:14px;background:linear-gradient(135deg,#0ea5e9,#0284c7)" onclick="fbFetchConfig()">
             🔍 Project থেকে Config খুঁজে বের করুন
@@ -1757,23 +1761,28 @@ function fbInitTab() {
   // যাতে প্রতিবার হাতে টাইপ করতে না হয় (কনফিগ অটো-ডিটেক্ট)।
   if (fbPendingProjectId) {
     document.getElementById('fbProjectId').value = fbPendingProjectId;
+    document.getElementById('fbShopPhone').value = fbPendingPhone || '';
     fbLog('দোকান থেকে Project ID অটো-ডিটেক্ট হয়েছে: ' + fbPendingProjectId + '। এখন Google account দিয়ে সংযুক্ত করুন।');
     fbPendingProjectId = null;
+    fbPendingPhone = null;
   }
 }
 
 // ── দোকানদার তালিকার একটা দোকান থেকে সরাসরি Firebase Deploy ট্যাবে
-// লাফ দিয়ে, তার সংরক্ষিত Project ID আগে থেকে বসিয়ে দেওয়া ──
+// লাফ দিয়ে, তার সংরক্ষিত Project ID ও ফোন নম্বর আগে থেকে বসিয়ে দেওয়া ──
 let fbPendingProjectId = null;
+let fbPendingPhone = null;
 window.jumpToFirebaseDeploy = function(phone) {
   const u = users.find(x => x.phone === phone);
   const projectId = u?.shopFirebaseConfig?.projectId;
   if (!projectId) { toast('এই দোকানের Firebase Project ID পাওয়া যায়নি।', 'err'); return; }
   fbPendingProjectId = projectId;
+  fbPendingPhone = phone;
   switchTab('fbdeploy');
   // fbWorkArea কানেক্ট করার আগে hidden থাকে, কিন্তু ইনপুট এলিমেন্ট DOM-এ আছে —
   // তাই এখনই মান বসিয়ে রাখা যায়, কানেক্ট করলেই দেখা যাবে।
   document.getElementById('fbProjectId').value = projectId;
+  document.getElementById('fbShopPhone').value = phone;
 };
 
 function fbWaitForGoogle(cb, tries) {
@@ -1926,24 +1935,32 @@ async function fbCreateFirestoreDb(projectId, locationId) {
 }
 
 // ── Firestore Rules deploy ──
-async function fbDeployFirestoreRules(projectId, rulesSource) {
+// dbConfirmedExists === true হলেই কেবল "আগে থেকে মিলে গেলে স্কিপ" শর্টকাট বিশ্বাস
+// করা হয়। কারণ: Firestore Rules API আসলে (default) database তৈরি হওয়ার অনেক আগেও
+// ruleset/release তৈরি করতে দেয় — এমন একটা পুরনো "এতিম" ruleset থেকে গিয়ে থাকতে
+// পারে যেটা আজকের আসল অবস্থার সাথে সম্পর্কহীন। Database ভালোভাবে নিশ্চিত না হলে
+// পুরনো ruleset-এর সাথে মিল পাওয়াকে বিশ্বাস না করে জোর করেই আসল rules আবার push
+// করা হয় — নাহলে dev/console থেকে সদ্য-তৈরি database ডিফল্ট deny-all rules নিয়ে
+// পড়ে থাকতে পারে অথচ log-এ "হালনাগাদ, স্কিপ" দেখাতে পারে (এটাই আসলে ঘটেছিল)।
+async function fbDeployFirestoreRules(projectId, rulesSource, dbConfirmedExists) {
   const releaseName = 'projects/' + projectId + '/releases/cloud.firestore';
 
-  // আগে চেক করা হয় বর্তমান deploy করা rules-এর সাথে নতুনটা হুবহু মিলে কিনা।
-  // মিললে নতুন ruleset তৈরি না করে স্কিপ করা হয় — প্রতিটা "Deploy" ক্লিকে অপরিবর্তিত
-  // rules আবার আপলোড করলে ৫০০+ দোকানে প্রজেক্ট-প্রতি ruleset কোটা অযথা খরচ হয়।
-  try {
-    const release = await fbApiFetch('https://firebaserules.googleapis.com/v1/' + releaseName);
-    if (release.rulesetName) {
-      const currentRuleset = await fbApiFetch('https://firebaserules.googleapis.com/v1/' + release.rulesetName);
-      const currentContent = currentRuleset?.source?.files?.[0]?.content || '';
-      if (currentContent.trim() === rulesSource.trim()) {
-        fbLog('Firestore Rules আগে থেকেই হালনাগাদ আছে — স্কিপ করা হয়েছে।', 'ok');
-        return;
+  if (dbConfirmedExists) {
+    try {
+      const release = await fbApiFetch('https://firebaserules.googleapis.com/v1/' + releaseName);
+      if (release.rulesetName) {
+        const currentRuleset = await fbApiFetch('https://firebaserules.googleapis.com/v1/' + release.rulesetName);
+        const currentContent = currentRuleset?.source?.files?.[0]?.content || '';
+        if (currentContent.trim() === rulesSource.trim()) {
+          fbLog('Firestore Rules আগে থেকেই হালনাগাদ আছে — স্কিপ করা হয়েছে।', 'ok');
+          return;
+        }
       }
+    } catch (e) {
+      // release/ruleset এখনো নেই — স্বাভাবিক, নিচে নতুন তৈরি হবে
     }
-  } catch (e) {
-    // release/ruleset এখনো নেই — স্বাভাবিক, নিচে নতুন তৈরি হবে
+  } else {
+    fbLog('Database এই মুহূর্তে নিশ্চিতভাবে যাচাই করা যায়নি — তাই স্কিপ না করে সরাসরি rules নতুন করে বসানো হচ্ছে (নিরাপত্তার জন্য)।', 'warn');
   }
 
   fbLog('Firestore Rules ruleset তৈরি হচ্ছে...');
@@ -2042,35 +2059,95 @@ window.copyRtdbRules = function() {
   });
 };
 
+// Google-এর "This API method requires billing to be enabled..." এররটা থেকে
+// সরাসরি ক্লিকযোগ্য লিংক বের করে একটা পরিষ্কার, নজরে-পড়ার-মতো মেসেজ দেখানো —
+// রাউ এরর টেক্সট পড়ার বদলে সরাসরি কী করতে হবে সেটা বোঝানো।
+function fbHandleBillingError(e) {
+  const msg = e.message || '';
+  if (!msg.toLowerCase().includes('requires billing')) return false;
+  const urlMatch = msg.match(/https:\/\/\S+/);
+  const link = urlMatch ? urlMatch[0].replace(/[.,]+$/, '') : '';
+  fbLog('❌ এই প্রজেক্টে Billing চালু নেই — Firestore Database তৈরি করা যাচ্ছে না।', 'err');
+  if (link) {
+    fbLog('👉 এখানে গিয়ে billing account যুক্ত করুন (ফ্রি টায়ারেই থাকা যায়, শুধু account যুক্ত করা লাগবে): ' + link, 'err');
+  }
+  fbLog('Billing যুক্ত করার পর আবার "🚀 Deploy করুন" চাপুন — তখন Database, Rules, Indexes সব নতুন করে ঠিকভাবে বসবে।', 'warn');
+  return true;
+}
+
+// ── Deploy সফল হওয়ার পর কনফিগ কেন্দ্রীয় subscriptions/{phone} ডকুমেন্টে
+// সংরক্ষণ করা — এটাই App.jsx first-open-এ অটো-ডিটেক্ট করে। এই তথ্য
+// admin.html-এর নিজস্ব (আগে থেকে sign-in করা) `db` ব্যবহার করে সেভ হয়,
+// দোকানদারের OAuth token দিয়ে না — কারণ central DB আলাদা project। ──
+async function fbSaveShopConfig(phone, projectId) {
+  if (!phone) {
+    fbLog('ফোন নম্বর দেওয়া হয়নি — কনফিগ কোনো দোকানের সাথে সংরক্ষণ করা হলো না। প্রয়োজনে "দোকানের ফোন নম্বর" ফিল্ডে বসিয়ে আবার Deploy করুন।', 'warn');
+    return;
+  }
+  const apiKey      = document.getElementById('fbc-apikey').textContent;
+  const databaseURL = document.getElementById('fbc-dburl').textContent;
+  const pid          = document.getElementById('fbc-pid').textContent || projectId;
+  if (!apiKey || apiKey === '—') {
+    fbLog('Config এখনো আনা হয়নি ("🔍 Project থেকে Config খুঁজে বের করুন" চাপুন) — তাই সংরক্ষণ স্কিপ হলো।', 'warn');
+    return;
+  }
+  try {
+    const shopFirebaseConfig = { apiKey, databaseURL: databaseURL === '—' ? '' : databaseURL, projectId: pid };
+    await setDoc(doc(db, 'subscriptions', phone), {
+      shopFirebaseConfig,
+      firebaseDeployedAt: new Date().toISOString()
+    }, { merge: true });
+    fbLog('✅ Config দোকানের একাউন্টে (' + phone + ') সংরক্ষণ হয়েছে — এখন App.jsx অটো-ডিটেক্ট করবে।', 'ok');
+    await loadUsers();
+  } catch (e) {
+    fbLog('Config সংরক্ষণ ব্যর্থ: ' + e.message, 'err');
+  }
+}
+
 async function fbRunDeploySteps(projectId) {
   const rulesText   = document.getElementById('fbRulesText').value;
   const indexesText = document.getElementById('fbIndexesText').value;
 
   fbLog('Deploy শুরু হচ্ছে — Project: ' + projectId);
 
+  // dbConfirmedExists: এই run-এ Database সত্যিই আছে বলে নিশ্চিত হওয়া গেছে কিনা —
+  // চেক সফল হলে বা create সফল হলে true, নাহলে false (rules-স্কিপ শর্টকাট ও
+  // indexes ধাপে এটার উপর ভিত্তি করেই সিদ্ধান্ত নেওয়া হয়)।
+  let dbConfirmedExists = false;
   try {
-    const exists = await fbCheckFirestoreDbExists(projectId);
-    if (!exists) {
+    dbConfirmedExists = await fbCheckFirestoreDbExists(projectId);
+    if (!dbConfirmedExists) {
       fbLog('Firestore Database পাওয়া যায়নি — নতুন তৈরি করা হচ্ছে...', 'warn');
       await fbCreateFirestoreDb(projectId, 'asia-southeast1');
+      dbConfirmedExists = true;
     }
   } catch (e) {
-    fbLog('Firestore Database চেক/তৈরি ব্যর্থ: ' + e.message, 'err');
+    if (!fbHandleBillingError(e)) {
+      fbLog('Firestore Database চেক/তৈরি ব্যর্থ: ' + e.message, 'err');
+    }
+    dbConfirmedExists = false;
   }
 
   try {
-    await fbWithRetry(() => fbDeployFirestoreRules(projectId, rulesText), 'Firestore Rules deploy', 3, 8000);
+    await fbWithRetry(() => fbDeployFirestoreRules(projectId, rulesText, dbConfirmedExists), 'Firestore Rules deploy', 3, 8000);
   } catch (e) {
     fbLog('Firestore Rules deploy ব্যর্থ: ' + e.message, 'err');
   }
 
-  try {
-    await fbWithRetry(() => fbDeployIndexes(projectId, indexesText), 'Indexes deploy', 3, 8000);
-  } catch (e) {
-    fbLog('Indexes deploy ব্যর্থ: ' + e.message, 'err');
+  if (!dbConfirmedExists) {
+    fbLog('Database এখনো তৈরি হয়নি বলে Indexes deploy আপাতত বাদ দেওয়া হলো — উপরের billing সমস্যা ঠিক করে আবার Deploy চাপুন।', 'warn');
+  } else {
+    try {
+      await fbWithRetry(() => fbDeployIndexes(projectId, indexesText), 'Indexes deploy', 3, 8000);
+    } catch (e) {
+      fbLog('Indexes deploy ব্যর্থ: ' + e.message, 'err');
+    }
   }
 
   fbLog('সম্পন্ন। RTDB Rules এখনো বাকি থাকলে উপরের কপি-বক্স থেকে JSON কপি করে Console-এ ম্যানুয়ালি বসান।', 'ok');
+
+  const shopPhone = document.getElementById('fbShopPhone').value.trim();
+  await fbSaveShopConfig(shopPhone, projectId);
 }
 
 window.fbDeployAll = async function() {
@@ -2079,6 +2156,14 @@ window.fbDeployAll = async function() {
   if (!fbAccessToken) { fbLog('আগে Google account দিয়ে সংযুক্ত করুন।', 'err'); return; }
 
   document.getElementById('fbLog').innerHTML = '';
+
+  // Config এখনো আনা না হলে (fbc-apikey ফাঁকা), আগে সেটা এক ধাপে নিজে থেকেই
+  // এনে নেওয়া হয় — যাতে শেষে config-save ধাপ কাজ করার জন্য আলাদা করে
+  // "🔍 Project থেকে Config খুঁজে বের করুন" চাপা মনে রাখতে না হয়।
+  if (document.getElementById('fbc-apikey').textContent === '—') {
+    await window.fbFetchConfig();
+  }
+
   await fbRunDeploySteps(projectId);
 };
 
