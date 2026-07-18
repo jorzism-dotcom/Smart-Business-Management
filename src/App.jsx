@@ -500,6 +500,18 @@ const getKnownSuppliers = (products = [], purchaseOrders = []) => {
   return Array.from(set);
 };
 
+// ── আগে "নিজে লিখুন" দিয়ে কাস্টম টাইপ করা ধরন/প্রিফিক্স (products.dosageForm থেকে) বের করা ──
+// DOSAGE_FORM_CHIPS-এ চিপ হিসেবে দিলে কাস্টম প্রিফিক্স "অটো-সেভ" হয়ে পরের বার চিপ-লিস্টে দেখা যাবে,
+// প্রতিবার নতুন করে টাইপ করতে হবে না। getKnownSuppliers-এর একই প্যাটার্ন।
+const getKnownCustomDosageForms = (products = []) => {
+  const set = new Set();
+  (products || []).forEach(p => {
+    const df = (p.dosageForm || "").trim();
+    if (df && !DOSAGE_FORM_CHIPS.includes(df)) set.add(df);
+  });
+  return Array.from(set);
+};
+
 // computeSupplierDueMap — এখন src/logic.js থেকে import করা।
 
 // ─── SearchBar — reusable smart search input component ───────────────────────
@@ -15321,6 +15333,7 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
     // Walk-in বাকি/আংশিক বাকি হলে — পুরোনো কাস্টমার সিলেক্ট করা থাকলে তার balance আপডেট, নাহলে নতুন কাস্টমার তৈরি
     const invId = uid(); // invoice id আগেই তৈরি করি — txn-এ invoiceId লিংক করতে
     let walkInCustId = null;
+    let walkInBalTxPromise = null;
     if (walkInHasBaki && walkInBakiAmt > 0) {
       if (walkInCustMode === "existing" && walkInExistingId) {
         walkInCustId = walkInExistingId;
@@ -15333,10 +15346,15 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
         // দুই ডিভাইস প্রায় একই সময়ে এই একই কাস্টমারকে বাকি দিলে (এখান থেকে বা
         // অন্য কোনো বাকি এন্ট্রি থেকে) একটা delta হারিয়ে যেতে পারত। এখন একই
         // atomic + getState() fallback প্যাটার্ন প্রয়োগ করা হলো।
-        const txBal = await FSS.transactionUpdateBalance(walkInExistingId, (serverBal) => serverBal + walkInBakiAmt);
-        const latestLocalBal = useAppStore.getState().customers.find(c => c.id === walkInExistingId)?.balance ?? 0;
-        const newWalkInBal = txBal !== null ? txBal : (latestLocalBal + walkInBakiAmt);
-        setCustomers(prev => prev.map(c => c.id === walkInExistingId ? { ...c, balance: newWalkInBal } : c));
+        // 🔴 ফিক্স (ইনভয়েস তৈরিতে দেরি — root cause #২, নিচের needsBalanceTx-এর
+        // একই প্যাটার্ন): আগে এই transaction এখানেই সরাসরি await হতো — অর্থাৎ
+        // নিচের স্টক-ডিডাকশন transaction(s) শুরু হওয়ারও আগে একটা সম্পূর্ণ
+        // নেটওয়ার্ক রাউন্ড-ট্রিপ যোগ হতো (walk-in পুরোনো কাস্টমার + বাকি/আংশিক
+        // ফ্লো-তে)। এখন শুধু promise শুরু করা হচ্ছে — স্টক ডিডাকশনের প্যারালালেই
+        // চলবে, ফলাফল নিচে (স্টক ডিডাকশনের পরপরই) await হয়।
+        walkInBalTxPromise = FSS.isReady()
+          ? FSS.transactionUpdateBalance(walkInExistingId, (serverBal) => serverBal + walkInBakiAmt)
+          : Promise.resolve(null);
       } else {
         const newCust = {
           id: uid(),
@@ -15349,8 +15367,8 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
         };
         setCustomers(prev => [...prev, newCust]);
         walkInCustId = newCust.id;
+        addTxn(walkInCustId, "baki", walkInBakiAmt, walkInBakiAmt, invId, `Walk-in বাকি`);
       }
-      addTxn(walkInCustId, "baki", walkInBakiAmt, walkInBakiAmt, invId, `Walk-in বাকি`);
     }
 
     const selfUseCost = isSelfUse ? items.reduce((s, it) => {
@@ -15385,16 +15403,6 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
       selfUseCost,
     };
     setInvoices(prev => [inv, ...prev]);
-
-    // ── 🔴 Invoice push fix — আগে invoice শুধু local array-তে থাকত, Firestore-এ
-    // কখনো সরাসরি push হতো না (শুধু windowed listener ছিল, যেটা read-only)।
-    // ফলে অফলাইনে/staff-এ তৈরি invoice কখনো cloud-এ পৌঁছাতো না, অথচ
-    // FSS.updateStats() (নিচে) ঠিকই sync হতো — Dashboard total আর invoice list
-    // মিলত না ("হিসাবে গরমিল")। এখন invoice (loyalty fields সহ, পূর্ণাঙ্গ অবস্থায়)
-    // তৈরি হওয়ার সাথে সাথেই সরাসরি Firestore-এ লেখা হচ্ছে (offline হলে Firestore
-    // নিজের persistent write queue-তে রাখবে, নেট ফিরলে নিজে থেকেই sync হবে) —
-    // Master Sync/Settings-এ যাওয়ার দরকার নেই, staff device-এও এখন কাজ করবে।
-    if (FSS.isReady()) pushDurable("invoices", inv.id, withTs(inv));
 
     // ── Phase 1.3: Stats doc update — invoice save-এ running total বাড়াও ──────
     // Dashboard totals (todayTotal, todayProfit) এখন এই doc থেকে পড়তে পারবে।
@@ -15470,6 +15478,19 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
       const upd = stockUpdateMap.get(p.id);
       return upd ? { ...p, stock: upd.stock, batches: upd.batches } : p;
     }));
+
+    // walk-in পুরোনো কাস্টমার বাকি — উপরে প্যারালালে শুরু হওয়া balance transaction-এর
+    // ফলাফল এখানে (স্টক ডিডাকশন শেষ হওয়ার পরপরই) resolve করা হচ্ছে।
+    // 🔴 পাশাপাশি: balanceAfter আগে ভুলভাবে walkInBakiAmt (শুধু বৃদ্ধির অংশ) সেভ
+    // হতো, পুরোনো কাস্টমারের ক্ষেত্রে যেটা আসল balanceAfter নয় — এখন সঠিক newWalkInBal সেভ হচ্ছে।
+    if (walkInBalTxPromise) {
+      const txBal = await walkInBalTxPromise;
+      const latestLocalBal = useAppStore.getState().customers.find(c => c.id === walkInExistingId)?.balance ?? 0;
+      const newWalkInBal = txBal !== null ? txBal : (latestLocalBal + walkInBakiAmt);
+      setCustomers(prev => prev.map(c => c.id === walkInExistingId ? { ...c, balance: newWalkInBal } : c));
+      addTxn(walkInCustId, "baki", walkInBakiAmt, newWalkInBal, invId, `Walk-in বাকি`);
+    }
+
     // ইনভয়েস items-এ batchNo যোগ করো (ট্রেসেবিলিটি)
     inv.items = (inv.items || items).map(i => {
       const soldBatch = soldBatchMap[i.productId];
@@ -15488,6 +15509,16 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
           : (i.costPrice ?? 0),
       };
     });
+
+    // ── 🔴 ফিক্স (রুট কজ — ভয়েড করা ইনভয়েসে এক্সপায়ারি ডেট না থাকা): আগে এই
+    // push উপরে (items-এ batchNo/expiryDate বসার আগেই) হতো, ফলে Firestore-এ
+    // যে ইনভয়েস সেভ হতো তার items-এ কোনো expiryDate থাকত না। পরে সেই ইনভয়েস
+    // (অন্য ডিভাইসে ফেচ হওয়া বা resync হওয়া কপি) ভয়েড করলে voidInvoice()
+    // soldItem.expiryDate খুঁজে পেত না, তাই ফেরত আসা ব্যাচে expiry ফাঁকা থেকে
+    // যেত। এখন items পূর্ণ enrichment (batchNo + expiryDate + costPrice) শেষ
+    // হওয়ার পরই push হচ্ছে — offline হলে Firestore নিজের persistent write
+    // queue-তে রাখবে, নেট ফিরলে নিজে থেকেই sync হবে।
+    if (FSS.isReady()) pushDurable("invoices", inv.id, withTs(inv));
 
     if (!isWalkIn && !isSelfUse && (effectivePayType === "baki" || effectivePayType === "partial")) {
       // Overpayment: paid > total → অতিরিক্ত অংশ কাস্টমারের আগের বাকি থেকে বাদ যাবে (জমা)
@@ -22401,6 +22432,8 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
 
   // আগে ম্যানুয়ালি লেখা সাপ্লায়ারের নাম — SupplierPicker-এ সাজেশন হিসেবে দেওয়ার জন্য ("অটো-সেভ")
   const knownSuppliers = useMemo(() => getKnownSuppliers(products, purchaseOrders), [products, purchaseOrders]);
+  // 🆕 আগে "নিজে লিখুন" দিয়ে টাইপ করা কাস্টম ধরন/প্রিফিক্স — চিপ-লিস্টে সাজেশন হিসেবে দেওয়ার জন্য ("অটো-সেভ")
+  const knownCustomDosageForms = useMemo(() => getKnownCustomDosageForms(products), [products]);
 
 
   const filteredAll = useMemo(() => {
@@ -23292,6 +23325,16 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                               </button>
                             );
                           })}
+                          {/* 🆕 আগে "নিজে লিখুন" দিয়ে টাইপ করা কাস্টম প্রিফিক্স — অটো-সেভড চিপ হিসেবে */}
+                          {knownCustomDosageForms.map(dfOpt => {
+                            const ta = medTypeAbbr(dfOpt);
+                            return (
+                              <button key={dfOpt} type="button" onClick={() => setPeNewProduct(v => ({ ...v, dosageForm: dfOpt }))}
+                                style={{ background:`${ta.color}1a`, border:`1px dashed ${ta.color}55`, color:ta.color, borderRadius:8, padding:"4px 9px", fontSize:11, fontWeight:800, cursor:"pointer", fontFamily:"inherit" }}>
+                                {dfOpt}
+                              </button>
+                            );
+                          })}
                           {/* 🆕 কাস্টম প্রিফিক্স — Powder-এর পাশে */}
                           <button type="button" onClick={() => setPeNewProduct(v => ({ ...v, dosageFormCustomOpen: true }))}
                             style={{ background:"#94a3b81a", border:"1px dashed #94a3b877", color:"#94a3b8", borderRadius:8, padding:"4px 9px", fontSize:11, fontWeight:800, cursor:"pointer", fontFamily:"inherit" }}>
@@ -23991,6 +24034,16 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                         <button key={dfOpt} type="button" onClick={() => setForm(f => ({ ...f, dosageForm: dfOpt }))}
                           style={{ background:`${ta.color}1a`, border:`1px solid ${ta.color}55`, color:ta.color, borderRadius:8, padding:"4px 9px", fontSize:11, fontWeight:800, cursor:"pointer", fontFamily:"inherit" }}>
                           {ta.abbr}
+                        </button>
+                      );
+                    })}
+                    {/* 🆕 আগে "নিজে লিখুন" দিয়ে টাইপ করা কাস্টম প্রিফিক্স — অটো-সেভড চিপ হিসেবে */}
+                    {knownCustomDosageForms.map(dfOpt => {
+                      const ta = medTypeAbbr(dfOpt);
+                      return (
+                        <button key={dfOpt} type="button" onClick={() => setForm(f => ({ ...f, dosageForm: dfOpt }))}
+                          style={{ background:`${ta.color}1a`, border:`1px dashed ${ta.color}55`, color:ta.color, borderRadius:8, padding:"4px 9px", fontSize:11, fontWeight:800, cursor:"pointer", fontFamily:"inherit" }}>
+                          {dfOpt}
                         </button>
                       );
                     })}
