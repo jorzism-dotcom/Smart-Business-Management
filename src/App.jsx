@@ -12415,9 +12415,15 @@ function SmartBusinessMgmt() {
         checksum,
         contentHash,
         counts,
+        // 🆕 Multi-Business RestoreGuard: এই ব্যাকআপ কোন business active থাকা অবস্থায়
+        // নেওয়া হয়েছিল তা ট্যাগ করা থাকে, যাতে restore-এর সময় ভুল business-এ
+        // ভুল ব্যাকআপ প্রয়োগ হওয়া আটকানো যায় (দেখুন validateBackup)। single-business
+        // শপে (enabledBusinessTypes.length <= 1) এই ট্যাগ থাকলেও কোনো প্রভাব নেই।
+        businessType,
+        enabledBusinessTypes,
       },
     };
-  }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers, firebaseEnabled]);
+  }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers, firebaseEnabled, businessType, enabledBusinessTypes]);
 
   // ── GoogleDriveSection/LocalStorageSection (ম্যানুয়াল Settings প্যানেল)-এ
   // `data`/`setters` prop হিসেবে যা যায় — আগে এই দুই জায়গাতেই আলাদা করে ১৮টা
@@ -12428,8 +12434,12 @@ function SmartBusinessMgmt() {
     const stateMap = { customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers };
     const out = {};
     BACKUP_FIELDS.forEach(f => { out[f] = stateMap[f]; });
+    // 🆕 Multi-Business RestoreGuard: buildBackupData-এর মতোই businessType ট্যাগ,
+    // যাতে GoogleDriveSection/LocalStorageSection-এর ম্যানুয়াল ব্যাকআপ ফাইলেও
+    // validateBackup() মিসম্যাচ ধরতে পারে।
+    out._meta = { businessType, enabledBusinessTypes };
     return out;
-  }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers]);
+  }, [customers, products, invoices, txns, smsLog, paymentInvoices, purchaseOrders, stockMovements, users, cashLogs, suppliers, expenses, returns, auditLogs, quotations, supplierPayments, deletedProducts, deletedCustomers, businessType, enabledBusinessTypes]);
   const manualBackupSetters = useMemo(() => {
     const setterMap = { customers: setCustomers, products: setProducts, invoices: setInvoices, txns: setTxns, smsLog: setSmsLog, paymentInvoices: setPaymentInvoices, purchaseOrders: setPurchaseOrders, stockMovements: setStockMovements, users: setUsers, cashLogs: setCashLogs, suppliers: setSuppliers, expenses: setExpenses, returns: setReturns, auditLogs: setAuditLogs, quotations: setQuotations, supplierPayments: setSupplierPayments, deletedProducts: setDeletedProducts, deletedCustomers: setDeletedCustomers };
     const out = {};
@@ -28438,31 +28448,6 @@ function Settings_({ T, S, shopName,
  setShopName, businessType = "pharmacy", setBusinessType, businessTypeLocked = false, setBusinessTypeLocked, users, setUsers, currentUser, setCurrentUser, showToast, customers, setCustomers, products, setProducts, invoices, setInvoices, txns, setTxns, smsLog, setSmsLog, sendSMS, darkMode, setDarkMode, activeTheme, setActiveTheme, fontSize, setFontSize, deletedCustomers, setDeletedCustomers, deletedProducts = [], setDeletedProducts, smsGateway, setSmsGateway, btConnected, btDevice, onConnectBluetooth, onDisconnectBluetooth, paymentInvoices, setPaymentInvoices, purchaseOrders = [], setPurchaseOrders, stockMovements = [], setStockMovements, lastAutoBackup, lastLocalBackup, driveStatus, backupNeeded, backupFailStreak, lastBackupError, restoreTestAt, restoreTestOk, restoreTestDetail, restoreTestFailStreak, onRunRestoreTest, performDriveBackup, buildBackupData, buildManualBackupData, manualBackupSetters, setBackupNeeded, performMasterSync, masterSyncStatus, masterSyncDetail, lastMasterSync, autoMasterSyncEnabled, setAutoMasterSyncEnabled, googleDriveToken, setGoogleDriveToken, anthropicKey, setAnthropicKey, smsTemplates, setSmsTemplates, autoBackupEnabled, setAutoBackupEnabled, firebaseConfig, setFirebaseConfig, firebaseEnabled, setFirebaseEnabled, setAuthSession, devContact, setDevContact, masterResetHash, setMasterResetHash, activeDevices = [], setActiveDevices, recoveryPhone, setRecoveryPhone, recoveryPinHash, setRecoveryPinHash, cashLogs = [], setCashLogs, suppliers = [], setSuppliers, expenses = [], setExpenses, returns = [], setReturns, quotations = [], setQuotations, supplierPayments = [], setSupplierPayments, auditLogs = [], setAuditLogs, hasPerm, fssReady = false, pendingConflicts = [] }) {
   const [editName,    setEditName]    = useState(false);
   const [nameInput,   setNameInput]   = useState(shopName);
-  // 🔧 DEV-ONLY: "ব্যবসার ধরন" হেডিং-এ ৭ বার দ্রুত ট্যাপ করলে (৩ সেকেন্ডের মধ্যে) হিডেন
-  // আনলক বাটন দেখাবে — টেস্টিং-এর সময় দুই মোডই যাচাই করার জন্য (Android-এর "Developer
-  // Options" আনলক করার প্যাটার্নেই)। সাধারণ ইউজার ভুলেও এভাবে ৭ বার ট্যাপ করবেন না।
-  const [devTapCount, setDevTapCount] = useState(0);
-  const [showDevUnlock, setShowDevUnlock] = useState(false);
-  const devTapTimerRef = useRef(null);
-  const handleDevTap = useCallback(() => {
-    setDevTapCount(prev => {
-      const next = prev + 1;
-      if (devTapTimerRef.current) clearTimeout(devTapTimerRef.current);
-      if (next >= 7) {
-        setShowDevUnlock(true);
-        devTapTimerRef.current = null;
-        return 0;
-      }
-      devTapTimerRef.current = setTimeout(() => setDevTapCount(0), 3000);
-      return next;
-    });
-  }, []);
-  const handleDevUnlockBusinessType = useCallback(async () => {
-    setBusinessTypeLocked?.(false);
-    if (FSS.isReady()) { try { await FSS.setBusinessConfig(businessType, false); } catch {} }
-    setShowDevUnlock(false);
-    showToast("🔧 DEV: ব্যবসার ধরন আনলক করা হলো — লোকাল ও Firestore দুই জায়গাতেই", "#f59e0b");
-  }, [businessType, setBusinessTypeLocked, showToast]);
   const [showRecoveryExpanded, setShowRecoveryExpanded] = useState(false);
   const [showGateway, setShowGateway] = useState(false);
   const [showKey, setShowKey] = useState(false);             // 🔴 ফিক্স: আগে Claude AI কার্ডের IIFE-এর ভেতরে declare করা ছিল
@@ -29184,6 +29169,10 @@ function Settings_({ T, S, shopName,
     reader.onload = (ev) => {
       try {
         const data = JSON.parse(ev.target.result);
+        // 🆕 Multi-Business RestoreGuard: multi-business শপে ভুল business-এর ফাইল
+        // ইম্পোর্ট করলে বর্তমান সক্রিয় business-এর ডেটা দূষিত হতে পারে, তাই ব্লক
+        const guard = validateBackup(data, businessType, enabledBusinessTypes);
+        if (guard.businessTypeMismatch) { showToast(guard.msg, "#ef4444"); return; }
         const setters = { setCustomers, setProducts, setInvoices, setTxns, setSmsLog, setPaymentInvoices, setPurchaseOrders, setStockMovements, setUsers, setCashLogs, setSuppliers, setExpenses, setReturns, setAuditLogs, setQuotations, setSupplierPayments, setDeletedProducts, setDeletedCustomers };
         applyBackupFields(data, setters);
         showToast("ডেটা ইম্পোর্ট সফল হয়েছে");
@@ -29593,65 +29582,6 @@ function Settings_({ T, S, shopName,
               <IcCheck /> Save
             </button>
           </div>
-        )}
-      </div>
-
-      {/* ① Business Type — ফার্মেসি / ভেটেরিনারি — owner/admin এডিট করতে পারে, staff শুধু read-only ব্যাজ দেখে */}
-      <div className="qc-gradient-card" style={{ ...S.card }}>
-        <div onClick={handleDevTap} style={{ color: T.text, fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", gap: 8, marginBottom: 10, userSelect: "none" }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0ea5e9" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-          ব্যবসার ধরন
-        </div>
-        {showDevUnlock && (
-          <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px", borderRadius:8, border:"1.5px dashed #f59e0b", background:"#f59e0b15", marginBottom:10 }}>
-            <span style={{ fontSize:12, color:"#f59e0b", fontWeight:700, flex:1 }}>🔧 DEV: টেস্টিং-এর জন্য লক খুলে দেবো?</span>
-            <button onClick={handleDevUnlockBusinessType} style={{ padding:"6px 10px", borderRadius:6, border:"none", background:"#f59e0b", color:"#000", fontWeight:800, fontSize:11, cursor:"pointer" }}>আনলক করুন</button>
-            <button onClick={() => setShowDevUnlock(false)} style={{ padding:"6px 10px", borderRadius:6, border:`1px solid ${T.border}`, background:"transparent", color:T.sub, fontWeight:700, fontSize:11, cursor:"pointer" }}>বাতিল</button>
-          </div>
-        )}
-        {(currentUser?.role === "staff" || businessTypeLocked) ? (
-          // 🆕 ধাপ ৩: read-only ব্যাজ — Business type নির্ধারণ এখন admin.html-নিয়ন্ত্রিত
-          // (প্ল্যান ৫.১)। স্টাফের ফোনে সবসময়, আর owner/admin-এর ফোনেও একবার লক হয়ে
-          // গেলে (বর্তমানে প্রায় সব শপ) শুধু তথ্য দেখাবে, ট্যাপ করে বদলানো যাবে না।
-          <div style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 12px", borderRadius:10, border:`1.5px solid ${businessType === "veterinary" ? "#16a34a44" : "#0ea5e944"}`, background: businessType === "veterinary" ? "#16a34a12" : "#0ea5e912" }}>
-            <span style={{ fontSize:18 }}>{businessType === "veterinary" ? "🐄" : "💊"}</span>
-            <div>
-              <div style={{ color: businessType === "veterinary" ? "#16a34a" : "#0ea5e9", fontWeight:800, fontSize:13 }}>
-                {businessType === "veterinary" ? "ভেটেরিনারি মোড" : "ফার্মেসি মোড"}
-              </div>
-              <div style={{ color:T.sub, fontSize:10.5, marginTop:1 }}>
-                {currentUser?.role === "staff"
-                  ? "🔒 শুধু মালিক/এডমিন এই সেটিং পরিবর্তন করতে পারবেন"
-                  : "🔒 লক করা আছে — পরিবর্তনের প্রয়োজন হলে সাপোর্টে যোগাযোগ করুন"}
-              </div>
-            </div>
-          </div>
-        ) : (
-        <>
-        <div style={{ display:"flex", gap:10, opacity: businessTypeLocked ? 0.6 : 1 }}>
-          <label style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, flex:1, padding:"11px 10px", borderRadius:10, border:`1.5px solid ${businessType === "pharmacy" ? "#0ea5e9" : T.border}`, background: businessType === "pharmacy" ? "#0ea5e915" : "transparent", cursor: businessTypeLocked ? "not-allowed" : "pointer" }}>
-            <input type="checkbox" disabled={businessTypeLocked} checked={businessType === "pharmacy"}
-              onChange={() => { if (businessTypeLocked) return; setBusinessType?.("pharmacy"); setBusinessTypeLocked?.(true); if (FSS.isReady()) FSS.setBusinessConfig("pharmacy", true); showToast("ফার্মেসি মোড নির্বাচন করা হলো — এখন থেকে এটা লক থাকবে"); }}
-              style={{ width:16, height:16, accentColor:"#0ea5e9", cursor: businessTypeLocked ? "not-allowed" : "pointer" }} />
-            <span style={{ color: businessType === "pharmacy" ? "#0ea5e9" : T.sub, fontWeight:700, fontSize:13 }}>💊 ফার্মেসি</span>
-          </label>
-          <label style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, flex:1, padding:"11px 10px", borderRadius:10, border:`1.5px solid ${businessType === "veterinary" ? "#16a34a" : T.border}`, background: businessType === "veterinary" ? "#16a34a15" : "transparent", cursor: businessTypeLocked ? "not-allowed" : "pointer" }}>
-            <input type="checkbox" disabled={businessTypeLocked} checked={businessType === "veterinary"}
-              onChange={() => { if (businessTypeLocked) return; setBusinessType?.("veterinary"); setBusinessTypeLocked?.(true); if (FSS.isReady()) FSS.setBusinessConfig("veterinary", true); showToast("ভেটেরিনারি মোড নির্বাচন করা হলো — এখন থেকে এটা লক থাকবে"); }}
-              style={{ width:16, height:16, accentColor:"#16a34a", cursor: businessTypeLocked ? "not-allowed" : "pointer" }} />
-            <span style={{ color: businessType === "veterinary" ? "#16a34a" : T.sub, fontWeight:700, fontSize:13 }}>🐄 ভেটেরিনারি</span>
-          </label>
-        </div>
-        {businessTypeLocked ? (
-          <div style={{ color:"#f59e0b", fontSize:11, marginTop:8, lineHeight:1.5, fontWeight:700, display:"flex", alignItems:"center", gap:6 }}>
-            🔒 ব্যবসার ধরন একবার সিলেক্ট করার পর আর পরিবর্তন করা যায় না — দুই মোডের পণ্য/সাজেশন ডেটা যেন কখনো একসাথে মিশে না যায় তাই এই সুরক্ষা।
-          </div>
-        ) : (
-          <div style={{ color:T.sub, fontSize:11, marginTop:8, lineHeight:1.5 }}>
-            এই সিলেকশন অনুযায়ী পণ্যের নাম-সাজেশন ডেটাসেট বদলে যাবে। ভেটেরিনারি মোডে আপনি যত পণ্য/সাপ্লায়ার যোগ করবেন, অ্যাপ নিজে থেকেই সেগুলো মনে রেখে ভবিষ্যতে সাজেশনে দেখাবে। ⚠️ একবার সিলেক্ট করলে পরে আর বদলানো যাবে না।
-          </div>
-        )}
-        </>
         )}
       </div>
 
@@ -30917,6 +30847,7 @@ function Settings_({ T, S, shopName,
             setters={manualBackupSetters}
             showToast={showToast} T={T} S={S}
             googleDriveToken={googleDriveToken}
+            currentBusinessType={businessType} currentEnabledTypes={enabledBusinessTypes}
           />
           <button style={{ ...S.cancelBtn, width:"100%", marginTop:10, color:"#4285F4", border:"1px solid #4285F433" }}
             onClick={() => { setShowGdExpanded(false); setGdUnlocked(false); }}>
@@ -30940,6 +30871,7 @@ function Settings_({ T, S, shopName,
             data={buildManualBackupData()}
             setters={manualBackupSetters}
             showToast={showToast} T={T} S={S}
+            currentBusinessType={businessType} currentEnabledTypes={enabledBusinessTypes}
           />
           <button style={{ ...S.cancelBtn, width:"100%", marginTop:10, color:"#22c55e", border:"1px solid #22c55e33" }}
             onClick={() => { setShowLdExpanded(false); setLdUnlocked(false); }}>
@@ -31544,7 +31476,7 @@ function PinResetSettings({ T, S, devContact, setDevContact, masterResetHash, se
 // Firebase Google Sign-in → access token → Drive API
 // কাস্টমার নিজের Firebase config দেয় → তার Google account দিয়ে login করে
 // → নিজের Drive-এ backup যায় — সম্পূর্ণ private
-function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken }) {
+function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken, currentBusinessType, currentEnabledTypes }) {
   const [clientId, setClientId] = useState(() => localStorage.getItem("sbm_gd_client_id") || "");
   const [connected, setConnected] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -31690,6 +31622,7 @@ function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken }
       }
       await GDrive.uploadBackup(token, {
         ...pickBackupFields(data),
+        _meta: data._meta, // 🆕 businessType ট্যাগ সংরক্ষণ (RestoreGuard, pickBackupFields এটা বাদ দেয়)
         _savedAt: new Date().toISOString(), _version: "5.0",
       });
       const now = new Date().toISOString();
@@ -31720,7 +31653,7 @@ function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken }
         }
         // #৫ রিট্রাই + ব্যাকঅফ
         const d = await withRetry(() => GDrive.downloadBackup(token), { retries: 2 });
-        const valid = validateBackup(d);
+        const valid = validateBackup(d, currentBusinessType, currentEnabledTypes);
         if (!valid.ok) {
           setStatus("error"); setStatusMsg(`ব্যাকআপ যাচাই ব্যর্থ: ${valid.msg}`);
           setPreviewLoading(false); return;
@@ -31742,7 +31675,7 @@ function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken }
         const token = await getUsableToken({ allowInteractive: true });
         return withRetry(() => GDrive.downloadBackup(token), { retries: 2 });
       })();
-      const valid = validateBackup(d);
+      const valid = validateBackup(d, currentBusinessType, currentEnabledTypes);
       if (!valid.ok) {
         setStatus("error"); setStatusMsg(`ব্যাকআপ যাচাই ব্যর্থ: ${valid.msg}`);
         setRestoring(false); return;
@@ -32182,7 +32115,7 @@ function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken }
 }
 
 // ─── Local Storage / File Section ─────────────────────────────────────────────
-function LocalStorageSection({ data, setters, showToast, T, S }) {
+function LocalStorageSection({ data, setters, showToast, T, S, currentBusinessType, currentEnabledTypes }) {
   const [expanded, setExpanded] = useState(false);
   const [autoEnabled, setAutoEnabled] = useState(() => LocalBackup.isAutoEnabled());
   const [schedule, setSchedule] = useState(() => LocalBackup.getSchedule());
@@ -32301,7 +32234,7 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
 
   const handleSaveSnapshot = async () => {
     setSaving(true);
-    const result = await LocalBackup.save(pickBackupFields(data));
+    const result = await LocalBackup.save({ ...pickBackupFields(data), _meta: data._meta });
     if (result.ok) {
       const now = new Date().toISOString();
       setLastSync(now);
@@ -32336,6 +32269,7 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
   const handleDownloadFile = async () => {
     const backupData = {
       ...pickBackupFields(data),
+      _meta: data._meta, // 🆕 businessType ট্যাগ সংরক্ষণ (RestoreGuard)
       _exportedAt: new Date().toISOString(), _version: "5.0",
     };
     if (encryptEnabled) {
@@ -32382,7 +32316,7 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
       try {
         const snap = await withRetry(() => LocalBackup.load(), { retries: 2 }); // #৫
         if (!snap) { setStatus("error"); setStatusMsg("কোনো স্ন্যাপশট পাওয়া যায়নি"); setPreviewLoading(false); return; }
-        const valid = validateBackup(snap);
+        const valid = validateBackup(snap, currentBusinessType, currentEnabledTypes);
         if (!valid.ok) { setStatus("error"); setStatusMsg("স্ন্যাপশট যাচাই ব্যর্থ: " + valid.msg); setPreviewLoading(false); return; }
         setSnapPreview({ snap, valid, diff: diffBackupFields(data, snap) });
         setConfirmRestore(true);
@@ -32427,7 +32361,7 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
       }
 
       // Validation
-      const valid = validateBackup(d);
+      const valid = validateBackup(d, currentBusinessType, currentEnabledTypes);
       if (!valid.ok) throw new Error(valid.msg);
       // #১১ সরাসরি প্রয়োগ না করে আগে dry-run প্রিভিউ দেখাও — ভুল/পুরনো ফাইল
       // বেছে নিলে ইউজার প্রয়োগের আগেই বুঝতে পারবেন
@@ -32460,7 +32394,7 @@ function LocalStorageSection({ data, setters, showToast, T, S }) {
     if (!pinInput) { showToast("PIN দিন", "#ef4444"); return; }
     try {
       const decrypted = await decryptBackupData(pendingRestoreData, pinInput);
-      const valid = validateBackup(decrypted);
+      const valid = validateBackup(decrypted, currentBusinessType, currentEnabledTypes);
       if (!valid.ok) throw new Error(valid.msg);
       applyRestoredData(decrypted, valid);
       showToast("🔓 এনক্রিপ্টেড ব্যাকআপ রিস্টোর সম্পন্ন!");
@@ -33298,8 +33232,24 @@ function contentIssueSuffix(valid) {
   if (valid?.contentIssues?.length) parts.push(`${valid.contentIssues.length}টি ফিল্ডে কনটেন্ট-মিসম্যাচ সন্দেহ`);
   return parts.length ? ` ⚠️ ${parts.join(", ")}` : "";
 }
-function validateBackup(data) {
+// 🆕 Multi-Business RestoreGuard: currentBusinessType/currentEnabledTypes ঐচ্ছিক —
+// না দিলে (পুরনো সব কলসাইট, single-business শপ) আচরণ অপরিবর্তিত। শুধু সত্যিকারের
+// multi-business শপে (currentEnabledTypes.length > 1) এবং ব্যাকআপে businessType
+// ট্যাগ থাকলে, বর্তমান সক্রিয় business-এর সাথে না মিললে ব্লক করে — যাতে ভুল
+// business-এর ব্যাকআপ প্রয়োগ করে বর্তমান সক্রিয় business-এর ডেটা দূষিত না হয়।
+function validateBackup(data, currentBusinessType, currentEnabledTypes) {
   if (!data || typeof data !== "object") return { ok: false, msg: "ব্যাকআপ ডেটা পাওয়া যায়নি" };
+  if (Array.isArray(currentEnabledTypes) && currentEnabledTypes.length > 1 &&
+      data._meta?.businessType && currentBusinessType &&
+      data._meta.businessType !== currentBusinessType) {
+    const fromLabel = BUSINESS_TYPE_REGISTRY[data._meta.businessType]?.label || data._meta.businessType;
+    const toLabel = BUSINESS_TYPE_REGISTRY[currentBusinessType]?.label || currentBusinessType;
+    return {
+      ok: false,
+      msg: `এই ব্যাকআপটি "${fromLabel}" বিজনেসের জন্য তৈরি, কিন্তু বর্তমানে "${toLabel}" সক্রিয় আছে — ভুল বিজনেসে ডেটা মিশে যাওয়া ঠেকাতে রিস্টোর বন্ধ রাখা হলো। প্রথমে সঠিক বিজনেসে সুইচ করে আবার চেষ্টা করুন।`,
+      businessTypeMismatch: true,
+    };
+  }
   // এনক্রিপ্টেড ফাইল হলে আলাদাভাবে জানাও — এটা PIN দিয়ে আগে decrypt করতে হবে
   if (isEncryptedBackup(data)) {
     return { ok: false, msg: "এনক্রিপ্টেড ব্যাকআপ — PIN দিয়ে আনলক করুন", isEncrypted: true };
