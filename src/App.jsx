@@ -8226,6 +8226,40 @@ function medDatasetLabel(entry) {
   return p ? `${n} ${p}` : n;
 }
 
+// ─── medTypeAbbr — ওষুধের ধরন (Tablet/Capsule/Syrup ইত্যাদি, medicineDataset.json-এর
+// ৪র্থ কলাম, MedEx থেকে সংগৃহীত) থেকে ছোট সংক্ষিপ্ত রূপ + রঙ বের করে — নামের শুরুতে
+// প্রিফিক্স ব্যাজ হিসেবে দেখানোর জন্য (Tab/Cap/Syp ইত্যাদি, ধরনভেদে আলাদা রঙ)
+function medTypeAbbr(type) {
+  if (!type) return null;
+  const t = String(type).toLowerCase();
+  if (t.includes("tablet")) return { abbr: "Tab", color: "#38bdf8" };
+  if (t.includes("capsule")) return { abbr: "Cap", color: "#a78bfa" };
+  if (t.includes("syrup")) return { abbr: "Syp", color: "#f472b6" };
+  if (t.includes("suspension")) return { abbr: "Susp", color: "#f472b6" };
+  if (t.includes("elixir")) return { abbr: "Elixir", color: "#f472b6" };
+  if (t.includes("injection") || t.includes("infusion")) return { abbr: "Inj", color: "#ef4444" };
+  if (t.includes("cream")) return { abbr: "Cream", color: "#f59e0b" };
+  if (t.includes("ointment")) return { abbr: "Oint", color: "#f59e0b" };
+  if (t.includes("gel")) return { abbr: "Gel", color: "#f59e0b" };
+  if (t.includes("lotion")) return { abbr: "Lotion", color: "#f59e0b" };
+  if (t.includes("paste")) return { abbr: "Paste", color: "#f59e0b" };
+  if (t.includes("drop")) return { abbr: "Drop", color: "#22d3ee" };
+  if (t.includes("solution")) return { abbr: "Sol", color: "#22d3ee" };
+  if (t.includes("inhaler") || t.includes("inhalation")) return { abbr: "Inhaler", color: "#22c55e" };
+  if (t.includes("spray")) return { abbr: "Spray", color: "#22c55e" };
+  if (t.includes("nebuliser") || t.includes("nebulizer")) return { abbr: "Neb", color: "#22c55e" };
+  if (t.includes("suppository")) return { abbr: "Supp", color: "#eab308" };
+  if (t.includes("powder")) return { abbr: "Powder", color: "#94a3b8" };
+  if (t.includes("sachet")) return { abbr: "Sachet", color: "#94a3b8" };
+  if (t.includes("granules")) return { abbr: "Gran", color: "#94a3b8" };
+  if (t.includes("patch")) return { abbr: "Patch", color: "#94a3b8" };
+  if (t.includes("shampoo")) return { abbr: "Shampoo", color: "#f59e0b" };
+  if (t.includes("mouthwash")) return { abbr: "M/Wash", color: "#22d3ee" };
+  if (t.includes("emulsion")) return { abbr: "Emuls", color: "#f472b6" };
+  if (t.includes("bar")) return { abbr: "Bar", color: "#94a3b8" };
+  return { abbr: String(type).split(" ")[0].slice(0, 6), color: "#94a3b8" };
+}
+
 // ফার্মেসির জন্য প্রিসেট একক
 const PRESET_UNITS = [
   "", // একক নেই
@@ -22281,7 +22315,7 @@ function InvoiceReceiptPrint({ inv, customer, type }) {
 function Products({ T, S, products, setProducts, showToast, stockMovements = [], setStockMovements, purchaseOrders = [], setPurchaseOrders, deletedProducts = [], setDeletedProducts, initialTab, currentUser, hasPerm, shopName, businessType = "pharmacy", auditLog, anthropicKey }) {
   const [showAdd,      setShowAdd]      = useState(false);
   const [editId,       setEditId]       = useState(null);
-  const [form,         setForm]         = useState({ name: "", price: "", stock: "", minStockAlert: "5", category: "অন্যান্য", company: "", productType: "product", costPrice: "", spPrice: "", expiryDate: "", barcode: "", unit: "", isFreeStock: false, demandType: "common" });
+  const [form,         setForm]         = useState({ name: "", price: "", stock: "", minStockAlert: "5", category: "অন্যান্য", company: "", productType: "product", costPrice: "", spPrice: "", expiryDate: "", barcode: "", unit: "", isFreeStock: false, demandType: "common", dosageForm: "" });
   // ── #৪ মাল্টি-ব্যাচ এক্সপায়ারি — নতুন পণ্যে একই সাথে একাধিক আলাদা এক্সপায়ারির চালান যোগ করার জন্য ──
   // প্রাথমিক স্টক/মেয়াদ (form.stock/form.expiryDate) থাকে প্রথম ব্যাচ হিসেবে, extraBatches-এ বাকিগুলো
   const [extraBatches, setExtraBatches] = useState([]); // [{ id, qty, expiryDate }]
@@ -22458,7 +22492,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
   const pickNameSuggestion = (entry) => {
     const label = medDatasetLabel(entry);
     if (nameInputRef.current) nameInputRef.current.value = label;
-    setForm(f => ({ ...f, name: label, company: (f.company && f.company.trim()) ? f.company : entry[2] }));
+    setForm(f => ({ ...f, name: label, company: (f.company && f.company.trim()) ? f.company : entry[2], dosageForm: entry[3] || "" }));
     setFormErrors(er => ({ ...er, name: false, company: false }));
     setNameSuggestOpen(false);
   };
@@ -22677,7 +22711,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
       }
       showToast(batchRows.length > 1 ? `নতুন পণ্য যোগ হয়েছে (${batchRows.length}টি আলাদা ব্যাচে)` : "নতুন পণ্য যোগ হয়েছে");
     }
-    setForm({ name: "", price: "", stock: "", minStockAlert: "", category: "অন্যান্য", company: "", productType: form.productType || "product", costPrice: "", expiryDate: "", barcode: "", unit: "", isFreeStock: false, demandType: "common" });
+    setForm({ name: "", price: "", stock: "", minStockAlert: "", category: "অন্যান্য", company: "", productType: form.productType || "product", costPrice: "", expiryDate: "", barcode: "", unit: "", isFreeStock: false, demandType: "common", dosageForm: "" });
     setFormErrors({});
     setExtraBatches([]);
     setShowAdd(false);
@@ -23089,7 +23123,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                 return (
                   <div style={{ position:"relative", marginBottom: selProd ? 4 : (peFormErrors.productId ? 2 : 12) }}>
                     <input
-                      style={{ ...S.input, marginBottom:0, paddingRight:36, border: peFormErrors.productId ? "1.5px solid #ef4444" : S.input.border }}
+                      style={{ ...S.input, marginBottom:0, paddingRight:36, paddingLeft: (selProd && medTypeAbbr(selProd.dosageForm)) ? 54 : undefined, border: peFormErrors.productId ? "1.5px solid #ef4444" : S.input.border }}
                       placeholder=""
                       value={selProd ? `${selProd.name}${selProd.unit ? ` (${selProd.unit})` : ""}` : peForm.productSearch}
                       onFocus={() => { if (selProd) setPeForm(f => ({ ...f, productId:"", productSearch:"" })); setPeSearchOpen(true); }}
@@ -23097,6 +23131,9 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                       onBlur={() => setTimeout(() => setPeSearchOpen(false), 350)}
                       autoComplete="off"
                     />
+                    {selProd && (() => { const ta = medTypeAbbr(selProd.dosageForm); return ta ? (
+                      <span style={{ position:"absolute", left:10, top:"50%", transform:"translateY(-50%)", color: ta.color, fontWeight:900, fontSize:11, background:`${ta.color}1a`, border:`1px solid ${ta.color}44`, borderRadius:6, padding:"1px 6px", pointerEvents:"none" }}>{ta.abbr}</span>
+                    ) : null; })()}
                     {selProd && (
                       <button onClick={() => setPeForm(f => ({ ...f, productId:"", productSearch:"" }))}
                         style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:"#64748b", cursor:"pointer", fontSize:16, padding:4 }}>✕</button>
@@ -23122,7 +23159,10 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                           }}
                             style={{ padding:"10px 14px", cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"center", borderBottom:`1px solid ${T.border}` }}>
                             <div>
-                              <div style={{ color:T.text, fontWeight:700, fontSize:13 }}>{p.name}{p.unit ? <span style={{color:T.sub,fontSize:11}}> ({p.unit})</span> : null}</div>
+                              <div style={{ color:T.text, fontWeight:700, fontSize:13 }}>
+                                {(() => { const ta = medTypeAbbr(p.dosageForm); return ta ? <span style={{ color: ta.color, fontWeight: 900, marginRight: 5 }}>{ta.abbr}</span> : null; })()}
+                                {p.name}{p.unit ? <span style={{color:T.sub,fontSize:11}}> ({p.unit})</span> : null}
+                              </div>
                               <div style={{ color:T.sub, fontSize:11 }}>স্টক: {p.stock||0} · ক্রয়: ৳{p.costPrice||0}</div>
                             </div>
                             <div style={{ color:"#a78bfa", fontWeight:900, fontSize:12 }}>৳{p.price||0}</div>
@@ -23632,7 +23672,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
         {(currentUser?.role !== "staff" || currentUser?.canAddProduct) && <button style={{ flex: 1, ...S.addBtn, marginBottom: 0, height: 44, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: `linear-gradient(135deg,#16a34a,#22c55e)`, boxShadow: "0 4px 16px #22c55e44" }}
-          onClick={() => { setShowAdd(v => !v); setEditId(null); setCompanyCustom(false); setFormErrors({}); setExtraBatches([]); setForm({ name: "", price: "", stock: "", category: "অন্যান্য", company: "", productType: "product", costPrice: "", expiryDate: "", barcode: "", unit: "", isFreeStock: false, demandType: "common" }); }}>
+          onClick={() => { setShowAdd(v => !v); setEditId(null); setCompanyCustom(false); setFormErrors({}); setExtraBatches([]); setForm({ name: "", price: "", stock: "", category: "অন্যান্য", company: "", productType: "product", costPrice: "", expiryDate: "", barcode: "", unit: "", isFreeStock: false, demandType: "common", dosageForm: "" }); }}>
           <IcPlus /> <span style={{ fontSize: 12, fontWeight: 800 }}>নতুন পণ্য</span>
         </button>}
         <SearchBar
@@ -23815,17 +23855,31 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
             {/* ── #১ নাম অটো-সাজেশন ড্রপডাউন — নাম+পাওয়ার মিলিয়ে সাজেস্ট, সিলেক্ট করলে সাপ্লায়ার অটো-ফিল ── */}
             {nameSuggestOpen && !liveDupProduct && nameSuggestions.length > 0 && (
               <div style={{ position:"absolute", top:"100%", left:0, right:0, background:T.card, border:`1px solid ${T.border}`, borderRadius:12, zIndex:200, maxHeight:220, overflowY:"auto", boxShadow:"0 8px 24px rgba(0,0,0,0.4)", marginTop:4 }}>
-                {nameSuggestions.map((entry, i) => (
+                {nameSuggestions.map((entry, i) => {
+                  const ta = medTypeAbbr(entry[3]);
+                  return (
                   <div key={i} onMouseDown={() => pickNameSuggestion(entry)}
                     style={{ padding:"9px 14px", cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"center", borderBottom:`1px solid ${T.border}` }}>
                     <span style={{ color:T.text, fontWeight:700, fontSize:13 }}>
+                      {ta && <span style={{ color: ta.color, fontWeight:900, marginRight:5 }}>{ta.abbr}</span>}
                       <HighlightText text={medDatasetLabel(entry)} query={form.name} highlightColor="#22c55e" />
                     </span>
                     <span style={{ color:T.sub, fontSize:10 }}>{entry[2].replace(/ (Ltd\.|Limited|PLC)$/, "")}</span>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
+            {/* সিলেক্ট করার পর — ধরন (Tab/Cap/Syp ইত্যাদি) অটো প্রিভিউ, আলাদা রঙে */}
+            {!nameSuggestOpen && form.dosageForm && (() => {
+              const ta = medTypeAbbr(form.dosageForm);
+              return ta ? (
+                <div style={{ marginTop: 4, display:"flex", alignItems:"center", gap:5 }}>
+                  <span style={{ color: ta.color, fontWeight:900, fontSize:11, background:`${ta.color}1a`, border:`1px solid ${ta.color}44`, borderRadius:6, padding:"1px 7px" }}>{ta.abbr}</span>
+                  <span style={{ color:T.sub, fontSize:10.5 }}>{form.dosageForm}</span>
+                </div>
+              ) : null;
+            })()}
           </div>
           {/* 🔴 ফিক্স: টাইপ করার সাথে সাথেই ডুপ্লিকেট নাম নোটিফাই — ফর্ম সাবমিটের অপেক্ষা করে না */}
           {liveDupProduct && (
@@ -24003,7 +24057,10 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               <div style={{ flex: 1 }}>
                 {/* ── সারি ১: নাম + সার্ভিস ব্যাজ + কমন/আনকমন ব্যাজ ── */}
                 <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
-                  <span style={{ color: T.text, fontWeight: 700, fontSize: 14 }}>{p.name}{p.unit ? <span style={{ color: T.sub, fontWeight: 600, fontSize: 12, marginLeft: 4 }}>({p.unit})</span> : null}</span>
+                  <span style={{ color: T.text, fontWeight: 700, fontSize: 14 }}>
+                    {(() => { const ta = medTypeAbbr(p.dosageForm); return ta ? <span style={{ color: ta.color, fontWeight: 900, marginRight: 5 }}>{ta.abbr}</span> : null; })()}
+                    {p.name}{p.unit ? <span style={{ color: T.sub, fontWeight: 600, fontSize: 12, marginLeft: 4 }}>({p.unit})</span> : null}
+                  </span>
                   {p.productType === "service" && <span style={{ background:"#0ea5e922", color:"#38bdf8", fontSize:10, borderRadius:6, padding:"1px 7px", fontWeight:800, border:"1px solid #38bdf844", flexShrink:0 }}>🔧 সার্ভিস</span>}
                   {p.demandType === "uncommon"
                     ? <span style={{ background:"#a78bfa22", color:"#a78bfa", fontSize:10, borderRadius:6, padding:"1px 7px", fontWeight:800, border:"1px solid #a78bfa44", flexShrink:0 }}>আনকমন</span>
@@ -24067,7 +24124,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                   onClick={(e) => {
                     e.stopPropagation();
                     if (editId === p.id) { setEditId(null); setShowAdd(false); }
-                    else { setEditId(p.id); setForm({ name: p.name, price: String(p.price), stock: String(p.stock || 0), minStockAlert: String(p.minStockAlert || 5), category: p.category || "অন্যান্য", company: p.company || "", productType: (p.productType === "retail" ? "product" : p.productType) || "product", costPrice: String(p.costPrice || ""), spPrice: p.spPrice !== undefined && p.spPrice !== null ? String(p.spPrice) : "", expiryDate: p.expiryDate || "", barcode: p.barcode || "", unit: p.unit || "", demandType: p.demandType || "common" }); setExtraBatches([]); setShowAdd(false); setCompanyCustom(!!p.company && !BD_PHARMA_COMPANIES.includes(p.company)); }
+                    else { setEditId(p.id); setForm({ name: p.name, price: String(p.price), stock: String(p.stock || 0), minStockAlert: String(p.minStockAlert || 5), category: p.category || "অন্যান্য", company: p.company || "", productType: (p.productType === "retail" ? "product" : p.productType) || "product", costPrice: String(p.costPrice || ""), spPrice: p.spPrice !== undefined && p.spPrice !== null ? String(p.spPrice) : "", expiryDate: p.expiryDate || "", barcode: p.barcode || "", unit: p.unit || "", demandType: p.demandType || "common", dosageForm: p.dosageForm || "" }); setExtraBatches([]); setShowAdd(false); setCompanyCustom(!!p.company && !BD_PHARMA_COMPANIES.includes(p.company)); }
                   }}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
                 </button>}
