@@ -4379,10 +4379,17 @@ const DeltaSync = {
 //     ছড়িয়ে পড়লেও, এই আর্কাইভ থেকে মাস-ভিত্তিক পুরনো অবস্থা ফিরিয়ে আনা যাবে।
 const ArchiveDB = {
   DB_NAME: "hg_archive",
-  // v1→v2: নতুন "field_change_log" store যোগ হলো (#১৫)। existing dated_snapshots/
-  // worm_archive স্টোরে হাত দেওয়া হয়নি — onupgradeneeded শুধু নতুনটা যোগ করে,
-  // পুরনো ডিভাইসে থাকা v1 ডাটাবেসও নিরাপদে v2-তে আপগ্রেড হবে, ডেটা হারাবে না।
-  VERSION: 2,
+  // v2→v3: 🔴 ফিক্স (মাল্টি-বিজনেস কন্টামিনেশন): dated_snapshots/worm_archive
+  // আগে keyPath ছিল সরাসরি dateKey/monthKey — গ্লোবাল, বিজনেস-প্রিফিক্স ছাড়া।
+  // একাধিক বিজনেস-টাইপ চালু থাকা শপে একই তারিখে দুই বিজনেসের আর্কাইভ একে
+  // অপরকে ওভাররাইট করতে পারত, আর BackupArchivePanel থেকে ভুল বিজনেসের
+  // আর্কাইভ কোনো সতর্কতা ছাড়াই বর্তমান সক্রিয় বিজনেসে রিস্টোর হয়ে যেতে পারত।
+  // এখন keyPath বদলে "id" (কম্পোজিট prefix::dateKey বা prefix::monthKey) —
+  // dateKey/monthKey ফিল্ড হিসেবে অপরিবর্তিতই থাকে (display/age-calc-এ কোনো
+  // পরিবর্তন লাগে না), শুধু আসল প্রাইমারি-কী এখন বিজনেস-স্কোপড। পুরনো v2
+  // এন্ট্রি (prefix ছাড়া তৈরি) migrate হয়ে prefix:null (ডিফল্ট/একক-বিজনেস)
+  // হিসেবে নতুন ফরম্যাটে রূপান্তরিত হয় — কোনো ডেটা হারায় না।
+  VERSION: 3,
   _db: null,
   async open() {
     if (this._db) return this._db;
@@ -4390,15 +4397,46 @@ const ArchiveDB = {
       const req = indexedDB.open(this.DB_NAME, this.VERSION);
       req.onupgradeneeded = e => {
         const db = e.target.result;
+        const tx = e.target.transaction;
+        // ── dated_snapshots ──
         if (!db.objectStoreNames.contains("dated_snapshots")) {
-          db.createObjectStore("dated_snapshots", { keyPath: "dateKey" });
+          db.createObjectStore("dated_snapshots", { keyPath: "id" });
+        } else if (e.oldVersion < 3) {
+          // পুরনো store-এর keyPath ছিল "dateKey" — সব রেকর্ড পড়ে নতুন
+          // "id" keyPath দিয়ে রিক্রিয়েট করা হচ্ছে, prefix:null ট্যাগসহ।
+          const oldStore = tx.objectStore("dated_snapshots");
+          const getAllReq = oldStore.getAll();
+          getAllReq.onsuccess = () => {
+            const oldRecords = getAllReq.result || [];
+            db.deleteObjectStore("dated_snapshots");
+            const newStore = db.createObjectStore("dated_snapshots", { keyPath: "id" });
+            oldRecords.forEach(rec => {
+              const prefix = Object.prototype.hasOwnProperty.call(rec, "prefix") ? rec.prefix : null;
+              newStore.put({ ...rec, prefix, id: `${prefix || "_default"}::${rec.dateKey}` });
+            });
+          };
         }
+        // ── worm_archive ──
         if (!db.objectStoreNames.contains("worm_archive")) {
-          db.createObjectStore("worm_archive", { keyPath: "monthKey" });
+          db.createObjectStore("worm_archive", { keyPath: "id" });
+        } else if (e.oldVersion < 3) {
+          const oldStore = tx.objectStore("worm_archive");
+          const getAllReq = oldStore.getAll();
+          getAllReq.onsuccess = () => {
+            const oldRecords = getAllReq.result || [];
+            db.deleteObjectStore("worm_archive");
+            const newStore = db.createObjectStore("worm_archive", { keyPath: "id" });
+            oldRecords.forEach(rec => {
+              const prefix = Object.prototype.hasOwnProperty.call(rec, "prefix") ? rec.prefix : null;
+              newStore.put({ ...rec, prefix, id: `${prefix || "_default"}::${rec.monthKey}` });
+            });
+          };
         }
         // #১৫ ফিল্ড-লেভেল চেঞ্জ লগ — প্রতিটা এন্ট্রি একটা রেকর্ডের একটা ফিল্ডের
         // এক-একটা বদল (old→new), collection+recordId দিয়ে ইনডেক্স করা যাতে
         // "এই ইনভয়েসটার হিস্টোরি" জাতীয় কোয়েরি দ্রুত হয়, আর ts দিয়ে prune করা যায়।
+        // এই স্টোরের keyPath আগে থেকেই "id" (uid()-জেনারেটেড, গ্লোবালি ইউনিক),
+        // তাই migration লাগে না — শুধু _put()-এ prefix ট্যাগ যোগ হচ্ছে (নিচে)।
         if (!db.objectStoreNames.contains("field_change_log")) {
           const store = db.createObjectStore("field_change_log", { keyPath: "id" });
           store.createIndex("byRecord", ["collection", "recordId"], { unique: false });
@@ -4409,46 +4447,75 @@ const ArchiveDB = {
       req.onerror   = () => reject(req.error);
     });
   },
-  async _get(store, key) {
+  // dated_snapshots ও worm_archive-এর আসল প্রাইমারি-কী এখন "prefix::naturalKey"
+  // (naturalKey = dateKey বা monthKey)। field_change_log-এর কী আগে থেকেই
+  // uid()-জেনারেটেড গ্লোবালি-ইউনিক "id", তাই সেটার জন্য কম্পোজ করার দরকার নেই।
+  _DATE_KEYED_STORES: ["dated_snapshots", "worm_archive"],
+  _composeId(store, naturalKey) {
+    if (!this._DATE_KEYED_STORES.includes(store)) return naturalKey;
+    const prefix = FSS._businessPrefix || null;
+    return `${prefix || "_default"}::${naturalKey}`;
+  },
+  // naturalKey: dated_snapshots/worm_archive-এর জন্য plain dateKey/monthKey দিন
+  // (এই ফাংশনই বর্তমান সক্রিয় বিজনেস-প্রিফিক্স জুড়ে আসল কী বানিয়ে নেবে)।
+  async _get(store, naturalKey) {
     try {
       const db = await this.open();
+      const id = this._composeId(store, naturalKey);
       return await new Promise((resolve, reject) => {
         const tx = db.transaction(store, "readonly");
-        const req = tx.objectStore(store).get(key);
+        const req = tx.objectStore(store).get(id);
         req.onsuccess = () => resolve(req.result || null);
         req.onerror   = () => reject(req.error);
       });
     } catch { return null; }
   },
+  // 🔴 ফিক্স (মাল্টি-বিজনেস কন্টামিনেশন): ফলাফল শুধু বর্তমান সক্রিয় বিজনেসের
+  // এন্ট্রিতেই ফিল্টার করা হয় (prefix ফিল্ড না থাকলে পুরনো/একক-বিজনেস এন্ট্রি
+  // হিসেবে ধরে null-প্রিফিক্সের সাথে মেলানো হয় — ঠিক SyncOutbox-এর প্যাটার্নে)।
   async _getAll(store) {
     try {
       const db = await this.open();
-      return await new Promise((resolve, reject) => {
+      const all = await new Promise((resolve, reject) => {
         const tx = db.transaction(store, "readonly");
         const req = tx.objectStore(store).getAll();
         req.onsuccess = () => resolve(req.result || []);
         req.onerror   = () => reject(req.error);
       });
+      const currentPrefix = FSS._businessPrefix || null;
+      return all.filter(r => (Object.prototype.hasOwnProperty.call(r, "prefix") ? r.prefix : null) === currentPrefix);
     } catch { return []; }
   },
+  // val-এ dated_snapshots হলে dateKey, worm_archive হলে monthKey ফিল্ড থাকা
+  // আবশ্যক — সেখান থেকেই কম্পোজিট id ও prefix ট্যাগ বসানো হয়।
   async _put(store, val) {
     try {
       const db = await this.open();
+      const prefix = FSS._businessPrefix || null;
+      const naturalKey = store === "dated_snapshots" ? val.dateKey
+                        : store === "worm_archive"    ? val.monthKey
+                        : null;
+      const record = this._DATE_KEYED_STORES.includes(store)
+        ? { ...val, prefix, id: `${prefix || "_default"}::${naturalKey}` }
+        : { ...val, prefix }; // field_change_log — নিজস্ব id, শুধু prefix ট্যাগ যোগ
       await new Promise((resolve, reject) => {
         const tx = db.transaction(store, "readwrite");
-        tx.objectStore(store).put(val);
+        tx.objectStore(store).put(record);
         tx.oncomplete = resolve;
         tx.onerror    = () => reject(tx.error);
       });
       return true;
     } catch { return false; }
   },
-  async _delete(store, key) {
+  // naturalKey: dated_snapshots/worm_archive-এর জন্য plain dateKey/monthKey;
+  // field_change_log-এর জন্য সরাসরি e.id (আগের মতোই, কম্পোজ করা হয় না)।
+  async _delete(store, naturalKey) {
     try {
       const db = await this.open();
+      const id = this._composeId(store, naturalKey);
       await new Promise((resolve, reject) => {
         const tx = db.transaction(store, "readwrite");
-        tx.objectStore(store).delete(key);
+        tx.objectStore(store).delete(id);
         tx.oncomplete = resolve;
         tx.onerror    = () => reject(tx.error);
       });
@@ -33247,7 +33314,7 @@ function LocalStorageSection({ data, setters, showToast, T, S, currentBusinessTy
           )}
 
           {/* #৯/#১৬ — ভার্সনড রিটেনশন + WORM আর্কাইভ */}
-          <BackupArchivePanel data={data} setters={setters} showToast={showToast} GREEN={GREEN} />
+          <BackupArchivePanel data={data} setters={setters} showToast={showToast} GREEN={GREEN} currentBusinessType={currentBusinessType} currentEnabledTypes={currentEnabledTypes} />
 
           {/* #১৫ — ফিল্ড-লেভেল চেঞ্জ লগ */}
           <FieldChangeLogPanel showToast={showToast} GREEN={GREEN} />
@@ -33794,11 +33861,11 @@ function FieldChangeLogPanel({ showToast, GREEN }) {
 // প্রিভিউ (diffBackupFields, #১১-এর প্যাটার্ন পুনর্ব্যবহার) দেখিয়ে, কনফার্ম করলে
 // applyBackupFields দিয়ে প্রয়োগ করে। শুধু পড়া/রিস্টোর — কোনো ডিলিট বাটন নেই,
 // বিশেষত WORM এন্ট্রির জন্য কোনো ডিলিট পাথই এই স্ক্রিনে/অ্যাপে কোথাও নেই।
-function BackupArchivePanel({ data, setters, showToast, GREEN }) {
+function BackupArchivePanel({ data, setters, showToast, GREEN, currentBusinessType, currentEnabledTypes }) {
   const [stats, setStats] = useState(null);
   const [entries, setEntries] = useState([]); // মার্জড লিস্ট: { key, label, worm }
   const [selectedKey, setSelectedKey] = useState("");
-  const [preview, setPreview] = useState(null); // { snap, diff }
+  const [preview, setPreview] = useState(null); // { snap, diff, valid }
   const [confirmRestore, setConfirmRestore] = useState(false);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
@@ -33824,7 +33891,19 @@ function BackupArchivePanel({ data, setters, showToast, GREEN }) {
       const rawKey = selectedKey.slice(2);
       const snap = isWorm ? await WormArchive.loadByMonth(rawKey) : await RetentionDB.loadByDate(rawKey);
       if (!snap) { showToast("এই এন্ট্রি আর পাওয়া যায়নি", "#ef4444"); setLoading(false); return; }
-      setPreview({ snap, diff: diffBackupFields(data, snap) });
+      // 🔴 ফিক্স (মাল্টি-বিজনেস কন্টামিনেশন — ক্রিটিক্যাল): এতদিন এই পাথে
+      // কোনো validateBackup() কলই ছিল না — Snapshot/File restore-এর দুটো
+      // পাথেই businessType-mismatch গার্ড থাকলেও এই আর্কাইভ-রিস্টোর পাথে
+      // ছিল না, অথচ dated_snapshots/worm_archive-এর ডেটা একাধিক বিজনেস
+      // জুড়েই জমা হয়। এখন বাকি দুই পাথের মতোই ভ্যালিডেট করে, মিসম্যাচ হলে
+      // preview দেখানোর আগেই ব্লক করে দেয়।
+      const valid = validateBackup(snap, currentBusinessType, currentEnabledTypes);
+      if (!valid.ok) {
+        showToast("রিস্টোর বন্ধ রাখা হলো: " + (valid.msg || "যাচাই ব্যর্থ"), "#ef4444");
+        setLoading(false);
+        return;
+      }
+      setPreview({ snap, diff: diffBackupFields(data, snap), valid });
       setConfirmRestore(true);
     } catch (e) {
       showToast("প্রিভিউ ব্যর্থ: " + (e?.message || "অজানা"), "#ef4444");
@@ -33835,7 +33914,7 @@ function BackupArchivePanel({ data, setters, showToast, GREEN }) {
   const handleConfirmRestore = () => {
     if (!preview?.snap) return;
     applyBackupFields(preview.snap, setters);
-    showToast("♻️ আর্কাইভ থেকে রিস্টোর সম্পন্ন হয়েছে!");
+    showToast(`♻️ আর্কাইভ থেকে রিস্টোর সম্পন্ন হয়েছে!${contentIssueSuffix(preview.valid)}`);
     setConfirmRestore(false);
     setPreview(null);
     setSelectedKey("");
@@ -34495,7 +34574,16 @@ const GDrive = {
 const SnapshotDB = {
   DB_NAME: "hg_snapshots",
   STORE:   "snapshots",
-  MAX:     3, // rotating: snapshot_1, snapshot_2, snapshot_3
+  MAX:     3, // প্রতি বিজনেসের জন্য rotating ৩টা slot: snapshot_1, snapshot_2, snapshot_3
+  // v1→v2: 🔴 ফিক্স (মাল্টি-বিজনেস কন্টামিনেশন): v1-এ keyPath ছিল প্লেইন
+  // numeric "slot" (0/1/2) — যেকোনো বিজনেস সেভ করলেই একই ৩টা গ্লোবাল স্লট
+  // শেয়ার/ওভাররাইট করত, আর একাধিক বিজনেস থাকলে "সর্বশেষ স্ন্যাপশট" দেখানো/
+  // রিস্টোর করার সময় ভুল বিজনেসেরটা লোড হয়ে যেতে পারত (RestoreSelfTest/
+  // HealthMonitor-এর health status ভুল বিজনেসের হিসেবে দেখানোও এর ফল ছিল)।
+  // v2-এ keyPath কম্পোজিট "prefix:slotIndex" — প্রতিটা বিজনেসের নিজস্ব ৩টা
+  // স্লট। পুরনো v1 এন্ট্রি prefix:null (ডিফল্ট/একক-বিজনেস) হিসেবে migrate
+  // হয়ে নতুন ফরম্যাটে যোগ হয়, ডেটা হারায় না।
+  VERSION: 2,
 
   _db: null,
   _saveQueue: Promise.resolve(), // 🔴 ফিক্স: concurrent save() কল একই slot বেছে নিয়ে
@@ -34504,11 +34592,29 @@ const SnapshotDB = {
   async open() {
     if (this._db) return this._db;
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(this.DB_NAME, 1);
+      const req = indexedDB.open(this.DB_NAME, this.VERSION);
       req.onupgradeneeded = e => {
         const db = e.target.result;
+        const tx = e.target.transaction;
         if (!db.objectStoreNames.contains(this.STORE)) {
-          db.createObjectStore(this.STORE, { keyPath: "slot" });
+          db.createObjectStore(this.STORE, { keyPath: "key" });
+          return;
+        }
+        if (e.oldVersion < 2) {
+          // পুরনো store-এর keyPath ছিল numeric "slot" — সব রেকর্ড পড়ে নতুন
+          // "key" (কম্পোজিট prefix:slotIndex) keyPath দিয়ে রিক্রিয়েট করা হচ্ছে।
+          const oldStore = tx.objectStore(this.STORE);
+          const getAllReq = oldStore.getAll();
+          getAllReq.onsuccess = () => {
+            const oldRecords = getAllReq.result || [];
+            db.deleteObjectStore(this.STORE);
+            const newStore = db.createObjectStore(this.STORE, { keyPath: "key" });
+            oldRecords.forEach((rec, i) => {
+              const prefix  = Object.prototype.hasOwnProperty.call(rec, "prefix") ? rec.prefix : null;
+              const slotIdx = typeof rec.slot === "number" ? rec.slot : i;
+              newStore.put({ ...rec, prefix, slot: slotIdx, key: `${prefix || "_default"}:${slotIdx}` });
+            });
+          };
         }
       };
       req.onsuccess = e => { this._db = e.target.result; resolve(this._db); };
@@ -34526,25 +34632,28 @@ const SnapshotDB = {
   async _saveInternal(data) {
     try {
       const db = await this.open();
-      // কোন slot-এ রাখব — পুরনোটা replace করব
-      const all = await this.loadAll();
-      // slot index: 0→1→2→0 (round robin)
-      const nextSlot = all.length < this.MAX
-        ? all.length
+      const prefix = FSS._businessPrefix || null;
+      // কোন slot-এ রাখব — পুরনোটা replace করব (শুধু বর্তমান বিজনেসের স্লটগুলোর মধ্যে)
+      const mine = await this.loadAll();
+      // slot index: 0→1→2→0 (round robin, প্রতি বিজনেসের নিজস্ব ৩টা স্লট)
+      const nextSlot = mine.length < this.MAX
+        ? mine.length
         : (() => {
             // সবচেয়ে পুরনো slot খুঁজি
             let oldest = 0;
-            all.forEach((s, i) => {
-              if (new Date(s._savedAt) < new Date(all[oldest]._savedAt)) oldest = i;
+            mine.forEach((s, i) => {
+              if (new Date(s._savedAt) < new Date(mine[oldest]._savedAt)) oldest = i;
             });
-            return oldest;
+            return typeof mine[oldest].slot === "number" ? mine[oldest].slot : oldest;
           })();
 
       const snapshot = {
+        key: `${prefix || "_default"}:${nextSlot}`,
+        prefix,
         slot: nextSlot,
         ...data,
         _savedAt: new Date().toISOString(),
-        _version: "5.0",
+        _version: "6.0",
         _slot: nextSlot + 1,
       };
       await new Promise((resolve, reject) => {
@@ -34558,7 +34667,7 @@ const SnapshotDB = {
     } catch (e) {
       // IndexedDB ব্যর্থ হলে localStorage fallback
       try {
-        localStorage.setItem("sbm_local_backup", JSON.stringify({ ...data, _savedAt: new Date().toISOString(), _version: "5.0-ls" }));
+        localStorage.setItem("sbm_local_backup", JSON.stringify({ ...data, _savedAt: new Date().toISOString(), _version: "6.0-ls" }));
         localStorage.setItem("sbm_snap_last", new Date().toISOString());
         return { ok: true, slot: 1, fallback: true };
       } catch (e2) {
@@ -34569,15 +34678,23 @@ const SnapshotDB = {
     }
   },
 
+  // 🔴 ফিক্স (মাল্টি-বিজনেস কন্টামিনেশন): এখন শুধু বর্তমান সক্রিয় বিজনেসের
+  // স্ন্যাপশট রিটার্ন করে (prefix ফিল্ড না থাকলে পুরনো/একক-বিজনেস এন্ট্রি
+  // হিসেবে ধরে null-প্রিফিক্সের সাথে মেলানো হয়)। LocalStorageSection-এর
+  // "সর্বশেষ স্ন্যাপশট" প্রিভিউ, handleRestoreSnapshot, RestoreSelfTest,
+  // HealthMonitor — সবগুলোই এই একটা ফিক্স দিয়ে স্বয়ংক্রিয়ভাবে সঠিক বিজনেসের
+  // ডেটা দেখবে/রিস্টোর করবে, আলাদা করে কোথাও prefix পাস করার দরকার নেই।
   async loadAll() {
     try {
       const db = await this.open();
-      return new Promise((resolve, reject) => {
+      const all = await new Promise((resolve, reject) => {
         const tx  = db.transaction(this.STORE, "readonly");
         const req = tx.objectStore(this.STORE).getAll();
         req.onsuccess = () => resolve(req.result || []);
         req.onerror   = () => reject(req.error);
       });
+      const currentPrefix = FSS._businessPrefix || null;
+      return all.filter(s => (Object.prototype.hasOwnProperty.call(s, "prefix") ? s.prefix : null) === currentPrefix);
     } catch { return []; }
   },
 
@@ -34593,6 +34710,10 @@ const SnapshotDB = {
     } catch { return null; }
   },
 
+  // ⚠️ Master Reset (LocalBackup.deleteAll) থেকে কল হয় — ইচ্ছাকৃতভাবে সব
+  // বিজনেসের local স্ন্যাপশট মোছে (গ্লোবাল .clear()), prefix-filtered না।
+  // Master Reset স্বভাবতই সব বিজনেসের ডেটা মোছার জন্য (দেখুন FSS.clearAllData-এর
+  // allPrefixesToReset), তাই এখানে filtered রাখলে বরং অসামঞ্জস্যপূর্ণ হতো।
   async deleteAll() {
     try {
       const db = await this.open();
