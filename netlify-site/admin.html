@@ -655,9 +655,26 @@
         প্রবেশ করুন
       </button>
       <p id="loginErr" style="color:#f87171;font-size:12px;margin-top:12px;"></p>
+      <div id="sdkLoadError" style="display:none;margin-top:16px;padding:12px;border-radius:8px;background:rgba(248,113,113,0.12);border:1px solid rgba(248,113,113,0.4);">
+        <p style="color:#f87171;font-size:13px;margin:0 0 10px;">⚠️ নেটওয়ার্ক সমস্যার কারণে পেজ লোড হতে পারছে না। ইন্টারনেট সংযোগ (ওয়াইফাই/মোবাইল ডেটা) পরীক্ষা করে আবার চেষ্টা করুন।</p>
+        <button class="btn-primary" style="width:100%" onclick="location.reload()">🔄 আবার চেষ্টা করুন</button>
+      </div>
     </div>
   </div>
 </div>
+
+<!-- 🆕 ধাপ ৭ (২০ জুলাই ২০২৬): module script (নিচে) ইম্পোর্ট লোড ব্যর্থ/স্লো হলে
+     doLogin() কখনো ডিফাইন হয় না, ফলে ইউজার শুধু অনন্তকাল স্পিনার/অচল পেজ দেখতেন।
+     এই plain script টি নন-মডিউল বলে সাথে সাথেই চলে; নির্দিষ্ট সময় পর doLogin
+     না পেলে স্পষ্ট এরর মেসেজ + রিলোড বাটন দেখায়। -->
+<script>
+  setTimeout(function () {
+    if (typeof window.doLogin !== 'function') {
+      var el = document.getElementById('sdkLoadError');
+      if (el) el.style.display = 'block';
+    }
+  }, 8000);
+</script>
 
 <!-- ══════════ App ══════════ -->
 <div id="appSection">
@@ -1130,8 +1147,12 @@
 </div>
 
 <script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, getDocs, doc, setDoc, updateDoc, deleteDoc, getDoc, query, orderBy, limit, addDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+// 🆕 ধাপ ৭ (২০ জুলাই ২০২৬): আগে এই দুটো import সরাসরি www.gstatic.com থেকে হতো।
+// কিছু মোবাইল নেটওয়ার্কে gstatic.com-এ পৌঁছাতে সমস্যা হলে পুরো module script-ই
+// (এমনকি doLogin() ফাংশনও) কখনো এক্সিকিউট হতো না — ব্রাউজারে স্পিনার চিরকাল
+// ঘুরতেই থাকত। তাই SDK ফাইল দুটো এখন সাইটের নিজের vendor/ ফোল্ডারে সেল্ফ-হোস্টেড।
+import { initializeApp } from "./vendor/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, collection, getDocs, doc, setDoc, updateDoc, deleteDoc, getDoc, query, orderBy, limit, addDoc } from "./vendor/firebasejs/10.12.0/firebase-firestore.js";
 
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyBzQKeQzVt-GRL1XVe6cNebh89ghi5f_Fc",
