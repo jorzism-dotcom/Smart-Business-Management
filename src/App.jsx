@@ -5096,6 +5096,46 @@ function stripUndefinedDeep(value) {
   return value;
 }
 
+// ─── ফিক্স (স্টক ডাবল-ডিডাকশন রেস কন্ডিশন, ১৯ জুলাই ২০২৬) ──────────────────
+// রুট কজ: createInvoice()-এর optimistic local stock update (computeStockDeductionFIFO
+// দিয়ে সাথে সাথে setProducts()) generic diff-push effect (useFSSCollection নিচে)
+// ধরে ফেলে আর ৫০ms পরে পুরো product ডকুমেন্ট plain setDoc() (merge ছাড়া, absolute
+// overwrite) দিয়ে Firestore-এ পাঠিয়ে দেয় — ঠিক তখনই ব্যাকগ্রাউন্ডে
+// FSS.transactionUpdateStock()-ও সার্ভারের *সেই মুহূর্তের* stock পড়ে তার থেকে
+// একই qty বিয়োগ করে। এই দুই write-এর ক্রম অনির্দিষ্ট (race) — diff-push আগে
+// পৌঁছালে transaction সার্ভারের-ইতিমধ্যে-কমানো stock থেকে আবার বিয়োগ করে ফেলে
+// (ডাবল-ডিডাকশন, যেমন ৫টা বিক্রিতে ১০ কমে যাওয়া)।
+// প্রথম চেষ্টা ছিল diff-push-এ পুরনো (pre-transaction) stock/batches মান পাঠানো
+// — কিন্তু সিমুলেশনে ধরা পড়ল সেটাও ভুল: transaction যদি diff-push-এর *আগেই*
+// শেষ হয়ে সঠিক মান লিখে ফেলে, তাহলে পরে আসা diff-push সেই সঠিক মানকেই পুরনো
+// মান দিয়ে ওভাররাইট করে রিভার্ট করে দিত (ডেটা-লস, ডাবল-ডিডাকশনের চেয়েও খারাপ)।
+// সঠিক সমাধান: stock/batches ফিল্ড *সম্পূর্ণ বাদ* দিয়ে merge:true দিয়ে পুশ করা,
+// যাতে Firestore সার্ভারে এই ফিল্ডদুটো একদমই স্পর্শ না করে — transaction আগে
+// শেষ হোক বা পরে, ফলাফল সবসময় সঠিক থাকবে। এই এক্সক্লুশন শুধু transaction চলাকালীন
+// সময়েই প্রযোজ্য (নিচের _fieldTxPending ট্র্যাকার) — Products পেজে ম্যানুয়াল
+// stock এডিট (যেখানে কোনো transaction চলে না) আগের মতোই স্বাভাবিক পূর্ণ push পায়।
+// customers.balance-ও একই ক্লাসের ঝুঁকিতে ছিল (আগের ফিক্স পুরনো balance পুশ করত,
+// এই একই রিভার্ট-ঝুঁকি বহন করত) — এখন balance স্থায়ীভাবেই generic push থেকে বাদ
+// (merge:true দিয়ে), কারণ balance সবসময় FSS.transactionUpdateBalance() দিয়েই
+// লেখা হয়, তাই এই পথে কখনোই push করার দরকার নেই — ট্র্যাকিং লাগে না।
+const _fieldTxPending = new Map(); // key: `${coll}:${id}` -> Set(fieldName)
+function markFieldTxPending(coll, id, fields) {
+  const key = `${coll}:${id}`;
+  const set = _fieldTxPending.get(key) || new Set();
+  fields.forEach(f => set.add(f));
+  _fieldTxPending.set(key, set);
+}
+function clearFieldTxPending(coll, id, fields) {
+  const key = `${coll}:${id}`;
+  const set = _fieldTxPending.get(key);
+  if (!set) return;
+  fields.forEach(f => set.delete(f));
+  if (set.size === 0) _fieldTxPending.delete(key);
+}
+function getFieldTxPending(coll, id) {
+  return _fieldTxPending.get(`${coll}:${id}`) || null;
+}
+
 const FSS = {
   _app: null,
   _db: null,
@@ -5436,6 +5476,7 @@ const FSS = {
   // caller তখন আগের মতো synchronous local calculation-এ fallback করবে।
   async transactionUpdateStock(productId, deductQty) {
     if (!this._db || !productId) return null;
+    markFieldTxPending("products", productId, ["stock", "batches"]);
     try {
       const ref = this.doc("products", productId);
       const result = await runTransaction(this._db, async (tx) => {
@@ -5453,6 +5494,8 @@ const FSS = {
     } catch (e) {
       logErrorToCentral?.("transaction:stock", e, { productId, deductQty });
       return null; // ব্যর্থ হলে caller local fallback ব্যবহার করবে
+    } finally {
+      clearFieldTxPending("products", productId, ["stock", "batches"]);
     }
   },
 
@@ -5469,6 +5512,7 @@ const FSS = {
   // null — caller আগের মতো synchronous local calculation-এ fallback করবে।
   async transactionRestoreStock(productId, restoreQty, restoreBatchNo, batchMeta = {}) {
     if (!this._db || !productId) return null;
+    markFieldTxPending("products", productId, ["stock", "batches"]);
     try {
       const ref = this.doc("products", productId);
       const result = await runTransaction(this._db, async (tx) => {
@@ -5515,6 +5559,8 @@ const FSS = {
     } catch (e) {
       logErrorToCentral?.("transaction:restoreStock", e, { productId, restoreQty });
       return null; // ব্যর্থ হলে caller local fallback ব্যবহার করবে
+    } finally {
+      clearFieldTxPending("products", productId, ["stock", "batches"]);
     }
   },
 
@@ -5528,6 +5574,7 @@ const FSS = {
   // legacy আচরণের মতোই।
   async transactionRestoreStockBatches(productId, restoreItems, voidAdjBatchNo) {
     if (!this._db || !productId || !restoreItems || !restoreItems.length) return null;
+    markFieldTxPending("products", productId, ["stock", "batches"]);
     try {
       const ref = this.doc("products", productId);
       const result = await runTransaction(this._db, async (tx) => {
@@ -5565,6 +5612,8 @@ const FSS = {
     } catch (e) {
       logErrorToCentral?.("transaction:restoreStockBatches", e, { productId, restoreItems });
       return null; // ব্যর্থ হলে caller local fallback ব্যবহার করবে
+    } finally {
+      clearFieldTxPending("products", productId, ["stock", "batches"]);
     }
   },
 
@@ -5589,6 +5638,7 @@ const FSS = {
   // হলে null — caller আগের মতো synchronous local calculation-এ fallback করবে।
   async transactionAddStock(productId, { qty, unitCost, unitSell, expiryDate, supplier, note, isFreeStock, batchNoHint } = {}) {
     if (!this._db || !productId || !qty) return null;
+    markFieldTxPending("products", productId, ["stock", "batches"]);
     try {
       const ref = this.doc("products", productId);
       const result = await runTransaction(this._db, async (tx) => {
@@ -5634,6 +5684,8 @@ const FSS = {
     } catch (e) {
       logErrorToCentral?.("transaction:addStock", e, { productId, qty });
       return null; // ব্যর্থ হলে caller local fallback ব্যবহার করবে
+    } finally {
+      clearFieldTxPending("products", productId, ["stock", "batches"]);
     }
   },
 
@@ -5649,6 +5701,7 @@ const FSS = {
   // caller আগের মতো synchronous local calculation-এ fallback করবে।
   async transactionRemoveBatch(productId, batchNo, expiryDate) {
     if (!this._db || !productId) return null;
+    markFieldTxPending("products", productId, ["stock", "batches"]);
     try {
       const ref = this.doc("products", productId);
       const result = await runTransaction(this._db, async (tx) => {
@@ -5675,6 +5728,8 @@ const FSS = {
     } catch (e) {
       logErrorToCentral?.("transaction:removeBatch", e, { productId, batchNo });
       return null; // ব্যর্থ হলে caller local fallback ব্যবহার করবে
+    } finally {
+      clearFieldTxPending("products", productId, ["stock", "batches"]);
     }
   },
 
@@ -5708,6 +5763,23 @@ const FSS = {
       // আলাদা মনে করে বলে এটা ডেটার অর্থ বদলায় না, শুধু write-কে সবসময় বৈধ রাখে।
       const cleaned = stripUndefinedDeep(data);
       await setDoc(this.doc(coll, id), { ...cleaned, _serverTs: serverTimestamp() });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, msg: e.message || "Firestore write ব্যর্থ" };
+    }
+  },
+
+  // 🔴 ফিক্স (স্টক ডাবল-ডিডাকশন রেস কন্ডিশন) — setRecord()-এর মতোই, কিন্তু
+  // merge:true দিয়ে — শুধু data-তে দেওয়া ফিল্ডগুলোই Firestore-এ লেখে, বাকি
+  // (omitted) ফিল্ড সার্ভারে যা আছে তাই থাকে, একদমই স্পর্শ হয় না। generic
+  // diff-push effect (useFSSCollection) এটা ব্যবহার করে transaction-in-flight
+  // থাকা ফিল্ড (stock/batches/balance) বাদ দিয়ে বাকি ফিল্ড পুশ করতে, যাতে
+  // atomic transaction-এর সাথে কোনো রেস/রিভার্ট না ঘটে (দেখুন _fieldTxPending কমেন্ট)।
+  async setRecordMerge(coll, id, data) {
+    if (!this._db || id === undefined || id === null || id === "") return { ok: false, msg: "Firestore সংযুক্ত নেই" };
+    try {
+      const cleaned = stripUndefinedDeep(data);
+      await setDoc(this.doc(coll, id), { ...cleaned, _serverTs: serverTimestamp() }, { merge: true });
       return { ok: true };
     } catch (e) {
       return { ok: false, msg: e.message || "Firestore write ব্যর্থ" };
@@ -6342,13 +6414,18 @@ const SyncOutbox = {
   // stats কিউ-গুলোর একই প্যাটার্নে) — নাহলে অফলাইনে বিজনেস A-তে queued একটা
   // entry, রিকানেক্টের আগে B-তে সুইচ করলে ভুল বিজনেসে (B-এর Firestore
   // কালেকশনে) push হয়ে যেতে পারত।
-  async put(collection, recordId, rec) {
+  // 🔴 ফিক্স (স্টক ডাবল-ডিডাকশন): merge=true এন্ট্রি মানে rec-এ ইচ্ছাকৃতভাবেই কিছু
+  // ফিল্ড (stock/batches/balance) বাদ দেওয়া আছে (দেখুন useFSSCollection push effect-এর
+  // excludeFields কমেন্ট) — flush effect-এ এই ফ্ল্যাগ না রাখলে অ্যাপ রিস্টার্টের পর
+  // outbox replay সাধারণ setRecord() (full overwrite) দিয়ে হতো, যেটা বাদ-দেওয়া
+  // ফিল্ডকে সার্ভার থেকে পুরোপুরি মুছে ফেলত।
+  async put(collection, recordId, rec, merge = false) {
     try {
       const db = await this.open();
       const prefix = FSS._businessPrefix || null;
       await new Promise((resolve, reject) => {
         const tx = db.transaction(this.STORE, "readwrite");
-        tx.objectStore(this.STORE).put({ key: `${collection}:${recordId}`, collection, recordId: String(recordId), rec, prefix, ts: Date.now() });
+        tx.objectStore(this.STORE).put({ key: `${collection}:${recordId}`, collection, recordId: String(recordId), rec, merge, prefix, ts: Date.now() });
         tx.oncomplete = resolve;
         tx.onerror    = () => reject(tx.error);
       });
@@ -6467,7 +6544,8 @@ function useFSSCollection(name, value, setValue, ready, opts = {}) {
         const itemPrefix = Object.prototype.hasOwnProperty.call(it, "prefix") ? it.prefix : null;
         if (itemPrefix !== currentPrefix) return;
         pending.current.set(String(it.recordId), { rec: it.rec, old: null, ts: Date.now() });
-        FSS.setRecord(name, it.recordId, it.rec).then(res => {
+        const flushFn = it.merge ? FSS.setRecordMerge : FSS.setRecord;
+        flushFn.call(FSS, name, it.recordId, it.rec).then(res => {
           if (res && res.ok === false) {
             onSync?.("error");
             logErrorToCentral?.(`fss-outbox-flush:${name}`, new Error(res.msg || "flush failed"), { id: it.recordId });
@@ -6671,40 +6749,69 @@ function useFSSCollection(name, value, setValue, ready, opts = {}) {
     const run = () => {
       nextMap.forEach((rec, id) => {
         const old = prevMap.get(id);
-        // 🔴 ফিক্স (রুট কজ — কাস্টমার বাকি ডাবল-কাউন্ট): customers কালেকশনে
-        // balance ফিল্ড শুধুমাত্র FSS.transactionUpdateBalance()-এর (atomic
-        // read-modify-write) মাধ্যমেই সার্ভারে লেখা উচিত। কিন্তু এই generic
-        // diff-push effect আগে optimistic local balance বদলানোর মাত্র ৫০ms পরেই
-        // balance-সহ পুরো রেকর্ড plain setDoc() (non-merge, full overwrite) দিয়ে
-        // পাঠিয়ে দিত। সেই overwrite যদি transactionUpdateBalance()-এর serverBal
-        // read-এর *আগে* সার্ভারে পৌঁছে যেত, transaction তখন ইতিমধ্যে-আপডেট-হওয়া
-        // মানের ওপর আবার নিজের delta যোগ করত — একই বিক্রি/বাকির টাকা দুইবার
-        // যোগ হয়ে যেত (দেখুন ১৯ জুলাই স্ক্রিনশট — Shima-র বাকি ১,১৫০ থেকে
-        // ভুতুড়েভাবে ২,৩০০ হয়ে যাওয়া)। এখন বিদ্যমান কাস্টমার রেকর্ডে (old
-        // থাকলে) balance-বাদে বাকি ফিল্ড দিয়ে change-detect করা হচ্ছে — শুধু
-        // balance বদলালে কোনো push-ই ট্রিগার হবে না, আর অন্য ফিল্ড বদলে push
-        // হলেও balance-এ পুরনো (old, অর্থাৎ সবশেষ known-good) মানই পাঠানো
-        // হবে, যাতে সার্ভারের atomic-committed balance ভুলবশত ওভাররাইট না হয়।
-        // নতুন কাস্টমার তৈরিতে (old না থাকা) initial balance-সহ পুরো রেকর্ড
-        // আগের মতোই যাবে — এই সুরক্ষা শুধু existing-record আপডেটে প্রযোজ্য।
-        const isCustomerUpdate = name === "customers" && !!old;
-        const oldForCompare = isCustomerUpdate ? { ...old, balance: rec.balance } : old;
+        // 🔴 ফিক্স (রুট কজ — কাস্টমার বাকি ডাবল-কাউন্ট + স্টক ডাবল-ডিডাকশন,
+        // ১৭ ও ১৯ জুলাই ২০২৬): customers.balance এবং products.stock/batches —
+        // এই ফিল্ডগুলো শুধুমাত্র সংশ্লিষ্ট atomic transaction (FSS.transactionUpdateBalance/
+        // transactionUpdateStock ইত্যাদি, দেখুন _fieldTxPending-এর কমেন্ট) দিয়েই
+        // সার্ভারে লেখা উচিত। কিন্তু এই generic diff-push effect আগে optimistic
+        // local পরিবর্তনের মাত্র ৫০ms পরেই পুরো রেকর্ড plain setDoc() (non-merge,
+        // full overwrite) দিয়ে পাঠিয়ে দিত — সেই overwrite যদি transaction-এর
+        // serverপড়ার *আগে* পৌঁছাত, transaction ইতিমধ্যে-আপডেট-হওয়া মানের ওপর আবার
+        // নিজের delta যোগ করত (ডাবল-কাউন্ট/ডাবল-ডিডাকশন)। প্রথম ফিক্স ছিল পুরনো
+        // (pre-transaction) মান পাঠানো — কিন্তু সেটাও ভুল ছিল: transaction যদি
+        // push-এর *আগেই* শেষ হয়ে সঠিক মান লিখে ফেলত, পরে আসা push সেই সঠিক মানকে
+        // পুরনো মান দিয়ে রিভার্ট করে দিত। এখন balance/stock/batches সংশ্লিষ্ট
+        // ফিল্ড merge:true দিয়ে সম্পূর্ণ বাদ দেওয়া হয় (FSS.setRecordMerge) —
+        // Firestore সার্ভারে ওই ফিল্ডগুলো একদমই স্পর্শ হয় না, তাই transaction যে
+        // ক্রমেই শেষ হোক না কেন কোনো রেস/রিভার্ট ঘটে না। customers-এর জন্য এই
+        // এক্সক্লুশন স্থায়ী (balance সবসময়ই transactionUpdateBalance() দিয়ে লেখা
+        // হয়, তাই ট্র্যাকিং লাগে না); products-এর জন্য শুধু transaction চলাকালীন
+        // (_fieldTxPending) — Products পেজের ম্যানুয়াল stock এডিট আগের মতোই
+        // স্বাভাবিক পূর্ণ push পায়। নতুন রেকর্ড তৈরিতে (old না থাকা) initial
+        // balance/stock-সহ পুরো রেকর্ড আগের মতোই যায় — এই সুরক্ষা শুধু
+        // existing-record আপডেটে প্রযোজ্য।
+        const pendingStockFields = name === "products" ? getFieldTxPending("products", id) : null;
+        const excludeFields = !old ? null
+          : name === "customers" ? new Set(["balance"])
+          : (pendingStockFields && pendingStockFields.size) ? pendingStockFields
+          : null;
+        const oldForCompare = excludeFields
+          ? { ...old, ...Object.fromEntries([...excludeFields].map(f => [f, rec[f]])) }
+          : old;
         if (!old || !recEq(oldForCompare, rec)) {
           if (DBG) traceDebug("push_record_setRecord_call", { name, id });
           // _updatedAt inject করো (নতুন বা পরিবর্তিত record-এ) — Master Sync merge-এর জন্য
           const recWithTsRaw = rec._updatedAt ? rec : withTs(rec);
-          const recWithTs = isCustomerUpdate ? { ...recWithTsRaw, balance: old.balance } : recWithTsRaw;
-          pending.current.set(id, { rec: recWithTs, old: old || null, ts: Date.now() });
+          // writePayload: আসল Firestore write — excludeFields থাকলে সেই ফিল্ড
+          // পুরোপুরি বাদ (merge:true দিয়ে সার্ভারে স্পর্শই হবে না)।
+          // pendingRec: শুধু লোকাল echo/conflict-বুককিপিং-এর জন্য — excludeFields-এ
+          // old-এর মানই রাখা হয় (diffRecordFields যেন ভুলবশত এই ফিল্ডকে "changed"
+          // না ধরে, নাহলে ভুয়া কনফ্লিক্ট-লগ তৈরি হবে)।
+          let writePayload = recWithTsRaw;
+          let pendingRec = recWithTsRaw;
+          let writeFn = (c, i, d) => FSS.setRecord(c, i, d);
+          if (excludeFields && excludeFields.size) {
+            writePayload = { ...recWithTsRaw };
+            pendingRec = { ...recWithTsRaw };
+            excludeFields.forEach(f => { delete writePayload[f]; pendingRec[f] = old[f]; });
+            writeFn = (c, i, d) => FSS.setRecordMerge(c, i, d);
+          }
+          const recWithTs = writePayload;
+          const isMergeWrite = !!(excludeFields && excludeFields.size);
+          pending.current.set(id, { rec: pendingRec, old: old || null, ts: Date.now() });
           // 🔴 ফিক্স (durable outbox): Firestore write-এর ফলাফলের অপেক্ষা না করেই
           // সাথে সাথে IndexedDB-তে persist করা হচ্ছে — অ্যাপ এখনই kill হলেও এই
           // এন্ট্রি ডিস্কে থেকে যাবে, পরের বুটে flush effect সেটা আবার পাঠাবে।
-          SyncOutbox.put(name, id, recWithTs);
+          // merge ফ্ল্যাগ পাস করা হচ্ছে যাতে flush effect জানে এই এন্ট্রিতে
+          // ইচ্ছাকৃতভাবে stock/batches/balance বাদ দেওয়া আছে, আর তাই সেটাও
+          // full overwrite না করে merge:true দিয়েই রিপ্লে করে।
+          SyncOutbox.put(name, id, recWithTs, isMergeWrite);
           // 🔴 ফিক্স: setRecord()-এর রেজাল্ট আগে চেক না করেই fire-and-forget করা হতো —
           // Firestore Rules বা নেটওয়ার্ক সমস্যায় write ব্যর্থ হলে কোনো এরর দেখা যেত না,
           // pending map-এ ৫ সেকেন্ড পর নীরবে আবার remote ভার্সনে রিভার্ট হয়ে যেত (যেমন
           // "স্টাফ পারমিশন সিঙ্ক হচ্ছে না" বাগ — অ্যাডমিন দেখতেও পেত না কেন)।
           // এখন ব্যর্থ হলে onSync("error") + centralized error log দিয়ে দৃশ্যমান করা হয়।
-          FSS.setRecord(name, id, recWithTs).then(res => {
+          writeFn(name, id, recWithTs).then(res => {
             if (DBG) traceDebug("push_record_setRecord_result", { name, id, ok: !(res && res.ok === false), msg: res?.msg || "" });
             if (res && res.ok === false) {
               onSync?.("error");
