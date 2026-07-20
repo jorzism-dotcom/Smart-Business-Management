@@ -24674,14 +24674,13 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
           const errs = {};
           if (!peForm.productId) errs.productId = true;
           if (!peForm.qty || parseFloat(peForm.qty) <= 0) errs.qty = true;
-          // 🆕 ধাপ ৪: semen business-এ বাকি সব ফিল্ড mandatory (registry
-          // purchaseEntryAllFieldsMandatory: true) — ফ্রি স্টক না হলে ক্রয়মূল্য,
-          // বিক্রয়মূল্য ও সাপ্লায়ার বাধ্যতামূলক।
-          if (bizCfg.purchaseEntryAllFieldsMandatory) {
-            if (!peForm.isFreeStock && (!peForm.unitCost || parseFloat(peForm.unitCost) < 0)) errs.unitCost = true;
-            if (!peForm.unitSell || parseFloat(peForm.unitSell) <= 0) errs.unitSell = true;
-            if (!peForm.supplier || !peForm.supplier.trim()) errs.supplier = true;
-          }
+          // 🆕 ফার্মেসি ও ভেটেরিনারি সহ সব বিজনেসেই এখন বাকি সব ফিল্ড বাধ্যতামূলক
+          // (TP বাদে) — ফ্রি স্টক না হলে ক্রয়মূল্য, বিক্রয়মূল্য, সাপ্লায়ার ও
+          // মেয়াদ উত্তীর্ণের তারিখ বাধ্যতামূলক।
+          if (!peForm.isFreeStock && (!peForm.unitCost || parseFloat(peForm.unitCost) < 0)) errs.unitCost = true;
+          if (!peForm.unitSell || parseFloat(peForm.unitSell) <= 0) errs.unitSell = true;
+          if (!peForm.supplier || !peForm.supplier.trim()) errs.supplier = true;
+          if (!purchaseFormHidden.includes("expiryDate") && !peForm.expiryDate) errs.expiryDate = true;
           setPeFormErrors(errs);
           if (Object.keys(errs).length) {
             const msg = errs.productId ? "পণ্য নির্বাচন করুন"
@@ -24689,6 +24688,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               : errs.unitCost ? "ক্রয়মূল্য দিন"
               : errs.unitSell ? "বিক্রয়মূল্য দিন"
               : errs.supplier ? "সাপ্লায়ার দিন"
+              : errs.expiryDate ? "মেয়াদ উত্তীর্ণের তারিখ দিন"
               : "সব বাধ্যতামূলক ফিল্ড পূরণ করুন";
             showToast(msg, "#ef4444");
             return;
@@ -25064,9 +25064,9 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                         onChange={v => { setPeNewProduct(vv => ({ ...vv, company: v })); setPeForm(f => ({ ...f, supplier: v })); }} />
                     </div>
 
-                    {/* SP — শুধু রেফারেন্সের জন্য, ঐচ্ছিক — শুধু ভেটেরিনারি মোডে দেখানো হয় */}
+                    {/* TP — শুধু রেফারেন্সের জন্য, ঐচ্ছিক — শুধু ভেটেরিনারি মোডে দেখানো হয় */}
                     {businessType === "veterinary" && (<>
-                    <label style={S.label}>🏷️ SP (৳) <span style={{ color:T.sub, fontWeight:500, fontSize:11 }}>— ঐচ্ছিক</span></label>
+                    <label style={{ ...S.label, marginTop:8 }}>🏷️ TP (৳) <span style={{ color:T.sub, fontWeight:500, fontSize:11 }}>— ঐচ্ছিক</span></label>
                     <input style={{ ...S.input, marginBottom:8 }} type="number" placeholder="" inputMode="numeric"
                       value={peForm.spPrice || ""} onChange={e => setPeForm(f => ({ ...f, spPrice: e.target.value }))} />
                     </>)}
@@ -25149,7 +25149,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               {/* সাপ্লায়ার, পরিমাণ, মূল্য ইত্যাদি — নতুন পণ্য mode-এ লুকানো (peNewProduct ফর্মের ভেতরে আছে) */}
               {!peNewProduct && <>
                 <div>
-                <label style={S.label}>🏭 সাপ্লায়ার{bizCfg.purchaseEntryAllFieldsMandatory ? " *" : ""}</label>
+                <label style={S.label}>🏭 সাপ্লায়ার *</label>
                 <SupplierPicker T={T} S={S} businessType={businessType}
                   error={peFormErrors.supplier}
                   value={peForm.supplier}
@@ -25158,17 +25158,17 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                 {peFormErrors.supplier && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginTop:4 }}>⚠️ সাপ্লায়ার আবশ্যক</div>}
               </div>
 
-              {/* SP — শুধু রেফারেন্সের জন্য, ঐচ্ছিক — শুধু ভেটেরিনারি মোডে দেখানো হয় */}
+              {/* TP — শুধু রেফারেন্সের জন্য, ঐচ্ছিক — শুধু ভেটেরিনারি মোডে দেখানো হয় */}
               {businessType === "veterinary" && (
-                <div>
-                  <label style={S.label}>🏷️ SP (৳) <span style={{ color:T.sub, fontWeight:500, fontSize:11 }}>— শুধু রেফারেন্সের জন্য, ঐচ্ছিক</span></label>
+                <div style={{ marginTop:8 }}>
+                  <label style={S.label}>🏷️ TP (৳) <span style={{ color:T.sub, fontWeight:500, fontSize:11 }}>— শুধু রেফারেন্সের জন্য, ঐচ্ছিক</span></label>
                   <input style={S.input} type="number" placeholder="" inputMode="numeric"
                     value={peForm.spPrice || ""} onChange={e => setPeForm(f => ({ ...f, spPrice: e.target.value }))} />
                 </div>
               )}
 
               {/* পরিমাণ + নতুন একক ক্রয়মূল্য */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: businessType === "veterinary" ? 8 : 0 }}>
                 <div>
                   <label style={S.label}>📊 পরিমাণ *</label>
                   <input style={{ ...S.input, border: peFormErrors.qty ? "1.5px solid #ef4444" : S.input.border }} type="number" placeholder="" inputMode="numeric"
@@ -25177,7 +25177,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                   {peFormErrors.qty && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginTop:4 }}>⚠️ সঠিক পরিমাণ দিন</div>}
                 </div>
                 <div>
-                  <label style={S.label}>💵 নতুন একক ক্রয়মূল্য (৳){bizCfg.purchaseEntryAllFieldsMandatory ? " *" : ""}</label>
+                  <label style={S.label}>💵 নতুন একক ক্রয়মূল্য (৳) *</label>
                   <input style={{ ...S.input, border: peFormErrors.unitCost ? "1.5px solid #ef4444" : S.input.border }} type="number" placeholder="" inputMode="numeric"
                     value={peForm.unitCost}
                     onChange={e => { setPeForm(f => ({ ...f, unitCost: e.target.value })); if (parseFloat(e.target.value) >= 0) setPeFormErrors(er=>({...er,unitCost:false})); }} />
@@ -25187,7 +25187,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
 
               {/* নতুন একক বিক্রয়মূল্য */}
               <div>
-                <label style={S.label}>🏷️ নতুন একক বিক্রয়মূল্য (৳){bizCfg.purchaseEntryAllFieldsMandatory ? " *" : ""}</label>
+                <label style={S.label}>🏷️ নতুন একক বিক্রয়মূল্য (৳) *</label>
                 <input style={{ ...S.input, border: peFormErrors.unitSell ? "1.5px solid #ef4444" : S.input.border }} type="number" placeholder="" inputMode="numeric"
                   value={peForm.unitSell}
                   onChange={e => { setPeForm(f => ({ ...f, unitSell: e.target.value })); if (parseFloat(e.target.value) > 0) setPeFormErrors(er=>({...er,unitSell:false})); }} />
@@ -25236,22 +25236,31 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
                 </div>
               )}
 
-              {/* মেয়াদ উত্তীর্ণের তারিখ — full width, same as product form
-                   🆕 ধাপ ৪: semen business-এ হাইড (registry hiddenFields.purchaseForm: "expiryDate") */}
-              {!purchaseFormHidden.includes("expiryDate") && (
-              <div>
-                <label style={S.label}>📅 মেয়াদ উত্তীর্ণের তারিখ</label>
-                <ExpiryYearMonthPicker
-                  value={peForm.expiryDate}
-                  onChange={v => setPeForm(f => ({ ...f, expiryDate: v }))} />
+              {/* 🆕 রিডিজাইন: "মেয়াদ উত্তীর্ণের তারিখ" ও "ব্যাচ নম্বর" পরস্পর রিলেটেড বলে একই
+                   কার্ড/সেকশনে রাখা হলো। এই কার্ডের ফ্রি/বোনাস স্টক ফিল্ড থেকে দূরত্ব (marginTop:10)
+                   "পরিমাণ" ও "নতুন একক বিক্রয়মূল্য" এর মধ্যে যে দূরত্ব আছে সেই অনুযায়ি।
+                   🆕 ধাপ ৪: semen business-এ expiryDate হাইড (registry hiddenFields.purchaseForm: "expiryDate") থাকলে শুধু ব্যাচ চিপ দেখানো হয়। */}
+              {!purchaseFormHidden.includes("expiryDate") ? (
+              <div style={{ marginTop:10, border:"1px solid #a78bfa44", background:"#a78bfa10", borderRadius:12, padding:"12px 14px", display:"flex", flexDirection:"column", gap:10 }}>
+                <div>
+                  <label style={{ ...S.label, marginTop:0 }}>📅 মেয়াদ উত্তীর্ণের তারিখ *</label>
+                  <ExpiryYearMonthPicker
+                    value={peForm.expiryDate}
+                    onChange={v => { setPeForm(f => ({ ...f, expiryDate: v })); if (v) setPeFormErrors(er => ({ ...er, expiryDate: false })); }}
+                    style={peFormErrors.expiryDate ? { border: "1.5px solid #ef4444", borderRadius: 10, padding: 2 } : {}} />
+                  {peFormErrors.expiryDate && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginTop:4 }}>⚠️ মেয়াদ উত্তীর্ণের তারিখ আবশ্যক</div>}
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                  <span style={{ color:"#a78bfa", fontWeight:900, fontSize:14 }}>{nextBatchLabel}</span>
+                  <span style={{ color:T.sub, fontSize:11 }}>🏷️ ব্যাচ নম্বর — স্বয়ংক্রিয়ভাবে যুক্ত হবে</span>
+                </div>
               </div>
-              )}
-
-              {/* ব্যাচ নম্বর — auto chip, same style as product form */}
-              <div style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:12, border:"1px solid #a78bfa44", background:"#a78bfa10" }}>
+              ) : (
+              <div style={{ marginTop:10, display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:12, border:"1px solid #a78bfa44", background:"#a78bfa10" }}>
                 <span style={{ color:"#a78bfa", fontWeight:900, fontSize:14 }}>{nextBatchLabel}</span>
                 <span style={{ color:T.sub, fontSize:11 }}>🏷️ ব্যাচ নম্বর — স্বয়ংক্রিয়ভাবে যুক্ত হবে</span>
               </div>
+              )}
 
               </>}
 
@@ -25804,7 +25813,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
             {formErrors.price && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginTop:4 }}>⚠️ সার্ভিস চার্জ আবশ্যক</div>}
           </>) : (<>
           {businessType === "veterinary" && (<>
-          <label style={S.label}>🏷️ TP (৳) <span style={{ color:T.sub, fontWeight:500, fontSize:11 }}>— শুধু রেফারেন্সের জন্য</span></label>
+          <label style={{ ...S.label, marginTop:8 }}>🏷️ TP (৳) <span style={{ color:T.sub, fontWeight:500, fontSize:11 }}>— শুধু রেফারেন্সের জন্য</span></label>
           <input style={{ ...S.input }} placeholder="" type="number" value={form.spPrice} onChange={e => setForm({ ...form, spPrice: e.target.value })} inputMode="numeric" pattern="[0-9]*" />
           </>)}
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
@@ -25829,8 +25838,13 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               {formErrors.minStockAlert && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginTop:4 }}>⚠️ মিন স্টক অ্যালার্ট আবশ্যক</div>}
             </div>
           </div>
+          {/* 🆕 রিডিজাইন: "মেয়াদ উত্তীর্ণের তারিখ" ও "আরেকটা ব্যাচ যোগ করুন" পরস্পর রিলেটেড
+               বলে একই কার্ড/সেকশনে রাখা হলো। কার্ডের marginTop:8 — ক্রয়মূল্য/প্রাথমিক স্টক
+               গ্রিডের gap (8) অনুযায়ী। */}
+          {(!pfHidden.includes("expiryDate") || (!editId && !pfHidden.includes("addBatchButton"))) && (
+          <div style={{ marginTop:8, border:`1px solid ${T.border}`, borderRadius:12, padding:"12px 14px", background:T.card }}>
           {!pfHidden.includes("expiryDate") && (<>
-          <label style={{ ...S.label, marginTop:8 }}>📅 মেয়াদ উত্তীর্ণের তারিখ *</label>
+          <label style={{ ...S.label, marginTop:0 }}>📅 মেয়াদ উত্তীর্ণের তারিখ *</label>
           <ExpiryYearMonthPicker value={form.expiryDate} onChange={v => { setForm({ ...form, expiryDate: v }); if (v) setFormErrors(er=>({...er,expiryDate:false})); }}
             style={formErrors.expiryDate ? { border: "1.5px solid #ef4444", borderRadius: 10, padding: 2 } : {}} />
           {formErrors.expiryDate && <div style={{ color:"#ef4444", fontSize:11, fontWeight:700, marginTop:4 }}>⚠️ মেয়াদ উত্তীর্ণের তারিখ আবশ্যক</div>}
@@ -25849,7 +25863,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
             const dupExpiries = new Set();
             validRows.forEach(r => { if (r.expiryDate) { if (expirySeen[r.expiryDate]) dupExpiries.add(r.expiryDate); expirySeen[r.expiryDate] = true; } });
             return (
-              <div style={{ marginTop: 10 }}>
+              <div style={{ marginTop: !pfHidden.includes("expiryDate") ? 10 : 0 }}>
                 {extraBatches.map((row) => (
                   <div key={row.id} style={{ display:"grid", gridTemplateColumns:"1fr 2fr auto", gap:8, alignItems:"end", marginBottom:8, background:"#a78bfa0c", border:"1px solid #a78bfa33", borderRadius:10, padding:8 }}>
                     <div>
@@ -25893,9 +25907,12 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               </div>
             );
           })()}
+          </div>
+          )}
 
-          {/* ── কমন/আনকমন — চাহিদা অনুযায়ী ট্যাগ, ডিফল্ট কমন ── */}
-          <label style={{ ...S.label, marginTop:8 }}>📊 চাহিদার ধরন</label>
+          {/* ── কমন/আনকমন — চাহিদা অনুযায়ী ট্যাগ, ডিফল্ট কমন — নিজস্ব কার্ডে, marginTop:8 (উপরের রেফারেন্স অনুযায়ী) ── */}
+          <div style={{ marginTop:8, border:`1px solid ${T.border}`, borderRadius:12, padding:"12px 14px", background:T.card }}>
+          <label style={{ ...S.label, marginTop:0 }}>📊 চাহিদার ধরন</label>
           <div style={{ display:"flex", gap:10 }}>
             <label style={{ display:"flex", alignItems:"center", gap:6, flex:1, padding:"9px 12px", borderRadius:10, border:`1.5px solid ${form.demandType === "common" ? "#22c55e" : T.border}`, background: form.demandType === "common" ? "#22c55e15" : "transparent", cursor:"pointer" }}>
               <input type="checkbox" checked={form.demandType === "common"} onChange={() => setForm({ ...form, demandType: "common" })} style={{ width:16, height:16, accentColor:"#22c55e", cursor:"pointer" }} />
@@ -25905,6 +25922,7 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
               <input type="checkbox" checked={form.demandType === "uncommon"} onChange={() => setForm({ ...form, demandType: "uncommon" })} style={{ width:16, height:16, accentColor:"#a78bfa", cursor:"pointer" }} />
               <span style={{ color: form.demandType === "uncommon" ? "#a78bfa" : T.sub, fontWeight:700, fontSize:13 }}>আনকমন</span>
             </label>
+          </div>
           </div>
           </>)}
           {/* নতুন পণ্যে অটো ব্যাচ প্রিভিউ — শুধু পণ্যের জন্য */}
