@@ -4064,9 +4064,13 @@ const APP_BUILD = (typeof import.meta !== "undefined" && import.meta.env && impo
 // 🔴 সেমান্টিক ভার্সন (x.y.z) — Settings-এর নীরব AppVersionCard (দেখুন
 // Settings_-এর ঠিক আগের অংশ) এটার সাথে admin.html-এর প্রকাশিত ভার্সন
 // সেমান্টিকভাবে কম্পেয়ার করে।
-// ⚠️ প্রতি রিলিজে এটা bump করা আবশ্যক — নাহলে কার্ডটা ঠিকমতো বন্ধ হবে না।
-// admin.html-এর "সর্বশেষ ভার্সন" ফিল্ডে যা বসাবেন সেটাও একই x.y.z ফরম্যাটে হতে হবে।
-const APP_VERSION_CODE = "1.0.0";
+// 🔴 এখন এটা GitHub Actions workflow-এ (.github/workflows/build-apk.yml)
+// স্বয়ংক্রিয়ভাবে সেট হওয়া VITE_APP_VERSION থেকে আসে (1.0.<run_number> ফরম্যাটে,
+// প্রতি বিল্ডে সবসময় বাড়তে থাকে) — ম্যানুয়ালি bump করা লাগে না। workflow-এ সেট
+// না থাকলে (যেমন লোকাল dev build) নিচের fallback "1.0.0" দেখাবে।
+const APP_VERSION_CODE = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_APP_VERSION)
+  ? import.meta.env.VITE_APP_VERSION
+  : "1.0.0";
 
 function compareVersions(a, b) {
   const pa = String(a || "0.0.0").split(".").map(n => parseInt(n, 10) || 0);
@@ -29617,6 +29621,15 @@ function AppVersionCard({ T, S }) {
         ]);
         if (!mounted || !snap.exists()) return;
         const d = snap.data();
+        // 🔴 Individual/selective shop targeting: d.targetPhones খালি বা
+        // অনুপস্থিত থাকলে সব দোকানের জন্য প্রযোজ্য (আগের collective-broadcast
+        // আচরণ অপরিবর্তিত)। নন-খালি থাকলে শুধু তালিকাভুক্ত ফোন নম্বরের
+        // দোকানই আপডেট কার্ড দেখবে — বাকিরা পুরনো ভার্সনেই থাকবে।
+        const targets = Array.isArray(d.targetPhones) ? d.targetPhones.filter(Boolean) : [];
+        if (targets.length) {
+          const myPhone = localStorage.getItem("sbm_phone_sync") || localStorage.getItem("sbm_phone") || "";
+          if (!myPhone || !targets.includes(myPhone)) return; // এই দোকান টার্গেট তালিকায় নেই
+        }
         if (d.version && compareVersions(APP_VERSION_CODE, d.version) < 0) {
           setInfo({
             version:   d.version       || "",
