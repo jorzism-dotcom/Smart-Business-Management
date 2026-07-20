@@ -29547,8 +29547,18 @@ async function downloadAndInstallApk(url, version, onProgress) {
   if (!Filesystem) { window.open(url, "_blank"); return { ok: true, installed: false }; }
 
   const fileName = `sbm-update-v${version}.apk`;
-  const path = "Download/SBM-Update/" + fileName;
+  const dirPath = "Download/SBM-Update";
+  const path = dirPath + "/" + fileName;
   let progressHandle = null;
+
+  // 🔴 ফিক্স: Filesystem.downloadFile()-এ recursive:true দিলেও ফোল্ডার
+  // নিজে থেকে তৈরি হয় না (শুধু writeFile-এ কাজ করে) — ফোল্ডার আগে থেকে না
+  // থাকলে "open failed: ENOENT (No such file or directory)" এরর আসে।
+  // তাই ডাউনলোডের আগে explicit mkdir — ফোল্ডার আগে থেকেই থাকলে যে error
+  // আসবে সেটা নীরবে উপেক্ষা করা হচ্ছে।
+  try {
+    await Filesystem.mkdir({ path: dirPath, directory: "EXTERNAL_STORAGE", recursive: true });
+  } catch { /* ফোল্ডার আগে থেকেই থাকলে এখানে error আসবে — নিরাপদে উপেক্ষা */ }
 
   try {
     let fileUri = null;
