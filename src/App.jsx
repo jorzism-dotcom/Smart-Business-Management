@@ -22902,6 +22902,11 @@ function Customers({ T, S, customers, setCustomers, showToast, setModal, onOpenD
   const [segFilter,       setSegFilter]       = useState("all"); // analytics segment filter
   const [showAnalytics,   setShowAnalytics]   = useState(false);
 
+  // 🆕 কাস্টমার মডিউলের নেস্টেড লেয়ার — শেয়ার্ড back-stack-এ। ফর্ম খোলা থাকলে
+  // ব্যাক বাটনে ফর্ম বন্ধ হবে, ডিলিট কনফার্ম দেখানো অবস্থায় ব্যাক করলে কনফার্ম বাতিল হবে।
+  useBackHandler(showAdd,          () => { setShowAdd(false); setEditId(null); return true; });
+  useBackHandler(!!confirmId,      () => { setConfirmId(null); return true; });
+
   // ── RFM Customer Analytics ─────────────────────────────────────────────────
   const SEGMENTS = {
     champion: { label:"চ্যাম্পিয়ন", color:"#22c55e", icon:"🏆", desc:"নিয়মিত, বেশি কেনে" },
@@ -23238,6 +23243,11 @@ function CustomerDetail({ T, S, customer, txns, invoices, customers, paymentInvo
   // Map বানিয়ে O(1) lookup — ঠিক যেভাবে কোডের অন্য জায়গায় (globalProdMap, prodMap ইত্যাদি) করা হয়।
   const invoiceMap = useMemo(() => new Map((invoices || []).map(iv => [iv.id, iv])), [invoices]);
   const paymentInvoiceMap = useMemo(() => new Map((paymentInvoices || []).map(p => [p.id, p])), [paymentInvoices]);
+  // 🆕 কাস্টমার ডিটেইলের নেস্টেড লেয়ার — ইনভয়েস/পেমেন্ট রিসিট দেখা অবস্থায় ব্যাক করলে
+  // লেনদেন তালিকায় ফিরবে, ইতিহাস প্যানেল খোলা থাকলে ব্যাক করলে সেটা বন্ধ হবে।
+  useBackHandler(!!viewInv,           () => { setViewInv(null); return true; });
+  useBackHandler(!!viewPayInv,        () => { setViewPayInv(null); return true; });
+  useBackHandler(histMonths !== null, () => { setHistMonths(null); return true; });
   if (!customer) return null;
   // Virtuoso handles virtualization — pagination removed
 
@@ -24287,6 +24297,18 @@ function Products({ T, S, products, setProducts, showToast, stockMovements = [],
     setCustomUnits(units);
     try { localStorage.setItem("sbm_custom_units", JSON.stringify(units)); } catch {}
   };
+  // 🆕 প্রোডাক্ট + ক্রয় এন্ট্রি (PO) মডিউলের নেস্টেড লেয়ার — শেয়ার্ড back-stack-এ।
+  // চালান রিভিউ (peInvoiceItems) সবচেয়ে ভেতরের লেয়ার, তারপর সার্চ ড্রপডাউন
+  // (peSearchOpen, ফর্মের ভেতরে), তারপর ক্রয় এন্ট্রি ফর্ম নিজেই (peShowForm)।
+  // প্রতিটা active হওয়ার সময়ই স্ট্যাকে যোগ হয়, তাই ব্যাক বাটনে সবচেয়ে পরে-খোলা
+  // লেয়ারটাই আগে বন্ধ হবে — কোড-অর্ডার নির্বিশেষে।
+  useBackHandler(showAdd,            () => { setShowAdd(false); setEditId(null); return true; });
+  useBackHandler(showUnitMgr,        () => { setShowUnitMgr(false); return true; });
+  useBackHandler(showAiQuickEntry,   () => { setShowAiQuickEntry(false); return true; });
+  useBackHandler(!!quickStockId,     () => { setQuickStockId(null); return true; });
+  useBackHandler(!!peInvoiceItems,   () => { setPeInvoiceItems(null); return true; });
+  useBackHandler(peSearchOpen,       () => { setPeSearchOpen(false); return true; });
+  useBackHandler(peShowForm && !peInvoiceItems, () => { setPeShowForm(false); return true; });
   // Virtuoso — pagination সরানো
   const lowStock = useMemo(() => products.filter(p => (p.stock || 0) <= 5 && (p.stock || 0) > 0), [products]);
   const outOfStock = useMemo(() => products.filter(p => (p.stock || 0) === 0), [products]);
@@ -26147,6 +26169,11 @@ function SupplierPaymentModule({ T, S, products = [], purchaseOrders = [],
   const [dueAmount, setDueAmount]         = React.useState("");
   const [dueNote, setDueNote]             = React.useState("");
   const [dueDate, setDueDate]             = React.useState(todayKey);
+  // 🆕 সাপ্লায়ার পেমেন্ট মডিউলের নেস্টেড লেয়ার — পেমেন্ট/বকেয়া ফর্ম আগে বন্ধ হবে,
+  // তারপর সাপ্লায়ার ডিটেইল থেকে লিস্টে ফিরবে।
+  useBackHandler(showPayForm,        () => { setShowPayForm(false); return true; });
+  useBackHandler(showDueForm,        () => { setShowDueForm(false); return true; });
+  useBackHandler(!!selectedSupplier && !showPayForm && !showDueForm, () => { setSelectedSupplier(null); return true; });
 
   const PAY_METHODS = ["নগদ", "ব্যাংক ট্রান্সফার", "চেক", "bKash", "Nagad", "অন্যান্য"];
 
@@ -26593,6 +26620,11 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
   const [ihDate,       setIhDate]       = React.useState("");   // exact dateKey
   const [ihMonth,      setIhMonth]      = React.useState("");   // YYYY-MM
   const [ihPayType,    setIhPayType]    = React.useState("all"); // all|cash|baki|partial
+  // 🆕 রিটার্ন মডিউলের নেস্টেড লেয়ার — শেয়ার্ড back-stack-এ (push-order-ভিত্তিক,
+  // তাই detailInv যেকোনো সোর্স থেকে খোলা হোক না কেন সবচেয়ে ভেতরের লেয়ার হিসেবে বন্ধ হবে)।
+  useBackHandler(!!detailInv,   () => { setDetailInv(null);   return true; });
+  useBackHandler(ihShowSuggest, () => { setIhShowSuggest(false); return true; });
+  useBackHandler(showInvHist,   () => { setShowInvHist(false); return true; });
 
   // ── ihViewMode বদলালে ihDate/ihMonth সিংক করা (এক্সপেন্স ট্রেকার/vh-এর প্যাটার্নে) ──
   const setIhMode = React.useCallback((mode) => {
@@ -26665,6 +26697,7 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
   // ❌ বাতিলকৃত ইনভয়েস হিস্ট্রি — Firestore থেকে সব সময়ের ডেটা, দিন/মাস নেভিগেটর
   // ══════════════════════════════════════════════════════════════════════════
   const [showVoidHist,   setShowVoidHist]   = React.useState(false);
+  useBackHandler(showVoidHist,  () => { setShowVoidHist(false); return true; });
   const [vhViewMode,     setVhViewMode]     = React.useState("date"); // date|month
   const [vhNavDate,      setVhNavDate]      = React.useState(todayKey);
   const [vhNavMonth,     setVhNavMonth]     = React.useState(monthKeyNow);
@@ -27309,6 +27342,9 @@ function ExpenseTracker({ T, S, expenses = [], setExpenses, showToast, currentUs
   const [customCategories,   setCustomCategories]   = React.useState([]);
   const [showCustomCatInput, setShowCustomCatInput] = React.useState(false);
   const [customCatInput,     setCustomCatInput]      = React.useState("");
+  // 🆕 এক্সপেন্স ট্র্যাকারের নেস্টেড লেয়ার — কাস্টম ক্যাটাগরি ইনপুট আগে বন্ধ হবে, তারপর ফর্ম।
+  useBackHandler(showCustomCatInput, () => { setShowCustomCatInput(false); return true; });
+  useBackHandler(showForm,           () => { setShowForm(false); setEditId(null); return true; });
 
   React.useEffect(() => {
     (async () => {
@@ -29012,6 +29048,7 @@ function StaffSetupQrPanel({ T, S, recoveryPhone, recoveryPinHash }) {
   const isSet = !!(recoveryPhone && recoveryPinHash);
 
   const close = () => { setOpen(false); setPin(""); setError(""); setPayload(""); };
+  useBackHandler(open, () => { close(); return true; });
 
   const confirm = async () => {
     if (!pin || pin.length !== 6) { setError("৬ ডিজিটের PIN দিন"); return; }
@@ -29082,6 +29119,9 @@ function StaffMgmtModule({ T, S, currentUser, users = [], setUsers, showToast, r
   // ৫০০ শপের সবগুলোতেই এটা no-op, existing UI/আচরণ অপরিবর্তিত থাকে (নিয়ম ৩)।
   const isMultiBusinessShop = Array.isArray(enabledBusinessTypes) && enabledBusinessTypes.length >= 2;
   const [editingBizStaffId, setEditingBizStaffId] = useState(null);
+  // 🆕 স্টাফ ম্যানেজমেন্টের নেস্টেড লেয়ার — শেয়ার্ড back-stack-এ।
+  useBackHandler(!!editingBizStaffId, () => { setEditingBizStaffId(null); return true; });
+  useBackHandler(showNewUser,         () => { setShowNewUser(false); return true; });
 
   if (currentUser?.role === "staff") {
     return (
@@ -29687,6 +29727,14 @@ function Settings_({ T, S, shopName,
   const [showAllLogs, setShowAllLogs] = useState(false);
   // 🔥 Firebase state
   const [showFbSetup, setShowFbSetup] = useState(false);
+  // 🆕 সেটিং পেজের এই ব্যাচের নেস্টেড প্যানেল/মোডাল — শেয়ার্ড back-stack-এ, এক ধাপ বন্ধ।
+  useBackHandler(showRecoveryExpanded, () => { setShowRecoveryExpanded(false); return true; });
+  useBackHandler(showGateway,          () => { setShowGateway(false);          return true; });
+  useBackHandler(showKey,              () => { setShowKey(false);              return true; });
+  useBackHandler(showPinEdit !== null, () => { setShowPinEdit(null);           return true; });
+  useBackHandler(showSmsEd,            () => { setShowSmsEd(false);            return true; });
+  useBackHandler(showAllLogs,          () => { setShowAllLogs(false);          return true; });
+  useBackHandler(showFbSetup,          () => { setShowFbSetup(false);          return true; });
   // #১৩ স্টোরেজ কোটা হ্যান্ডলিং — মাউন্ট হওয়ার সময় একবার চেক করে, কম থাকলে
   // ব্যাকআপ কার্ডে সতর্কতা দেখায় (ব্যর্থ হওয়ার আগেই)
   const [quotaInfo, setQuotaInfo] = useState(null);
@@ -30202,6 +30250,14 @@ function Settings_({ T, S, shopName,
   // বিক্রি/হস্তান্তর, বা দোকান বন্ধ করে দেওয়ার সময়) আর্কাইভসহ পুরোপুরি মুছে দেওয়া যায়।
   const [delBkWipeArchive, setDelBkWipeArchive] = useState(false);
   const DEL_BK_PHRASE = "DELETE ALL BACKUPS";
+  // 🆕 Master Key গেট, Drive/Firebase Devices প্যানেল, ও ডিলিট-ব্যাকআপ ৩-ধাপ ফ্লো —
+  // শেয়ার্ড back-stack-এ। ডিলিট-ব্যাকআপ ফ্লো একধাপ করে পিছাবে, ধাপ ১-এ এলে পুরো বন্ধ হবে।
+  useBackHandler(!!mkTarget,        () => { setMkTarget(null);        return true; });
+  useBackHandler(showGdExpanded,    () => { setShowGdExpanded(false); return true; });
+  useBackHandler(showLdExpanded,    () => { setShowLdExpanded(false); return true; });
+  useBackHandler(showFbDevices,     () => { setShowFbDevices(false);  return true; });
+  useBackHandler(delBkStep > 1,     () => { setDelBkStep(s => Math.max(1, s - 1)); return true; });
+  useBackHandler(delBkStep === 1,   () => { setDelBkStep(0); return true; });
 
   const verifyMasterKey = async () => {
     setMkChecking(true); setMkError("");
