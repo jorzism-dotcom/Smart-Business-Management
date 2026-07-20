@@ -29571,12 +29571,20 @@ async function downloadAndInstallApk(url, version, onProgress) {
           if (p?.contentLength) onProgress?.(Math.round((p.bytes / p.contentLength) * 100));
         });
       } catch { /* progress listener না থাকলে চুপচাপ এগিয়ে যাও */ }
-      const res = await Filesystem.downloadFile({ url, path, directory: DL_DIR, recursive: true });
-      fileUri = res?.path || res?.uri || null;
-      if (!fileUri) {
-        const g = await Filesystem.getUri({ path, directory: DL_DIR });
-        fileUri = g?.uri || null;
-      }
+      await Filesystem.downloadFile({ url, path, directory: DL_DIR, recursive: true });
+      // 🔴 আসল বাগ ফিক্স (২১ জুলাই): downloadFile() সফল হলেও রেসপন্সে শুধু
+      // "path" ফিল্ড থাকে — একটা raw absolute filesystem path, কোনো
+      // "file://" স্কিম ছাড়া (যেমন "/data/user/0/.../sbm-update.apk")।
+      // আগে কোড সরাসরি `res?.path || res?.uri` ব্যবহার করত, ফলে এই
+      // স্কিম-বিহীন raw path-টাই Share.share()-এ চলে যেত। Capacitor-এর
+      // নেটিভ SharePlugin.java-তে url.startsWith("file:") এবং
+      // url.startsWith("http") — এই দুটো ছাড়া অন্য কিছু পেলে ঠিক
+      // "Unsupported url" মেসেজ দিয়ে রিজেক্ট করে (isFileUrl()/isHttpUrl()
+      // চেক ব্যর্থ) — এটাই ছিল আসল কারণ, ডাউনলোড আসলে ঠিকই হচ্ছিল।
+      // ফিক্স: এখন সবসময় Filesystem.getUri() দিয়ে সঠিক স্কিমসহ URI
+      // (file://...) বের করে নেওয়া হয়, raw path কখনো সরাসরি ব্যবহার হয় না।
+      const g = await Filesystem.getUri({ path, directory: DL_DIR });
+      fileUri = g?.uri || null;
     } else {
       // ── ফলব্যাক: CapacitorHttp দিয়ে ম্যানুয়ালি নামিয়ে লেখা ──
       onProgress?.(5);
@@ -29599,14 +29607,16 @@ async function downloadAndInstallApk(url, version, onProgress) {
     }
     const Share = window.Capacitor?.Plugins?.Share;
     if (Share?.share) {
+      // এখন fileUri সবসময় "file://" স্কিমসহ আসছে, তাই SharePlugin-এর
+      // isFileUrl() চেক পাস করবে এবং সে নিজেই FileProvider দিয়ে content://
+      // URI-তে রূপান্তর করে Package Installer-সহ শেয়ার শীট খুলবে।
       await Share.share({ title: `SBM v${version}`, url: fileUri, dialogTitle: "ইনস্টল করতে অ্যাপ বেছে নিন (Package Installer)" });
       return { ok: true, installed: true };
     }
     return { ok: true, installed: false, path: fileUri };
   } catch (e) {
-    // 🔴 ডায়াগনস্টিক: আগে শুধু e?.message দেখানো হতো যা প্রায়ই জেনেরিক
-    // ("Unsupported url" ইত্যাদি) — এখন পুরো নেটিভ এরর অবজেক্ট (code/message/
-    // stack) console.error-এ লগ হয় (adb logcat-এ দেখা যাবে) এবং code+message
+    // 🔴 ডায়াগনস্টিক: পুরো নেটিভ এরর অবজেক্ট (code/message/stack)
+    // console.error-এ লগ হয় (adb logcat-এ দেখা যাবে) এবং code+message
     // দুটোই status টেক্সটে দেখানো হয় যাতে পরের বার আসল কারণ বোঝা যায়।
     console.error("[downloadAndInstallApk] native error:", { code: e?.code, message: e?.message, stack: e?.stack, raw: e });
     const detail = [e?.code, e?.message].filter(Boolean).join(": ");
