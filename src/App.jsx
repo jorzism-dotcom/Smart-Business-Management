@@ -10297,7 +10297,12 @@ function useKpiStats({ customers, invoices, products, txns, expenses = [], cashL
 }
 
 // ── ২০টি KPI কার্ডের গ্রিড — AI ড্যাশবোর্ড ও "দৈনিক সারসংক্ষেপ" উভয় জায়গায় হুবহু একই ──
-function KpiCardsGrid({ T, stats }) {
+// 🆕 (২১ জুলাই ২০২৬ — "স্ক্রল ছাড়া এক পেজেই ২০টা কার্ড দেখতে চাই" ফিডব্যাক):
+// আগের বড় আইকন-কার্ড গ্রিডে ২০টা আইটেম দেখতে অনেকখানি স্ক্রল লাগত। এখন
+// `compact` prop দিয়ে একটা ঘন লিস্ট-ভিউ যোগ করা হলো — প্রতিটা আইটেম একটা
+// পাতলা লাইনে (icon+label বামে, value+sub ডানে) — ফলে ২০টা লাইন মিলিয়ে
+// আগের তুলনায় অনেক কম উচ্চতা লাগে, বেশিরভাগ ফোনেই এক স্ক্রিনে সবটা আঁটে।
+function KpiCardsGrid({ T, stats, compact = false }) {
   const { fmt, pct, currentMonthNameEn, daysElapsedInMonth, growthPct,
     todaySale, todayInvs, todayCashSale, todayCashProfit, todayBakiIncurred,
     todayProfit, totalBaki, bakiCustomers, todayJoma, todaySelfUseCost, monthSelfUseCost,
@@ -10327,6 +10332,34 @@ function KpiCardsGrid({ T, stats }) {
     { icon: "📦", val: `৳${fmt(stockValue)}`, label: "স্টক মূল্য", sub: `কম স্টক ${lowStockItems.length}টি`, color: "#ec4899" },
     { icon: "⏳", val: `৳${fmt(monthExpiredValue)}`, label: `এই মাসের মেয়াদোত্তীর্ণ পণ্যের মূল্য (${currentMonthNameEn})`, sub: `${monthExpiredCount}টি ব্যাচ সরানো হয়েছে`, color: "#dc2626" },
   ];
+
+  // ── কমপ্যাক্ট লিস্ট-ভিউ — একটাই কলাম, পাতলা রো, সাব-টেক্সট ভ্যালুর পাশেই ──
+  if (compact) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        {items.map((item, i) => (
+          <div key={i} style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+            padding: "6px 9px", borderRadius: 9,
+            background: `linear-gradient(90deg, ${item.color}16, transparent)`,
+            border: `1px solid ${item.color}30`,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flex: 1 }}>
+              <span style={{ fontSize: 13, flexShrink: 0, width: 18, textAlign: "center" }}>{item.icon}</span>
+              <span style={{
+                color: T.text, fontWeight: 700, fontSize: 10.5, lineHeight: 1.2,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>{item.label}</span>
+            </div>
+            <div style={{ textAlign: "right", flexShrink: 0, display: "flex", alignItems: "baseline", gap: 5 }}>
+              <span style={{ color: item.color, fontWeight: 900, fontSize: 12.5, whiteSpace: "nowrap" }}>{item.val}</span>
+              <span style={{ color: T.sub, fontSize: 9, opacity: 0.85, whiteSpace: "nowrap" }}>{item.sub}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
@@ -14412,9 +14445,24 @@ function SmartBusinessMgmt() {
     return () => clearInterval(iv);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded, currentUser?.role]);
+  // 🔴 ফিক্স (২১ জুলাই ২০২৬ — "staircase ব্যাক কাজ করেনি" ফিডব্যাক): নিচের
+  // effect-টা আগে `[tab]`-এর উপর নির্ভরশীল ছিল, মানে প্রতিবার ট্যাব বদলালেই
+  // পুরো effect আবার রান হতো এবং App.addListener("backButton", ...) দিয়ে
+  // আরেকটা নতুন নেটিভ লিসেনার যোগ হতো — কিন্তু cleanup-এ শুধু popstate
+  // রিমুভ হতো, আগের backButton লিসেনার হ্যান্ডেলটা কখনো .remove() করা হতো
+  // না। ফলে অ্যাপ ব্যবহারের সাথে সাথে ডুপ্লিকেট লিসেনার জমতে থাকত, আর
+  // একবার হার্ডওয়্যার ব্যাক চাপলে সবগুলো লিসেনার একসাথে ফায়ার হয়ে
+  // runBackStack()-কে বহুবার কল করত — ফলে এক ট্যাপে staircase-এর বদলে
+  // একসাথে অনেক ধাপ পিছিয়ে যেত (বা সরাসরি dashboard/exit-এ চলে যেত)।
+  // প্রতিটা পুরনো লিসেনার তার registration-সময়কার stale `tab` ভ্যালুও
+  // ক্লোজারে ধরে রাখত। এখন effect শুধু একবারই (mount-এ) রেজিস্টার হয়,
+  // `tab`-এর সবশেষ মান একটা ref দিয়ে পড়া হয়, এবং unmount-এ নেটিভ
+  // লিসেনারটাও সঠিকভাবে .remove() হয় — তাই ঠিক একটা প্রেস = ঠিক এক ধাপ।
+  const tabRef = useRef(tab);
+  useEffect(() => { tabRef.current = tab; }, [tab]);
   useEffect(() => {
     const handleBackButton = (e) => {
-      e.preventDefault();
+      e.preventDefault?.();
       // Print/PDF প্রিভিউ ওভারলে খোলা থাকলে সবার আগে সেটাই বন্ধ করো — এটা React state-এর
       // বাইরে সরাসরি DOM-এ বসানো, তাই এখানে চেক না করলে ব্যাক বাটন চাপলে ওভারলে আটকে থাকে।
       if (typeof window !== "undefined" && window.__closePrintOverlay__) { window.__closePrintOverlay__(); return; }
@@ -14423,17 +14471,22 @@ function SmartBusinessMgmt() {
       // PIN change স্টেপ) — এক ধাপ পিছিয়ে দেয়। কিছু খোলা না থাকলে false।
       if (runBackStack()) return;
       // If not on dashboard, go to dashboard (clears invoice print screen too)
-      if (tab !== "dashboard") { setTab("dashboard"); setDetailCId(null); return; }
+      if (tabRef.current !== "dashboard") { setTab("dashboard"); setDetailCId(null); return; }
       // On dashboard — ask for exit confirmation
       setShowExitConfirm(true);
     };
-    // Capacitor App plugin
+    // Capacitor App plugin — হ্যান্ডেলটা রেখে দেওয়া হচ্ছে যাতে cleanup-এ
+    // সঠিকভাবে .remove() করা যায় (আগে এটা মিসিং ছিল, যেটাই মূল বাগ)।
+    let nativeHandle = null;
+    let cancelled = false;
     if (typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.()) {
-      try {
-        import("@capacitor/app").then(({ App }) => {
-          App.addListener("backButton", handleBackButton);
+      import("@capacitor/app").then(({ App }) => {
+        if (cancelled) return;
+        App.addListener("backButton", handleBackButton).then((handle) => {
+          if (cancelled) { try { handle?.remove?.(); } catch {} return; }
+          nativeHandle = handle;
         }).catch(() => {});
-      } catch {}
+      }).catch(() => {});
     }
     // Browser/PWA popstate fallback
     window.history.pushState(null, "", window.location.href);
@@ -14442,9 +14495,13 @@ function SmartBusinessMgmt() {
       handleBackButton(new Event("backbutton"));
     };
     window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("popstate", onPop);
+      try { nativeHandle?.remove?.(); } catch {}
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, []);
 
   if (!loaded || !authChecked) return (
     <div style={{ ...makeS(DARK).loadScreen, background: "radial-gradient(ellipse at 50% 40%,#001a2c 0%,#000d18 70%)" }}>
@@ -28608,6 +28665,19 @@ function StaffCustomTimePicker({ T, staffName, onGrant }) {
 function DailySummaryModule({ T, S, currentUser, shopName, showToast, customers = [], invoices = [], txns = [], cashLogs = [], products = [], purchaseOrders = [], expenses = [], stockMovements = [] }) {
   const [showDailyCard, setShowDailyCard] = useState(true);
   const [showKpiSection, setShowKpiSection] = useState(true);
+  // 🆕 (২১ জুলাই ২০২৬ — "স্ক্রল ছাড়া এক পেজেই ২০টা কার্ড দেখতে চাই"): কমপ্যাক্ট
+  // লিস্ট-ভিউ ডিফল্টভাবে চালু (ব্যবহারকারীর অনুরোধ অনুযায়ী), পছন্দ localStorage-এ
+  // সংরক্ষিত থাকে — একবার গ্রিড-ভিউতে ফিরে গেলে পরের বারও গ্রিডই দেখাবে।
+  const [kpiCompact, setKpiCompact] = useState(() => {
+    try { return localStorage.getItem("sbm_kpi_compact_view") !== "0"; } catch { return true; }
+  });
+  const toggleKpiCompact = () => {
+    setKpiCompact(v => {
+      const nv = !v;
+      try { localStorage.setItem("sbm_kpi_compact_view", nv ? "1" : "0"); } catch {}
+      return nv;
+    });
+  };
 
   const kpiStats = useKpiStats({ customers, invoices, products, txns, expenses, cashLogs, purchaseOrders, stockMovements });
 
@@ -28643,9 +28713,23 @@ function DailySummaryModule({ T, S, currentUser, shopName, showToast, customers 
               <div style={{ color: T.sub, fontSize: 12.5, marginTop: 3, textAlign:"center" }}>বিক্রয়, লাভ, খরচ ও স্টকের ২০টি কার্ড</div>
             </div>
           </div>
+          {showKpiSection && (
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleKpiCompact(); }}
+              title={kpiCompact ? "গ্রিড ভিউ দেখান" : "কমপ্যাক্ট লিস্ট ভিউ দেখান — স্ক্রল ছাড়া সবটা এক পেজে"}
+              style={{
+                position:"absolute", left: 2, top: "50%", transform:"translateY(-50%)",
+                background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.35)",
+                borderRadius: 9, padding: "5px 8px", color: "#3b82f6", fontSize: 10.5, fontWeight: 800,
+                cursor: "pointer", display: "flex", alignItems: "center", gap: 3, whiteSpace: "nowrap",
+              }}
+            >
+              {kpiCompact ? "▦ গ্রিড" : "☰ লিস্ট"}
+            </button>
+          )}
           <span style={{ position:"absolute", right: 4, top: "50%", transform:"translateY(-50%)", color: T.sub, fontSize: 13 }}>{showKpiSection ? "▲" : "▼"}</span>
         </div>
-        {showKpiSection && <KpiCardsGrid T={T} stats={kpiStats} />}
+        {showKpiSection && <KpiCardsGrid T={T} stats={kpiStats} compact={kpiCompact} />}
       </div>
 
       <div className="qc-gradient-card" style={{ ...S.card }}>
