@@ -805,12 +805,17 @@
 
       <div class="section-head" style="margin-top:22px"><div class="section-title">GitHub থেকে রিলিজ আনুন</div></div>
       <div class="glass card">
-        <div class="hint" style="margin-bottom:10px">প্রতিটা GitHub build স্বয়ংক্রিয়ভাবে একটা Release + APK তৈরি করে। এখান থেকে বেছে নিলে নিচের ভার্সন ও লিংক ফিল্ড auto-fill হবে — শুধু ম্যানুয়ালি টাইপ করা লাগবে না। এতে চাপলেও এখনই কারো কাছে কিছু যায় না, "আপডেট প্রকাশ করুন" চাপলে তবেই যাবে।</div>
         <div class="form-group">
           <select id="upd-gh-release" style="width:100%"><option value="">-- রিলিজ লোড করুন --</option></select>
         </div>
-        <button class="btn-edit" style="width:100%" onclick="loadGithubReleases()">🔄 GitHub রিলিজ লিস্ট লোড করুন</button>
-        <button class="btn-edit" style="width:100%;margin-top:8px" onclick="applyGithubRelease()">⬇️ নির্বাচিত রিলিজ ফর্মে বসান</button>
+        <button class="btn-primary" style="background:linear-gradient(135deg,#0ea5e9,#22d3ee);box-shadow:0 8px 26px rgba(14,165,233,0.38);padding:16px;font-size:15px" onclick="loadGithubReleases()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          GitHub রিলিজ লিস্ট লোড করুন
+        </button>
+        <button class="btn-primary violet" style="margin-top:10px;padding:16px;font-size:15px" onclick="applyGithubRelease()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          নির্বাচিত রিলিজ ফর্মে বসান
+        </button>
         <p id="ghRelMsg" style="font-size:12px;margin-top:10px;text-align:center;min-height:16px;"></p>
       </div>
 
@@ -819,7 +824,6 @@
         <div class="form-group">
           <label>ভার্সন নাম্বার (x.y.z ফরম্যাট) *</label>
           <input id="upd-version" placeholder="যেমন: 1.1.0">
-          <div class="hint">App.jsx-এর <code>APP_VERSION_CODE</code>-এর সাথে মিলিয়ে সেমান্টিকভাবে (x.y.z) কম্পেয়ার হবে — বর্তমান কোডের চেয়ে বড় হলেই দোকানদার নতুন আপডেট দেখতে পাবেন। উপরের বাটন দিয়ে GitHub থেকে auto-fill করতে পারেন।</div>
         </div>
         <div class="form-group">
           <label>APK ডাউনলোড লিংক *</label>
@@ -827,6 +831,9 @@
         </div>
         <div class="form-group">
           <label>রিলিজ নোট (বাংলায়)</label>
+          <select id="upd-notes-template" style="width:100%;margin-bottom:8px" onchange="applyNoteTemplate(this.value)">
+            <option value="">-- একটা ডেমো টেমপ্লেট বাছুন (ঐচ্ছিক) --</option>
+          </select>
           <textarea id="upd-notes" placeholder="যেমন: পারফরম্যান্স উন্নত করা হয়েছে, নতুন এক্সপেন্স ট্রেকার যোগ হয়েছে..."></textarea>
         </div>
         <div class="toggle-row">
@@ -2076,6 +2083,29 @@ window.prefillUpdateForm = function() {
   document.getElementById('upd-version').scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
 
+// ── 📝 রিলিজ নোট ডেমো টেমপ্লেট — বাছলে সেটাই টেক্সটবক্সে ডিফল্ট হিসেবে বসবে,
+// পরে চাইলে ম্যানুয়ালি এডিট করা যাবে ──────────────────────────────────────
+const RELEASE_NOTE_TEMPLATES = [
+  { label: '🐛 বাগ ফিক্স ও স্থিতিশীলতা', text: 'এই আপডেটে কিছু গুরুত্বপূর্ণ বাগ ঠিক করা হয়েছে এবং অ্যাপের সামগ্রিক স্থিতিশীলতা (স্ট্যাবিলিটি) উন্নত করা হয়েছে। কোনো ক্র্যাশ বা অস্বাভাবিক আচরণ দেখলে সেটিংস থেকে এই আপডেট ইনস্টল করে নিন।' },
+  { label: '⚡ পারফরম্যান্স উন্নতি', text: 'অ্যাপ আরও দ্রুত ও স্মুথ করা হয়েছে — পেজ লোডিং সময় কমানো হয়েছে এবং বড় তালিকা (কাস্টমার/পণ্য/ইনভয়েস) স্ক্রল করার সময় ল্যাগ দূর করা হয়েছে।' },
+  { label: '✨ নতুন ফিচার সংযোজন', text: 'এই ভার্সনে কিছু নতুন ফিচার যুক্ত হয়েছে যা আপনার দৈনন্দিন কাজ আরও সহজ করবে। বিস্তারিত জানতে আপডেটের পর অ্যাপের নতুন অপশনগুলো ঘুরে দেখুন।' },
+  { label: '🎨 UI/UX উন্নতি', text: 'অ্যাপের ইন্টারফেস আরও পরিষ্কার, আধুনিক ও সহজবোধ্য করা হয়েছে — বাটন, কার্ড ও নেভিগেশনে ছোট ছোট উন্নতি আনা হয়েছে যাতে ব্যবহার করা আরও আরামদায়ক হয়।' },
+  { label: '🔒 সিকিউরিটি ও ডেটা সুরক্ষা', text: 'অ্যাপের সিকিউরিটি ও আপনার ব্যবসার ডেটা সুরক্ষা আরও জোরদার করা হয়েছে। এই আপডেট ইনস্টল করে সবচেয়ে নিরাপদ ভার্সনে থাকুন।' },
+  { label: '🔄 সিঙ্ক ও ব্যাকআপ উন্নতি', text: 'ডেটা সিঙ্ক ও ব্যাকআপ প্রক্রিয়া আরও নির্ভরযোগ্য করা হয়েছে — ইন্টারনেট সংযোগ কম থাকলেও ডেটা হারানোর ঝুঁকি কমানো হয়েছে।' },
+];
+window.applyNoteTemplate = function(idx) {
+  if (idx === '') return;
+  const t = RELEASE_NOTE_TEMPLATES[Number(idx)];
+  if (!t) return;
+  document.getElementById('upd-notes').value = t.text;
+};
+(function populateNoteTemplates() {
+  const sel = document.getElementById('upd-notes-template');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">-- একটা ডেমো টেমপ্লেট বাছুন (ঐচ্ছিক) --</option>' +
+    RELEASE_NOTE_TEMPLATES.map((t, i) => `<option value="${i}">${t.label}</option>`).join('');
+})();
+
 // ── 🚀 GitHub Release picker — প্রতিটা build-এ auto তৈরি হওয়া Release থেকে
 // version + APK লিংক সরাসরি ফর্মে বসানো, ম্যানুয়ালি টাইপ করা লাগে না ──────────
 const GH_OWNER_REPO = 'jorzism-dotcom/Turjo';
@@ -2089,11 +2119,17 @@ window.loadGithubReleases = async function() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const releases = await res.json();
     ghReleasesCache = releases;
+    // 🆕 সবচেয়ে নতুন non-draft/non-prerelease রিলিজটাকে "লেটেস্ট" ট্যাগ দেওয়া —
+    // GitHub সাধারণত published_at অনুযায়ী নতুন থেকে পুরনো ক্রমে রিলিজ ফেরত দেয়,
+    // তাই লিস্টের প্রথম normal রিলিজটাই আসল latest।
+    const latestIdx = releases.findIndex(r => !r.draft && !r.prerelease);
     sel.innerHTML = '<option value="">-- একটা রিলিজ বাছুন --</option>' + releases.map((r, i) => {
       const apk = (r.assets || []).find(a => a.name.endsWith('.apk'));
       const dt = r.published_at ? new Date(r.published_at).toLocaleString('bn-BD') : '';
-      return `<option value="${i}">${r.tag_name}${apk ? '' : ' (⚠️ APK নেই)'} — ${dt}</option>`;
+      const tag = i === latestIdx ? `🆕 লেটেস্ট — ${r.tag_name}` : r.tag_name;
+      return `<option value="${i}">${tag}${apk ? '' : ' (⚠️ APK নেই)'} — ${dt}</option>`;
     }).join('');
+    if (latestIdx !== -1) sel.value = String(latestIdx);
     msg.style.color = '#6ee7b7'; msg.textContent = `✅ ${releases.length}টি রিলিজ পাওয়া গেছে`;
     setTimeout(() => msg.textContent = '', 4000);
   } catch(e) {
