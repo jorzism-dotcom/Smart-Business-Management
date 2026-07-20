@@ -4142,6 +4142,12 @@ const LOCAL_BUSINESS_SCOPED_KEYS = new Set([
   SK.deletedCustomers, SK.deletedProducts, SK.paymentInvoices,
   SK.suppliers, SK.purchaseOrders, SK.stockMovements, SK.cashLogs,
   SK.expenses, SK.returns, SK.auditLogs, SK.quotations, SK.supplierPayments,
+  // 🆕 ফিক্স (২০ জুলাই ২০২৬ — "থিম আলাদা বিজনেসে আলাদা হওয়া উচিত" ফিডব্যাক):
+  // থিম/ডার্কমোড/ফন্টসাইজ আগে ইচ্ছাকৃতভাবে শপ-লেভেল (unprefixed, সব বিজনেসে
+  // শেয়ার্ড) রাখা হয়েছিল। এখন ইউজারের স্পষ্ট অনুরোধে এগুলোও বিজনেস-স্কোপড —
+  // এক বিজনেসে থিম বদলালে অন্য বিজনেসে সেটা এপ্লাই হবে না। single-business
+  // শপে (prefix null) আচরণ অপরিবর্তিত থাকে।
+  SK.darkMode, SK.activeTheme, SK.fontSize,
 ]);
 let _localBizPrefix = null;
 function setLocalBusinessPrefix(prefix) { _localBizPrefix = prefix || null; }
@@ -4152,7 +4158,50 @@ function LK(key) {
   if (!LOCAL_BUSINESS_SCOPED_KEYS.has(key)) return key;
   return `${key}_${_localBizPrefix}`;
 }
-// Master Reset-এর মতো ক্ষেত্রে সব বিজনেস-টাইপের local cache-ই মুছতে হয় (শুধু
+// ─── Back Stack — hায়ারার্কিক্যাল হার্ডওয়্যার/ব্রাউজার ব্যাক বাটন সিস্টেম ──────────
+// 🆕 (২০ জুলাই ২০২৬ — "যত ভিতরে যাবো, ব্যাক করলে একধাপ করেই পিছাবে, একলাফে না"
+// ফিডব্যাক): আগে App-লেভেল handleBackButton নিজে হার্ডকোড করা কয়েকটা
+// if-চেইন (showMoreMenu/detailCId/cashModal/invModal/dashModal) দিয়ে বুঝত
+// কোনটা বন্ধ করবে — কিন্তু কোনো child কম্পোনেন্টের ভেতরের নিজস্ব sub-view/wizard-
+// step state (যেমন ইনভয়েস-এর step, PIN change-এর pinStep) সম্পর্কে সে কিছুই
+// জানত না, ফলে সেসব ক্ষেত্রে ব্যাক বাটন সরাসরি dashboard-এ চলে যেত (ধাপ বাদ
+// দিয়ে)। এখন যেকোনো নেস্টেড লেয়ার (App-লেভেল হোক বা যেকোনো child কম্পোনেন্টের
+// ভেতরের হোক) খোলার সময় নিজেকে এই স্ট্যাকে পুশ করে, বন্ধ/আনমাউন্ট হলে পপ করে।
+// ব্যাক বাটন চাপলে সবচেয়ে উপরের (সবচেয়ে সাম্প্রতিক/সবচেয়ে ভেতরের) হ্যান্ডলারটাই
+// প্রথমে চেষ্টা হয় — সে `true` রিটার্ন করলে (মানে সে নিজে একধাপ পিছালো/বন্ধ হলো)
+// বাকি সব লজিক (dashboard/exit) স্কিপ হয়ে যায়। স্ট্যাক খালি থাকলেই (কোনো
+// নেস্টেড লেয়ার খোলা নেই) কেবল dashboard/exit ফলব্যাক চলে।
+let _backStack = [];
+function _pushBackHandler(fn) {
+  const entry = { fn };
+  _backStack.push(entry);
+  return () => {
+    const idx = _backStack.indexOf(entry);
+    if (idx !== -1) _backStack.splice(idx, 1);
+  };
+}
+function runBackStack() {
+  for (let i = _backStack.length - 1; i >= 0; i--) {
+    try { if (_backStack[i].fn() === true) return true; } catch {}
+  }
+  return false;
+}
+// useBackHandler(active, handler) — যেকোনো কম্পোনেন্টে ব্যবহার করুন যেকোনো
+// নেস্টেড লেয়ার (মোডাল/সাব-ভিউ/উইজার্ড-স্টেপ)-এর জন্য।
+//   active  — এই লেয়ারটা এখন "খোলা" কিনা (boolean)
+//   handler — () => boolean; true রিটার্ন করলে বোঝায় এই লেয়ার নিজে একধাপ
+//             পিছিয়েছে/বন্ধ হয়েছে (উদাহরণ: ধাপ ২→১, বা মোডাল বন্ধ করা)।
+//             false/undefined রিটার্ন করলে এই লেয়ারটা ব্যাক হ্যান্ডেল করে না,
+//             স্ট্যাকের পরের (নিচের) লেয়ারের কাছে চলে যাবে।
+function useBackHandler(active, handler) {
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+  useEffect(() => {
+    if (!active) return undefined;
+    return _pushBackHandler(() => handlerRef.current());
+  }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+}
+
 // বর্তমান সক্রিয়টা না) — এই হেল্পার একটা key-র জন্য প্রতিটা রেজিস্টার্ড বিজনেস-
 // টাইপের prefixed variant + unprefixed (legacy/single-business) variant ফেরত দেয়।
 function allBizVariantsOf(key) {
@@ -12216,7 +12265,7 @@ function SmartBusinessMgmt() {
 
       const CRITICAL_KEYS = [
         LK(SK.customers), LK(SK.products), LK(SK.invoices), LK(SK.txns), SK.users,
-        SK.shopName, SK.darkMode, SK.activeTheme, SK.fontSize,
+        SK.shopName, LK(SK.darkMode), LK(SK.activeTheme), LK(SK.fontSize),
         LK(SK.paymentInvoices), SK.firebaseConfig, SK.firebaseEnabled,
         SK.authSession, SK.devContact, SK.masterResetHash,
         SK.recoveryPhone, SK.recoveryPinHash,
@@ -12235,9 +12284,9 @@ function SmartBusinessMgmt() {
       const rawTxns         = boot1[LK(SK.txns)];
       const rawUsers        = boot1[SK.users];
       const shopNameVal     = boot1[SK.shopName];
-      const darkModeVal     = boot1[SK.darkMode];
-      const activeThemeVal  = boot1[SK.activeTheme];
-      const fontSizeVal     = boot1[SK.fontSize];
+      const darkModeVal     = boot1[LK(SK.darkMode)];
+      const activeThemeVal  = boot1[LK(SK.activeTheme)];
+      const fontSizeVal     = boot1[LK(SK.fontSize)];
       const rawPayInv       = boot1[LK(SK.paymentInvoices)];
       const fbCfg           = boot1[SK.firebaseConfig];
       const fbOn            = boot1[SK.firebaseEnabled];
@@ -12655,6 +12704,20 @@ function SmartBusinessMgmt() {
     if (_lastAppliedBizPrefixRef.current !== undefined && _lastAppliedBizPrefixRef.current !== prefix) {
       _bumpBusinessSwitch();
       _bumpGlobalResync();
+      // 🆕 ফিক্স (২০ জুলাই ২০২৬ — বিজনেসওয়াইজ আলাদা থিম): থিম/ডার্কমোড/ফন্টসাইজ
+      // Firestore-এ সিঙ্ক হয় না (ডিভাইস-লোকাল প্রেফারেন্স), তাই businessType
+      // বদলালে useFSSCollection resubscribe এগুলো এমনিতে রিফ্রেশ করবে না —
+      // নতুন prefix (উপরে সেট হয়ে গেছে) দিয়ে এই বিজনেসের নিজস্ব সেভ করা থিম
+      // এখানে সরাসরি লোকাল storage থেকে পড়ে state আপডেট করা হচ্ছে। প্রথমবার
+      // এই বিজনেসে থিম সেট না থাকলে অ্যাপ-ডিফল্টে ফিরে যায় (boot-এর সাথে সঙ্গতিপূর্ণ)।
+      (async () => {
+        const [dm, at, fs] = await Promise.all([
+          load(LK(SK.darkMode)), load(LK(SK.activeTheme)), load(LK(SK.fontSize)),
+        ]);
+        setDarkMode(dm ?? true);
+        setActiveTheme((at && at !== "dark") ? at : "neon");
+        setFontSize(fs ?? 15);
+      })();
     }
     _lastAppliedBizPrefixRef.current = prefix;
   }, [fssReady, businessType, enabledBusinessTypes]);
@@ -12925,8 +12988,8 @@ function SmartBusinessMgmt() {
   useEffect(() => { if (loaded) debouncedSave(LK(SK.smsLog), smsLog, 2000); }, [smsLog, loaded]);
   useEffect(() => { if (loaded) save(SK.users,     users);     }, [users, loaded]);
   useEffect(() => { if (loaded) save(SK.shopName,  shopName);  }, [shopName, loaded]);
-  useEffect(() => { if (loaded) save(SK.darkMode,  darkMode);  }, [darkMode, loaded]);
-  useEffect(() => { if (loaded) save(SK.activeTheme, activeTheme); }, [activeTheme, loaded]);
+  useEffect(() => { if (loaded) save(LK(SK.darkMode),  darkMode);  }, [darkMode, loaded]);
+  useEffect(() => { if (loaded) save(LK(SK.activeTheme), activeTheme); }, [activeTheme, loaded]);
   // ── Status Bar color sync ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!currentPreset) return;
@@ -12953,7 +13016,7 @@ function SmartBusinessMgmt() {
       }
     } catch {}
   }, [activeTheme, currentPreset]);
-  useEffect(() => { if (loaded) save(SK.fontSize, fontSize); }, [fontSize, loaded]);
+  useEffect(() => { if (loaded) save(LK(SK.fontSize), fontSize); }, [fontSize, loaded]);
   useEffect(() => { if (loaded) save(LK(SK.deletedCustomers), deletedCustomers); }, [deletedCustomers, loaded]);
   useEffect(() => { if (loaded) save(LK(SK.deletedProducts),  deletedProducts);  }, [deletedProducts,  loaded]);
   // 🗑️ Recycle Bin auto-cleanup — ৩০ দিনের বেশি পুরনো এন্ট্রি স্থায়ীভাবে সরিয়ে দেয়
@@ -14320,6 +14383,16 @@ function SmartBusinessMgmt() {
   const [gdriveBanner, setGdriveBanner] = useState(false); // 🔴 Drive disconnect floating banner
   const [gdriveReconnecting, setGdriveReconnecting] = useState(false);
 
+  // 🆕 এই ৫টা App-লেভেল নেস্টেড লেয়ার (আগে handleBackButton-এর ভেতর হার্ডকোড
+  // if-চেইন ছিল) এখন শেয়ার্ড back-stack-এ রেজিস্টার্ড — প্রতিটা নিজে "খোলা"
+  // থাকলেই স্ট্যাকে থাকবে, বন্ধ হলে নিজে থেকে সরে যাবে। খোলার ক্রম অনুযায়ী
+  // (সবচেয়ে ভেতরেরটা আগে) সঠিক এক-ধাপ-এক-ধাপ ব্যাক আচরণ আসবে।
+  useBackHandler(!!showMoreMenu, useCallback(() => { setShowMoreMenu(false); return true; }, []));
+  useBackHandler(!!detailCId,    useCallback(() => { setDetailCId(null);    return true; }, []));
+  useBackHandler(!!cashModal,    useCallback(() => { setCashModal(null);    return true; }, []));
+  useBackHandler(!!invModal,     useCallback(() => { setInvModal(null);     return true; }, []));
+  useBackHandler(!!dashModal,    useCallback(() => { setDashModal(null);    return true; }, []));
+
   // 🔄 Google Drive auto-reconnect: প্রতি ৩ মিনিটে চেক — expired হলে silent→interactive চেষ্টা
   // Admin-only। Fail হলে floating banner দেখায় যাতে user এক ট্যাপে reconnect করতে পারে।
   useEffect(() => {
@@ -14350,16 +14423,10 @@ function SmartBusinessMgmt() {
       // Print/PDF প্রিভিউ ওভারলে খোলা থাকলে সবার আগে সেটাই বন্ধ করো — এটা React state-এর
       // বাইরে সরাসরি DOM-এ বসানো, তাই এখানে চেক না করলে ব্যাক বাটন চাপলে ওভারলে আটকে থাকে।
       if (typeof window !== "undefined" && window.__closePrintOverlay__) { window.__closePrintOverlay__(); return; }
-      // If the "অন্যান্য" side drawer is open, close it first
-      if (showMoreMenu) { setShowMoreMenu(false); return; }
-      // If detail view is open, go back to list
-      if (detailCId) { setDetailCId(null); return; }
-      // If a cash drawer modal is open, close it first (go back to dashboard)
-      if (cashModal) { setCashModal(null); return; }
-      // If inventory modal is open, close it first (go back to dashboard)
-      if (invModal) { setInvModal(null); return; }
-      // If a dash modal is open, close it first
-      if (dashModal) { setDashModal(null); return; }
+      // 🆕 সবচেয়ে ভেতরের খোলা নেস্টেড লেয়ার (App-লেভেল হোক বা যেকোনো child
+      // কম্পোনেন্টের নিজস্ব wizard-step/sub-view হোক — যেমন ইনভয়েস স্টেপ,
+      // PIN change স্টেপ) — এক ধাপ পিছিয়ে দেয়। কিছু খোলা না থাকলে false।
+      if (runBackStack()) return;
       // If not on dashboard, go to dashboard (clears invoice print screen too)
       if (tab !== "dashboard") { setTab("dashboard"); setDetailCId(null); return; }
       // On dashboard — ask for exit confirmation
@@ -14382,7 +14449,7 @@ function SmartBusinessMgmt() {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detailCId, tab, dashModal, invModal, cashModal, showMoreMenu]);
+  }, [tab]);
 
   if (!loaded || !authChecked) return (
     <div style={{ ...makeS(DARK).loadScreen, background: "radial-gradient(ellipse at 50% 40%,#001a2c 0%,#000d18 70%)" }}>
@@ -15610,11 +15677,22 @@ function makeS(T) {
       transition: "all 0.2s cubic-bezier(0.4,0,0.2,1)",
       letterSpacing: 0.2,
     },
+    // 🆕 রিডিজাইন (২০ জুলাই ২০২৬ — "সক্রিয় বিজনেস কার্ডের মতো সব কার্ড" ফিডব্যাক):
+    // আগে card-এর border ছিল transparent (কোনো গ্র্যাডিয়েন্ট বর্ডার ছিল না) আর
+    // shadow-টা সব থিমে একই হার্ডকোডেড dark rgba ছিল (light থিমেও dark shadow
+    // পড়ত)। এখন "সক্রিয় বিজনেস" বাটনের মতো ডাবল-ব্যাকগ্রাউন্ড গ্র্যাডিয়েন্ট-বর্ডার
+    // ব্যবহার হচ্ছে — কিন্তু businessAccentColor (বিজনেস-নির্দিষ্ট, থিম-নিরপেক্ষ)
+    // এর বদলে T.accent/T.accentDark (থিম-নিজস্ব রং), যাতে থিম বদলালে কার্ডের
+    // বর্ডারও ঠিকমতো বদলায়। shadow-ও এখন T.shadow/T.shadowGlow (প্রতিটা থিমে
+    // আলাদাভাবে সংজ্ঞায়িত) থেকে আসছে — light থিমে হালকা shadow, dark থিমে গাঢ়।
     card: {
       background: T.card, borderRadius: 22,
       padding: sp(18), marginBottom: sp(14),
-      border: `1px solid transparent`,
-      boxShadow: "0 4px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.04)",
+      border: "1.5px solid transparent",
+      backgroundImage: `linear-gradient(${T.card}, ${T.card}), linear-gradient(135deg, ${T.accent}80, ${(T.accentDark || T.accent)}40)`,
+      backgroundOrigin: "border-box",
+      backgroundClip: "padding-box, border-box",
+      boxShadow: `${T.shadow}, 0 0 16px ${T.accentGlow}, inset 0 1px 0 rgba(255,255,255,0.04)`,
       animation: "fadeUp 0.25s cubic-bezier(0.4,0,0.2,1)",
     },
     cardTitle: { color: "#1fd15e", fontWeight: 900, fontSize: fs(18), marginBottom: sp(14), letterSpacing: 0.3 },
@@ -16819,6 +16897,16 @@ function SmartInvoiceBuilder({ T, S, customers, products, setCustomers, setInvoi
     onDone?.();
     setTab?.("dashboard");
   };
+
+  // 🆕 ফিক্স (২০ জুলাই ২০২৬ — "একধাপ করেই পিছাবে" ফিডব্যাক): এই wizard-এর
+  // নিজস্ব step (1/2/3) আগে App-লেভেল ব্যাক হ্যান্ডলারের কাছে অদৃশ্য ছিল —
+  // ফলে যেকোনো স্টেপ থেকে হার্ডওয়্যার ব্যাক চাপলে সরাসরি dashboard-এ চলে
+  // যেত, মাঝের স্টেপগুলো বাদ পড়ে যেত। এখন শেয়ার্ড back-stack-এ রেজিস্টার
+  // করা হচ্ছে — সাফল্য-স্ক্রিন (printInv, সবচেয়ে ভেতরের লেয়ার) আগে বন্ধ হবে,
+  // তারপর স্টেপ ৩→২→১ একধাপ করে, স্টেপ ১-এ থাকলে তবেই বাইরের (dashboard/exit)
+  // লজিক চলবে।
+  useBackHandler(!!printInv, () => { resetAll(); return true; });
+  useBackHandler(!printInv && step > 1, () => { setStep(s => Math.max(1, s - 1)); return true; });
 
   // 🎤 Voice Invoice: পুরো ইনভয়েস ভয়েস দিয়ে তৈরি করুন
   // উদাহরণ: "রহিম সাহেব ৫ কেজি চাল আর ২ লিটার তেল, বাকিতে"
@@ -30082,6 +30170,15 @@ function Settings_({ T, S, shopName,
   const [newPinConfirm,  setNewPinConfirm]  = useState("");
   const [pinChangeErr,   setPinChangeErr]   = useState("");
   const [pinStep,        setPinStep]        = useState(1); // 1=old, 2=new, 3=confirm
+  // 🆕 সেটিং পেজের নেস্টেড প্যানেলগুলো শেয়ার্ড back-stack-এ — থিম/ফন্ট পিকার ও
+  // SMS/রিসাইকেল বিন প্যানেল এক ধাপ (বন্ধ), আর PIN change প্যানেলের ভেতরের
+  // নিজস্ব ধাপ (1→2→3) আগে একধাপ করে পিছাবে, পুরোপুরি ১-এ এলে তবেই প্যানেলটাই বন্ধ হবে।
+  useBackHandler(showThemePicker,  () => { setShowThemePicker(false); return true; });
+  useBackHandler(showFontPicker,   () => { setShowFontPicker(false);  return true; });
+  useBackHandler(showSmsSection,   () => { setShowSmsSection(false);  return true; });
+  useBackHandler(showBinExpanded,  () => { setShowBinExpanded(false); return true; });
+  useBackHandler(showPinChange && pinStep > 1, () => { setPinStep(s => Math.max(1, s - 1)); return true; });
+  useBackHandler(showPinChange && pinStep === 1, () => { setShowPinChange(false); return true; });
   // Master Key gate state
   const [mkTarget,       setMkTarget]       = useState(null); // "firebase" | "sms" | "gdrive" | "ldrive"
   // gdUnlocked/ldUnlocked সরানো হয়েছে — BackupRestoreSystem নিজেই handle করে
