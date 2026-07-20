@@ -2112,7 +2112,12 @@ window.applyGithubRelease = function() {
   const version = (r.tag_name || '').replace(/^v/, '');
   document.getElementById('upd-version').value = version;
   document.getElementById('upd-url').value = apk.browser_download_url;
-  msg.style.color = '#6ee7b7'; msg.textContent = '✅ ভার্সন ও লিংক বসানো হয়েছে — নোট লিখে প্রকাশ করুন';
+  // 🔴 GitHub Release তৈরির সময় workflow যে বডি টেক্সট বসায় সেটাই ডিফল্ট
+  // হিসেবে নোট বক্সে বসছে — চাইলে এখানে এডিট/সম্পূর্ণ বদলে দিতে পারবেন,
+  // Publish করার আগ পর্যন্ত এটা শুধু একটা সাজেশন মাত্র।
+  const notesBox = document.getElementById('upd-notes');
+  if (!notesBox.value.trim() && r.body) notesBox.value = r.body.trim();
+  msg.style.color = '#6ee7b7'; msg.textContent = '✅ ভার্সন, লিংক ও ডিফল্ট নোট বসানো হয়েছে — নোট চাইলে এডিট করে প্রকাশ করুন';
   document.getElementById('upd-version').scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
 
