@@ -29703,21 +29703,29 @@ async function downloadAndInstallApk(url, version, onProgress) {
 
     if (!fileUri) return { ok: false, error: "ডাউনলোড শেষ হয়েছে কিন্তু ফাইল খুঁজে পাওয়া যায়নি" };
 
-    // ── ইনস্টলার খোলা — যা পাওয়া যায় তা দিয়ে চেষ্টা, নাহলে গ্রেসফুল ফলব্যাক ──
+    // ── ইনস্টলার খোলা ──
+    // 🔴 আসল রুট-কজ (এই সেশনে ধরা পড়েছে): @capacitor-community/file-opener
+    // প্যাকেজটা package.json-এ dependency হিসেবে ছিলই না, ফলে `npx cap sync`
+    // এটাকে Android প্রজেক্টে কখনো লিংক করেনি — window.Capacitor.Plugins.FileOpener
+    // সবসময় undefined ছিল। কোড নীরবে Share.share() ফলব্যাকে পড়ে যেত, যেটা
+    // generic ACTION_SEND শেয়ার শীট খোলে (WhatsApp/Gmail/Bluetooth ইত্যাদি) —
+    // Package Installer না। এই কারণেই "ফিক্স করার পরও" স্ক্রিনশটে একই শেয়ার
+    // শীট বারবার দেখা যাচ্ছিল: ফলব্যাকটাই যেন আসল ফিচার মনে হচ্ছিল, আসল
+    // সমস্যা (প্লাগিন লিংক না হওয়া) ধরাই পড়ছিল না।
+    // ফিক্স: package.json-এ dependency যোগ + AndroidManifest-এ
+    // REQUEST_INSTALL_PACKAGES পারমিশন (Android 8+ ছাড়া PackageInstaller
+    // resolve-ই হয় না)। এখন ফলব্যাক সম্পূর্ণ সরানো হলো — FileOpener না
+    // পেলে স্পষ্ট এরর দেখাবে, চুপচাপ অন্য কিছু খুলে বিভ্রান্ত করবে না।
     const FileOpener = window.Capacitor?.Plugins?.FileOpener;
-    if (FileOpener?.open) {
-      await FileOpener.open({ filePath: fileUri, contentType: "application/vnd.android.package-archive" });
-      return { ok: true, installed: true };
+    if (!FileOpener?.open) {
+      console.error("[downloadAndInstallApk] FileOpener plugin not linked. Loaded plugins:", Object.keys(window.Capacitor?.Plugins || {}));
+      return {
+        ok: false,
+        error: "FileOpener প্লাগিন এই বিল্ডে নেই — অ্যাপ পুনরায় বিল্ড/ইনস্টল করা দরকার (adb logcat-এ বিস্তারিত)",
+      };
     }
-    const Share = window.Capacitor?.Plugins?.Share;
-    if (Share?.share) {
-      // এখন fileUri সবসময় "file://" স্কিমসহ আসছে, তাই SharePlugin-এর
-      // isFileUrl() চেক পাস করবে এবং সে নিজেই FileProvider দিয়ে content://
-      // URI-তে রূপান্তর করে Package Installer-সহ শেয়ার শীট খুলবে।
-      await Share.share({ title: `SBM v${version}`, url: fileUri, dialogTitle: "ইনস্টল করতে অ্যাপ বেছে নিন (Package Installer)" });
-      return { ok: true, installed: true };
-    }
-    return { ok: true, installed: false, path: fileUri };
+    await FileOpener.open({ filePath: fileUri, contentType: "application/vnd.android.package-archive" });
+    return { ok: true, installed: true };
   } catch (e) {
     // 🔴 ডায়াগনস্টিক: পুরো নেটিভ এরর অবজেক্ট (code/message/stack)
     // console.error-এ লগ হয় (adb logcat-এ দেখা যাবে) এবং code+message
