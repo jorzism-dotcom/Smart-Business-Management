@@ -293,6 +293,16 @@ jobs:
           if ! grep -q "MANAGE_EXTERNAL_STORAGE" "$MANIFEST"; then
             sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <application|' "$MANIFEST"
           fi
+          # REQUEST_INSTALL_PACKAGES — Android 8+ ছাড়া এই পারমিশন app-এর
+          # নিজের APK ইনস্টলার (FileOpener দিয়ে খোলা) সিস্টেম চুপচাপ ব্লক করে
+          # দেয় বা AndroidManifest-এ declare না থাকলে PackageInstaller
+          # activity resolve-ই হয় না — তখন FileOpener.open() ব্যর্থ হয়ে
+          # ধরা পড়ে এবং কোড Share.share() ফলব্যাকে চলে যায় (generic Share
+          # শীট, ইনস্টলার না) — এটাই ছিল আসল রুট-কজ।
+          if ! grep -q "REQUEST_INSTALL_PACKAGES" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>\n    <application|' "$MANIFEST"
+            echo "✅ REQUEST_INSTALL_PACKAGES permission added"
+          fi
           # ক্যামেরা পারমিশন — স্টাফ সেটআপ QR স্ক্যান ফিচারের জন্য
           if ! grep -q "android.permission.CAMERA" "$MANIFEST"; then
             sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <uses-feature android:name="android.hardware.camera" android:required="false"/>\n    <application|' "$MANIFEST"
