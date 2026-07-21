@@ -25,7 +25,7 @@
 
 ## এন্ট্রি
 
-### ২০২৬-০৭-২২ — এন্টারপ্রাইজ মনিটরিং প্ল্যান ফেজ B (স্তর ২: emulator-integration টেস্ট) — কোড লেখা, sandbox-যাচাই অসম্পূর্ণ
+### ২০২৬-০৭-২২ — এন্টারপ্রাইজ মনিটরিং প্ল্যান ফেজ B (স্তর ২: emulator-integration টেস্ট) সম্পূর্ণ ✅ (real CI-তে কনফার্মড)
 - কী করা হলো: `ENTERPRISE_MONITORING_PLAN.md`-এর ফেজ B (B1–B4)-এর জন্য
   `tests/sync-emulator-tests.mjs` (নতুন, ৭টা কেস) ও CI blocking step যোগ
   করা হলো।
@@ -41,14 +41,14 @@
   reject করত; (২) B3-এর restore-টার্গেটে মনগড়া কালেকশন-নাম ব্যবহার করা
   হয়েছিল যা rules-এর ডিফল্ট-ডিনাই নীতিতে ধরা পড়ত — `customers_pharmacy`
   (আসল path) দিয়ে ঠিক করা হয়েছে।
+- **তৃতীয় বাগ (deployment-এর, কোডের না):** `package.json`-এর script লাইন
+  GitHub আপলোডে বাদ পড়ে যাওয়ায় প্রথম দুইবার (Build #405, #406) CI-তে
+  `npm error Missing script: "test:sync-emulator"` দিয়ে ফেল করেছিল।
+  সংশোধিত `package.json` re-upload করার পর **Build #408-এ real CI-তে
+  ৬ সেকেন্ডে সবুজ টিক দিয়ে pass** — স্ক্রিনশট-কনফার্মড।
 - ব্লাস্ট রেডিয়াস: নতুন টেস্ট ফাইল + CI step, কোনো অ্যাপ কোড ছোঁয়া হয়নি।
-- **⚠️ রিগ্রেশন টেস্ট যোগ হয়েছে কি হ্যাঁ, কিন্তু sandbox-এ চালিয়ে যাচাই করা
-  যায়নি** — network egress-এ `storage.googleapis.com` না থাকায় Firestore
-  Emulator jar ডাউনলোড ব্যর্থ হয় (`status 403: Host not in allowlist`)।
-  বিদ্যমান `npm test`/`lint`/`typecheck` সবই sandbox-এ চালিয়ে green পাওয়া
-  গেছে (কিছু ভাঙেনি), কিন্তু নতুন B1–B4 টেস্ট নিজে pass করে কিনা তা শুধু
-  আসল GitHub Actions রানেই প্রথম প্রমাণিত হবে — সেই রান দেখেই
-  `ENTERPRISE_MONITORING_PLAN.md`-এর B1–B4 বক্স টিক দেওয়া উচিত।
+- রিগ্রেশন টেস্ট যোগ হয়েছে কি: হ্যাঁ — `tests/sync-emulator-tests.mjs`-এ
+  ৭টা কেস, real GitHub Actions runner-এ pass কনফার্মড (Build #408)।
 
 ### ২০২৬-০৭-২২ — এন্টারপ্রাইজ মনিটরিং প্ল্যান ফেজ A (স্তর ১: fuzz + mutation) সম্পূর্ণ
 - কী করা হলো: `ENTERPRISE_MONITORING_PLAN.md`-এর ফেজ A (A1–A3) সম্পূর্ণ করা হলো।

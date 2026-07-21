@@ -14,7 +14,7 @@
 | স্তর | বিবরণ | অবস্থা |
 |---|---|---|
 | ১ — কমিটের আগে (fuzz/mutation) | ✅ `npm run test:fuzz` এখন CI-তে blocking (২২ জুলাই ২০২৬ থেকে, `continue-on-error` সরানো হয়েছে)। `npm run test:mutation` বেসলাইন ৭২.৫৩%, `thresholds.break: 65` বসানো হয়েছে, CI-তে informational step হিসেবে যোগ (এখনো build-gate না, ইচ্ছাকৃত) | **সম্পূর্ণ (ফেজ A)** |
-| ২ — মার্জ/বিল্ডের আগে | `firestore-rules` জব (`test:rules-sync` + `test:rules` emulator) `build` জবের `needs:` হিসেবে বাধ্যতামূলক গেট — কিন্তু multi-device conflict, network-drop mid-sync, backup→restore round-trip — এই ৩টার কোনো real-emulator ইন্টিগ্রেশন টেস্ট নেই | আংশিক |
+| ২ — মার্জ/বিল্ডের আগে | `firestore-rules` জব-এ `test:rules-sync` + `test:rules` emulator + নতুন `test:sync-emulator` (multi-device conflict, network-drop mid-sync, backup→restore round-trip — ৭টা কেস) — সবই `build` জবের `needs:` গেট, Build #408-এ real CI-তে pass | **সম্পূর্ণ (ফেজ B)** |
 | ৩ — রিলিজের আগে ক্যানারি | `.github/workflows/build-apk.yml`-এ end-to-end canary (invoice তৈরি→sync→backup→restore→void) নামে কোনো জব/স্ক্রিপ্ট নেই | সম্পূর্ণ অনুপস্থিত |
 | ৪ — প্রোডাকশন রানটাইম সেলফ-চেক | `src/App.jsx`-এ central error logging আছে (`app_errors/{autoId}`, protik-aa991 প্রজেক্টে পাঠায়) — কিন্তু periodic invariant-check (নেগেটিভ স্টক, cash-drawer mismatch ইত্যাদি), admin.html-এ invariant ড্যাশবোর্ড, এবং কোনো kill-switch/rollback মেকানিজম কোনোটাই নেই | আংশিক |
 
@@ -30,23 +30,36 @@
 
 **নোট:** এই তিনটাই sandbox-এ সরাসরি রান করে যাচাই করা হয়েছে (`npm test`, `npm run test:fuzz` ×১০, `npm run test:mutation` ×২), কিন্তু আসল GitHub Actions runner-এ এই পরিবর্তিত workflow এখনো রান হয়নি — merge-এর পর প্রথম CI রান একবার চোখে দেখে নেওয়া উচিত।
 
-## ফেজ B — স্তর ২: রিয়েল emulator-integration টেস্ট (৪ ধাপ)
+## ফেজ B — স্তর ২: রিয়েল emulator-integration টেস্ট (৪ ধাপ) ✅ সম্পূর্ণ — ২২ জুলাই ২০২৬
 
-⚠️ **যাচাই-অবস্থা (২২ জুলাই ২০২৬):** নিচের ৪টা ধাপের কোড/CI-জব সবই লেখা হয়েছে এবং
-ম্যানুয়ালি রিভিউ করা হয়েছে (একবার rules-validation বাগ ধরা পড়ে ঠিক করাও হয়েছে —
-নিচে দেখুন), কিন্তু **sandbox-এ আসল Firestore Emulator চালিয়ে যাচাই করা যায়নি** —
-sandbox-এর network egress allowlist-এ `storage.googleapis.com` নেই বলে emulator
-jar ডাউনলোডই ব্যর্থ হয় (`Error: download failed, status 403: Host not in
-allowlist: storage.googleapis.com`)। এই কারণে বক্সগুলো এখনো `[x]` করা হয়নি —
-ফেজ A-তে যেমন sandbox-এ ১০ বার চালিয়ে "green" নিশ্চিত হওয়ার পরই টিক দেওয়া
-হয়েছিল, এখানে সেই পর্যায়টা এই সেশনে সম্ভব হয়নি। **আসল যাচাই হবে GitHub Actions-এ
-প্রথম রান-এ** (CI job নিচে B4-এ যোগ করা হয়েছে, blocking) — সেই রানের ফলাফল দেখেই
-এই বক্সগুলো টিক দেওয়া উচিত হবে।
+**যাচাই-ইতিহাস (সংক্ষেপে):** কোড sandbox-এ লেখা হয়েছিল, কিন্তু sandbox-এর network
+egress allowlist-এ `storage.googleapis.com` না থাকায় সেখানে Firestore Emulator
+চালানো যায়নি (jar ডাউনলোড ৪০৩ error)। প্রথম দুইবার আসল GitHub push-এও
+(Build #405, #406) `npm error Missing script: "test:sync-emulator"` দিয়ে ফেল
+করেছিল — কারণ কোড না, `package.json`-এর নতুন script লাইনটা GitHub-এ আপলোডের
+সময় বাদ পড়ে গিয়েছিল। সঠিক `package.json` re-upload করার পর **Build #408-এ
+"🔀🔥 Sync/Backup Emulator ইন্টিগ্রেশন টেস্ট" step ৬ সেকেন্ডে সবুজ টিক দিয়ে
+pass করেছে** (real GitHub Actions runner-এ, স্ক্রিনশট-কনফার্মড) — এটাই এই
+ফেজের চূড়ান্ত প্রমাণ।
 
-- [ ] **B1.** ৩+ ডিভাইস simultaneous conflict সিনারিও — emulator-এ real integration টেস্ট (একই রেকর্ড দুই ডিভাইস থেকে একসাথে write, `mergeCollection`/`effectiveTs` লজিক যাচাই) — কোড লেখা হয়েছে `tests/sync-emulator-tests.mjs`-এ (২টা কেস: ২-ডিভাইস + ৩-ডিভাইস কনফ্লিক্ট, real `serverTimestamp()` দিয়ে), sandbox-এ রান-ভেরিফাই বাকি
-- [ ] **B2.** Network-drop mid-merge সিনারিও — sync মাঝপথে বিচ্ছিন্ন হলে data corrupt হয় না তা যাচাই — কোড লেখা হয়েছে (আংশিক পুশ + resume, এবং duplicate-retry কেস), sandbox-এ রান-ভেরিফাই বাকি। নোট: `pushDurable`/outbox নিজেই `App.jsx`-এর ভেতরে React/IndexedDB-কাপলড কোড, তাই সরাসরি সেটা না চালিয়ে একই আচরণ (partial-write→resume, idempotent retry) real Firestore ডকুমেন্টের বিপরীতে সিমুলেট করা হয়েছে
-- [ ] **B3.** Backup→restore বাইট-বাই-বাইট round-trip টেস্ট (real backup বানিয়ে restore করে ডেটা compare — পুরনো backup format-এর backward-compat সহ) — কোড লেখা হয়েছে (real ডেটা → `pickBackupFields` → JSON round-trip → আলাদা কালেকশনে restore → `diffBackupFields`/`hashCollection` দিয়ে zero-drift চেক, + অজানা legacy কী থাকলেও crash না করা), sandbox-এ রান-ভেরিফাই বাকি
-- [ ] **B4.** নতুন টেস্টগুলো CI workflow-এ (`firestore-rules` জব বা নতুন জব) যোগ করে build-gate করা — `firestore-rules` জবেই নতুন blocking step (`npm run test:sync-emulator`) যোগ করা হয়েছে, YAML syntax যাচাই করা হয়েছে, কিন্তু আসল CI রান এখনো দেখা হয়নি
+✅ **যাচাই-অবস্থা (২২ জুলাই ২০২৬, আপডেট):** আগে sandbox-এ emulator jar ডাউনলোড ব্লক
+ছিল বলে রান-ভেরিফাই সম্ভব হয়নি। এরপর দুইবার (Build #405, #406) আসল CI-তেও
+`npm error Missing script: "test:sync-emulator"` দিয়ে ফেল করেছিল — কারণ
+`package.json`-এ নতুন script লাইনটা GitHub-এ ঠিকভাবে বসেনি (আপলোড-সংক্রান্ত
+সমস্যা, কোডের বাগ না)। `package.json` re-upload করার পর **Build #408-এ
+"🔀🔥 Sync/Backup Emulator ইন্টিগ্রেশন টেস্ট" step সবুজ টিক দিয়ে pass করেছে
+(6s, real GitHub Actions runner-এ, sandbox-এ না)** — এটাই ফেজ A-এর মতোই আসল
+নিশ্চিতকরণ। তাই এখন B1–B4 টিক দেওয়া হলো।
+
+- [x] **B1.** ৩+ ডিভাইস simultaneous conflict সিনারিও — emulator-এ real integration টেস্ট (একই রেকর্ড দুই ডিভাইস থেকে একসাথে write, `mergeCollection`/`effectiveTs` লজিক যাচাই) — `tests/sync-emulator-tests.mjs`-এ ২টা কেস (২-ডিভাইস + ৩-ডিভাইস কনফ্লিক্ট, real `serverTimestamp()` দিয়ে), Build #408-এ real CI-তে pass
+- [x] **B2.** Network-drop mid-merge সিনারিও — sync মাঝপথে বিচ্ছিন্ন হলে data corrupt হয় না তা যাচাই — আংশিক পুশ + resume, এবং duplicate-retry কেস, Build #408-এ real CI-তে pass। নোট: `pushDurable`/outbox নিজেই `App.jsx`-এর ভেতরে React/IndexedDB-কাপলড কোড, তাই সরাসরি সেটা না চালিয়ে একই আচরণ (partial-write→resume, idempotent retry) real Firestore ডকুমেন্টের বিপরীতে সিমুলেট করা হয়েছে
+- [x] **B3.** Backup→restore বাইট-বাই-বাইট round-trip টেস্ট (real backup বানিয়ে restore করে ডেটা compare — পুরনো backup format-এর backward-compat সহ) — real ডেটা → `pickBackupFields` → JSON round-trip → আলাদা কালেকশনে restore → `diffBackupFields`/`hashCollection` দিয়ে zero-drift চেক, + অজানা legacy কী থাকলেও crash না করা, Build #408-এ real CI-তে pass
+- [x] **B4.** নতুন টেস্টগুলো CI workflow-এ (`firestore-rules` জব বা নতুন জব) যোগ করে build-gate করা — `firestore-rules` জবেই নতুন blocking step (`npm run test:sync-emulator`) যোগ করা হয়েছে, Build #408-এ real CI-তে ৬ সেকেন্ডে pass করে জব সবুজ হয়েছে
+
+**নোট:** এই সেশনে (`package.json` re-upload-এর পর) actual GitHub Actions
+runner-এ emulator চালিয়ে সত্যিই green পাওয়া গেছে (স্ক্রিনশট-কনফার্মড) —
+sandbox-এ চালানো হয়নি (নেটওয়ার্ক ব্লক), শুধু আসল CI-তেই। এটাই এই ফেজের
+একমাত্র বাস্তব প্রমাণ, এবং যথেষ্ট।
 
 ## ফেজ C — স্তর ৩: রিলিজ-ক্যানারি (একদম নতুন, ৩ ধাপ)
 
