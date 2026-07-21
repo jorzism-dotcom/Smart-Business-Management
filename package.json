@@ -15,6 +15,7 @@
     "test:mutation": "stryker run",
     "test:rules-sync": "node scripts/check-rules-sync.mjs",
     "test:rules": "firebase emulators:exec --only firestore \"node tests/rules-tests.mjs\" --project demo-sbm-test",
+    "test:sync-emulator": "firebase emulators:exec --only firestore \"node tests/sync-emulator-tests.mjs\" --project demo-sbm-test",
     "emulators": "firebase emulators:start --only firestore,database --project demo-sbm-test",
     "prepare": "husky"
   },

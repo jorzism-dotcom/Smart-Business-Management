@@ -32,10 +32,21 @@
 
 ## ফেজ B — স্তর ২: রিয়েল emulator-integration টেস্ট (৪ ধাপ)
 
-- [ ] **B1.** ৩+ ডিভাইস simultaneous conflict সিনারিও — emulator-এ real integration টেস্ট (একই রেকর্ড দুই ডিভাইস থেকে একসাথে write, `mergeCollection`/`effectiveTs` লজিক যাচাই)
-- [ ] **B2.** Network-drop mid-merge সিনারিও — sync মাঝপথে বিচ্ছিন্ন হলে data corrupt হয় না তা যাচাই (`pushDurable`/outbox resume path)
-- [ ] **B3.** Backup→restore বাইট-বাই-বাইট round-trip টেস্ট (real backup বানিয়ে restore করে ডেটা compare — পুরনো backup format-এর backward-compat সহ)
-- [ ] **B4.** নতুন টেস্টগুলো CI workflow-এ (`firestore-rules` জব বা নতুন জব) যোগ করে build-gate করা
+⚠️ **যাচাই-অবস্থা (২২ জুলাই ২০২৬):** নিচের ৪টা ধাপের কোড/CI-জব সবই লেখা হয়েছে এবং
+ম্যানুয়ালি রিভিউ করা হয়েছে (একবার rules-validation বাগ ধরা পড়ে ঠিক করাও হয়েছে —
+নিচে দেখুন), কিন্তু **sandbox-এ আসল Firestore Emulator চালিয়ে যাচাই করা যায়নি** —
+sandbox-এর network egress allowlist-এ `storage.googleapis.com` নেই বলে emulator
+jar ডাউনলোডই ব্যর্থ হয় (`Error: download failed, status 403: Host not in
+allowlist: storage.googleapis.com`)। এই কারণে বক্সগুলো এখনো `[x]` করা হয়নি —
+ফেজ A-তে যেমন sandbox-এ ১০ বার চালিয়ে "green" নিশ্চিত হওয়ার পরই টিক দেওয়া
+হয়েছিল, এখানে সেই পর্যায়টা এই সেশনে সম্ভব হয়নি। **আসল যাচাই হবে GitHub Actions-এ
+প্রথম রান-এ** (CI job নিচে B4-এ যোগ করা হয়েছে, blocking) — সেই রানের ফলাফল দেখেই
+এই বক্সগুলো টিক দেওয়া উচিত হবে।
+
+- [ ] **B1.** ৩+ ডিভাইস simultaneous conflict সিনারিও — emulator-এ real integration টেস্ট (একই রেকর্ড দুই ডিভাইস থেকে একসাথে write, `mergeCollection`/`effectiveTs` লজিক যাচাই) — কোড লেখা হয়েছে `tests/sync-emulator-tests.mjs`-এ (২টা কেস: ২-ডিভাইস + ৩-ডিভাইস কনফ্লিক্ট, real `serverTimestamp()` দিয়ে), sandbox-এ রান-ভেরিফাই বাকি
+- [ ] **B2.** Network-drop mid-merge সিনারিও — sync মাঝপথে বিচ্ছিন্ন হলে data corrupt হয় না তা যাচাই — কোড লেখা হয়েছে (আংশিক পুশ + resume, এবং duplicate-retry কেস), sandbox-এ রান-ভেরিফাই বাকি। নোট: `pushDurable`/outbox নিজেই `App.jsx`-এর ভেতরে React/IndexedDB-কাপলড কোড, তাই সরাসরি সেটা না চালিয়ে একই আচরণ (partial-write→resume, idempotent retry) real Firestore ডকুমেন্টের বিপরীতে সিমুলেট করা হয়েছে
+- [ ] **B3.** Backup→restore বাইট-বাই-বাইট round-trip টেস্ট (real backup বানিয়ে restore করে ডেটা compare — পুরনো backup format-এর backward-compat সহ) — কোড লেখা হয়েছে (real ডেটা → `pickBackupFields` → JSON round-trip → আলাদা কালেকশনে restore → `diffBackupFields`/`hashCollection` দিয়ে zero-drift চেক, + অজানা legacy কী থাকলেও crash না করা), sandbox-এ রান-ভেরিফাই বাকি
+- [ ] **B4.** নতুন টেস্টগুলো CI workflow-এ (`firestore-rules` জব বা নতুন জব) যোগ করে build-gate করা — `firestore-rules` জবেই নতুন blocking step (`npm run test:sync-emulator`) যোগ করা হয়েছে, YAML syntax যাচাই করা হয়েছে, কিন্তু আসল CI রান এখনো দেখা হয়নি
 
 ## ফেজ C — স্তর ৩: রিলিজ-ক্যানারি (একদম নতুন, ৩ ধাপ)
 

@@ -143,6 +143,62 @@
 নতুন এন্ট্রি সবসময় এই সেকশনের সবার উপরে যোগ করুন (সবচেয়ে নতুনটা প্রথমে)।
 পুরনো এন্ট্রি কখনো মুছবেন না বা এডিট করবেন না।
 
+### ২২ জুলাই ২০২৬ (তৃতীয় সেশন) — ফেজ B ইমপ্লিমেন্টেশন (sandbox-এ যাচাই-অসম্পূর্ণ)
+
+**কেন:** আগের সেশনে ফেজ A সম্পূর্ণ হয়ে আসল GitHub Actions (Build #403)-এ
+কনফার্ম হয়েছিল। এই সেশনে ব্যবহারকারী "শুরু করুন এবং ফেজ B শেষ করে আউটপুট
+দেন" বলে ফেজ B (স্তর ২: real emulator-integration টেস্ট, B1–B4) শুরু করতে
+বলেন।
+
+**কী করা হলো (ফাইলভিত্তিক):**
+- `tests/sync-emulator-tests.mjs` (নতুন) — `tests/rules-tests.mjs`-এর প্রমাণিত
+  প্যাটার্ন (`initializeTestEnvironment`) অনুসরণ করে ৭টা কেস: B1 (২-ডিভাইস ও
+  ৩-ডিভাইস conflict, real `serverTimestamp()`), B2 (network-drop mid-merge +
+  duplicate-retry idempotency), B3 (backup→restore round-trip + অজানা
+  legacy-কী backward-compat)।
+- `package.json` — নতুন script `test:sync-emulator`।
+- `.github/workflows/build-apk.yml` — `firestore-rules` জবে নতুন blocking
+  step যোগ (B4), YAML syntax পার্স করে যাচাই করা হয়েছে।
+- **কোড রিভিউয়ে ২টা বাগ ধরে ঠিক করা হয়েছে চালানোর আগেই** (sandbox-এ রান
+  করা যায়নি বলে বিশেষভাবে সতর্কতার সাথে ম্যানুয়াল রিভিউ করা হয়েছে):
+  ১. B3 টেস্টে negative balance ফিক্সচার ছিল, যা `firestore.rules`-এর
+     `validCustomer()` reject করে দিত (টেস্ট নিজেই rules-এর কাছে ব্যর্থ হতো)।
+  ২. B3-এর "নতুন ডিভাইসে restore" অংশে একটা মনগড়া কালেকশন-নাম ব্যবহার করা
+     হয়েছিল, যা `firestore.rules`-এর ডিফল্ট-ডিনাই নীতির কারণে (কোনো match
+     ব্লকে না মিললে সম্পূর্ণ deny) সব write-ই ব্যর্থ করত — `customers_pharmacy`
+     (আসল, rules-ভ্যালিডেটেড path) দিয়ে ঠিক করা হয়েছে।
+- `ENTERPRISE_MONITORING_PLAN.md` — B1–B4-এর নিচে বিস্তারিত যাচাই-অবস্থা
+  নোট যোগ করা হয়েছে, **কিন্তু বক্স `[x]` করা হয়নি** (নিচে দেখুন কেন)।
+
+**⚠️ এই সেশনে যা যাচাই করা যায়নি:** sandbox-এ `npm run test:sync-emulator`
+চালানোর চেষ্টা করা হয়েছে, কিন্তু sandbox-এর network egress allowlist-এ
+`storage.googleapis.com` না থাকায় Firestore Emulator jar ডাউনলোডই ব্যর্থ হয়
+(`Error: download failed, status 403: Host not in allowlist`) — এটা ফেজ A
+প্ল্যানিং সেশনেও আগেই আশঙ্কা করা হয়েছিল। তাই টেস্ট কোড **চালিয়ে green
+পাওয়া যায়নি**, শুধু নিবিড়ভাবে ম্যানুয়াল রিভিউ করা হয়েছে (উপরে উল্লেখিত ২টা
+বাগ সেই রিভিউতেই ধরা পড়েছে) এবং `node --check` দিয়ে সিনট্যাক্স যাচাই করা
+হয়েছে। যা sandbox-এ সত্যিই চালিয়ে যাচাই করা হয়েছে: বিদ্যমান `npm test`
+(৯১টা কেস green, অপরিবর্তিত), `npm run lint` (০ error, ৪০৩ pre-existing
+warning), `npm run typecheck` (clean) — অর্থাৎ নতুন কোড বিদ্যমান কিছু ভাঙেনি,
+কিন্তু নতুন B1–B4 টেস্টগুলো নিজে সত্যিই pass করে কিনা তার একমাত্র প্রকৃত
+প্রমাণ হবে GitHub Actions-এর প্রথম রান।
+
+**ভবিষ্যতে মাথায় রাখতে হবে:**
+- GitHub-এ push করার পর `firestore-rules` জবের নতুন step-এর ফলাফল দেখে
+  নিশ্চিত হতে হবে — pass করলেই তখন B1–B4 `[x]` করা উচিত, fail করলে
+  root-cause করে ঠিক করতে হবে (ফেজ A-এর মতোই, revert না করে)।
+- ফেজ C (release canary) শুরুর আগে এই B-ফেজের আসল CI ফলাফল একবার দেখে
+  নেওয়া ভালো, কারণ C1 (end-to-end canary)-ও একই real-emulator নির্ভরতায়
+  পড়বে।
+
+**কনসিকুয়েন্স:** কোনো অ্যাপ কোড (App.jsx/sync.js/logic.js/rules) ছোঁয়া
+হয়নি — শুধু নতুন টেস্ট ফাইল + CI step যোগ হয়েছে। ঝুঁকি: নতুন CI step
+blocking রাখা হয়েছে (fuzz test-এর প্যাটার্ন অনুসরণ করে), কিন্তু এটা
+sandbox-এ প্রি-ভেরিফাই করা যায়নি বলে প্রথম আসল রানে fail করার সম্ভাবনা
+ফেজ A-এর চেয়ে বেশি — সেক্ষেত্রে build আটকে যাবে যতক্ষণ না ঠিক করা হয়।
+
+---
+
 ### ২২ জুলাই ২০২৬ (দ্বিতীয় সেশন) — ফেজ A ইমপ্লিমেন্টেশন
 
 **কেন:** আগের (একই দিনের প্রথম) সেশনে `ENTERPRISE_MONITORING_PLAN.md` শুধু

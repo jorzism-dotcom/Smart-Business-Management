@@ -25,6 +25,31 @@
 
 ## এন্ট্রি
 
+### ২০২৬-০৭-২২ — এন্টারপ্রাইজ মনিটরিং প্ল্যান ফেজ B (স্তর ২: emulator-integration টেস্ট) — কোড লেখা, sandbox-যাচাই অসম্পূর্ণ
+- কী করা হলো: `ENTERPRISE_MONITORING_PLAN.md`-এর ফেজ B (B1–B4)-এর জন্য
+  `tests/sync-emulator-tests.mjs` (নতুন, ৭টা কেস) ও CI blocking step যোগ
+  করা হলো।
+- মূল কারণ/প্রসঙ্গ: ফেজ A-এর মতো এখানেও `mergeCollection`/`pickBackupFields`/
+  `diffBackupFields` real Firestore ডকুমেন্টের (real serverTimestamp,
+  real network round-trip) বিপরীতে যাচাই দরকার ছিল — pure-function
+  `tests/sync-tests.mjs` এটা কভার করে না।
+- ফিক্স কোথায়: `tests/sync-emulator-tests.mjs` (নতুন), `package.json`
+  (`test:sync-emulator` script), `.github/workflows/build-apk.yml`
+  (`firestore-rules` জবে নতুন blocking step)।
+- রিভিউয়ে ধরা পড়া ২টা বাগ (চালানোর আগেই, ম্যানুয়াল রিভিউয়ে): (১) B3
+  ফিক্সচারে negative balance ছিল যা `firestore.rules`-এর `validCustomer()`
+  reject করত; (২) B3-এর restore-টার্গেটে মনগড়া কালেকশন-নাম ব্যবহার করা
+  হয়েছিল যা rules-এর ডিফল্ট-ডিনাই নীতিতে ধরা পড়ত — `customers_pharmacy`
+  (আসল path) দিয়ে ঠিক করা হয়েছে।
+- ব্লাস্ট রেডিয়াস: নতুন টেস্ট ফাইল + CI step, কোনো অ্যাপ কোড ছোঁয়া হয়নি।
+- **⚠️ রিগ্রেশন টেস্ট যোগ হয়েছে কি হ্যাঁ, কিন্তু sandbox-এ চালিয়ে যাচাই করা
+  যায়নি** — network egress-এ `storage.googleapis.com` না থাকায় Firestore
+  Emulator jar ডাউনলোড ব্যর্থ হয় (`status 403: Host not in allowlist`)।
+  বিদ্যমান `npm test`/`lint`/`typecheck` সবই sandbox-এ চালিয়ে green পাওয়া
+  গেছে (কিছু ভাঙেনি), কিন্তু নতুন B1–B4 টেস্ট নিজে pass করে কিনা তা শুধু
+  আসল GitHub Actions রানেই প্রথম প্রমাণিত হবে — সেই রান দেখেই
+  `ENTERPRISE_MONITORING_PLAN.md`-এর B1–B4 বক্স টিক দেওয়া উচিত।
+
 ### ২০২৬-০৭-২২ — এন্টারপ্রাইজ মনিটরিং প্ল্যান ফেজ A (স্তর ১: fuzz + mutation) সম্পূর্ণ
 - কী করা হলো: `ENTERPRISE_MONITORING_PLAN.md`-এর ফেজ A (A1–A3) সম্পূর্ণ করা হলো।
 - A1 — Fuzz test blocking: `tests/logic-fuzz.mjs` (৯টা property, প্রতিটা ১০০০
