@@ -25,6 +25,24 @@
 
 ## এন্ট্রি
 
+### ২০২৬-০৭-২২ — এন্টারপ্রাইজ মনিটরিং প্ল্যান ফেজ C (স্তর ৩: রিলিজ-ক্যানারি) কোড লেখা হয়েছে (real CI-তে এখনো যাচাই বাকি)
+- কী করা হলো: `ENTERPRISE_MONITORING_PLAN.md`-এর ফেজ C (C1–C3)-এর জন্য
+  `tests/release-canary.mjs` (নতুন, ৫-ধাপ sequential canary) ও CI blocking
+  step যোগ করা হলো।
+- মূল কারণ/প্রসঙ্গ: ফেজ A/B independent unit/integration কভারেজ দেয়, কিন্তু
+  আসল রিলিজের আগে "পুরো একটা ইনভয়েস lifecycle শুরু থেকে শেষ পর্যন্ত একসাথে
+  ভেঙে যায়নি" এই end-to-end নিশ্চয়তা কোথাও ছিল না — ফেজ C এই গ্যাপ বন্ধ করে।
+- ফিক্স কোথায়: `tests/release-canary.mjs` (নতুন), `package.json`
+  (`test:release-canary` script), `.github/workflows/build-apk.yml`
+  (`firestore-rules` জবে B4-এর পরে নতুন blocking step)।
+- ব্লাস্ট রেডিয়াস: `firestore-rules` জব fail করলে `build` জব (এবং তাই
+  APK/GitHub Release) শুরুই হবে না — ফেজ A/B-এর মতোই ইচ্ছাকৃতভাবে blocking।
+- রিগ্রেশন টেস্ট যোগ হয়েছে কি: হ্যাঁ — `tests/release-canary.mjs`, কিন্তু
+  ফেজ B-এর মতোই sandbox-এ network-ব্লকের কারণে emulator চালিয়ে যাচাই করা
+  যায়নি (শুধু `node --check` সিনট্যাক্স + YAML পার্স-যাচাই হয়েছে) — প্রথম
+  আসল CI রান-ই একমাত্র প্রকৃত প্রমাণ হবে, তাই `ENTERPRISE_MONITORING_PLAN.md`-এ
+  C1–C3 এখনো `[ ]` অবস্থাতেই রাখা হয়েছে।
+
 ### ২০২৬-০৭-২২ — এন্টারপ্রাইজ মনিটরিং প্ল্যান ফেজ B (স্তর ২: emulator-integration টেস্ট) সম্পূর্ণ ✅ (real CI-তে কনফার্মড)
 - কী করা হলো: `ENTERPRISE_MONITORING_PLAN.md`-এর ফেজ B (B1–B4)-এর জন্য
   `tests/sync-emulator-tests.mjs` (নতুন, ৭টা কেস) ও CI blocking step যোগ

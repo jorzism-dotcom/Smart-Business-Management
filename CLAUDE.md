@@ -143,6 +143,59 @@
 নতুন এন্ট্রি সবসময় এই সেকশনের সবার উপরে যোগ করুন (সবচেয়ে নতুনটা প্রথমে)।
 পুরনো এন্ট্রি কখনো মুছবেন না বা এডিট করবেন না।
 
+### ২২ জুলাই ২০২৬ (চতুর্থ সেশন) — ফেজ C ইমপ্লিমেন্টেশন (sandbox-এ যাচাই-অসম্পূর্ণ)
+
+**কেন:** আগের সেশনে ফেজ B আসল GitHub Actions (Build #408)-এ কনফার্ম হয়ে
+সম্পূর্ণ হয়েছিল (package.json re-upload-এর পর)। এই সেশনে ব্যবহারকারী "ফেজ C
+কমপ্লিট করুন" বলে ফেজ C (স্তর ৩: রিলিজ-ক্যানারি, C1–C3) শুরু করতে বলেন।
+
+**কী করা হলো (ফাইলভিত্তিক):**
+- `tests/release-canary.mjs` (নতুন) — `tests/sync-emulator-tests.mjs`
+  (ফেজ B)-এর প্রমাণিত emulator-setup প্যাটার্ন পুনর্ব্যবহার করে, কিন্তু
+  independent case-by-case না, sequential/dependency-chained ৫-ধাপ:
+  ১) ইনভয়েস create (status/total shape-validate), ২) sync (mergeCollection
+  দিয়ে দ্বিতীয়-ডিভাইস merge, changed=true যাচাই), ৩) backup (pickBackupFields
+  + content-hash অ-শূন্য), ৪) restore (`invoices_pharmacy` rules-ভ্যালিডেটেড
+  path-এ লিখে diffBackupFields/hashCollection দিয়ে zero-drift), ৫) void
+  (status "voided" + App.jsx-এর voidInvoice()-এর প্যাটার্ন অনুসরণ করে
+  stockMovements রিভার্সাল এন্ট্রি + firestore.rules-এর validInvoice() সত্যিই
+  অবৈধ status reject করছে কিনা একটা নেগেটিভ-চেকও করা হয়েছে)।
+- প্রতিটা ধাপ fail করলে `printReport()` স্পষ্টভাবে দেখায় কোন ধাপে থেমেছে এবং
+  বাকিগুলো কেন স্কিপ হয়েছে (C3)।
+- `package.json` — নতুন script `test:release-canary`।
+- `.github/workflows/build-apk.yml` — `firestore-rules` জবে (যেটার উপর
+  `build` জব `needs:` নির্ভরশীল) B4-এর ঠিক পরে নতুন blocking step যোগ করা
+  হয়েছে (C2) — YAML `python3 -c "import yaml..."` দিয়ে পার্স করে valid
+  নিশ্চিত করা হয়েছে।
+- `ENTERPRISE_MONITORING_PLAN.md` — ফেজ C-এর নিচে বিস্তারিত implementation
+  নোট যোগ করা হয়েছে, **কিন্তু বক্স `[x]` করা হয়নি** (নিচে দেখুন কেন)।
+
+**⚠️ এই সেশনে যা যাচাই করা যায়নি:** ফেজ B-এর মতোই sandbox-এর network egress
+allowlist-এ `storage.googleapis.com` না থাকায় Firestore Emulator jar
+ডাউনলোড করে `npm run test:release-canary` সত্যিই চালিয়ে green পাওয়া যায়নি।
+যা সত্যিই যাচাই করা হয়েছে: `node --check tests/release-canary.mjs`
+(সিনট্যাক্স ঠিক), `package.json` valid JSON, `build-apk.yml` valid YAML।
+তাই এটাও ফেজ B-এর মতো একই ঝুঁকিতে আছে — প্রথম আসল CI রান-ই একমাত্র প্রকৃত
+প্রমাণ হবে।
+
+**ভবিষ্যতে মাথায় রাখতে হবে:**
+- GitHub-এ push/upload করার সময় `package.json`-এর নতুন script লাইনটা
+  ঠিকভাবে আপলোড হয়েছে কিনা ডাবল-চেক করতে হবে (ফেজ B-তে ঠিক এই ভুলেই দুইবার
+  Build fail হয়েছিল, root cause কোড না)।
+- প্রথম CI রানে `firestore-rules` জবের নতুন "🐤 রিলিজ-ক্যানারি" step-এর
+  ফলাফল দেখে নিশ্চিত হয়ে তবেই `ENTERPRISE_MONITORING_PLAN.md`-এ C1–C3
+  `[x]` করা উচিত।
+- এরপর ফেজ D (প্রোডাকশন সেলফ-চেক: invariant-check, admin.html ড্যাশবোর্ড,
+  কিল-সুইচ) বাকি আছে।
+
+**কনসিকুয়েন্স:** কোনো বিদ্যমান অ্যাপ কোড (App.jsx/sync.js/logic.js/rules)
+ছোঁয়া হয়নি — শুধু নতুন টেস্ট ফাইল + CI step যোগ হয়েছে। নতুন CI step blocking
+রাখা হয়েছে (ফেজ A/B-এর প্যাটার্ন অনুসরণ করে), sandbox-এ প্রি-ভেরিফাই করা
+যায়নি বলে প্রথম আসল রানে fail করার সম্ভাবনা আছে — সেক্ষেত্রে root-cause করে
+ঠিক করতে হবে, revert না করে।
+
+---
+
 ### ২২ জুলাই ২০২৬ (তৃতীয় সেশন) — ফেজ B ইমপ্লিমেন্টেশন (sandbox-এ যাচাই-অসম্পূর্ণ)
 
 **কেন:** আগের সেশনে ফেজ A সম্পূর্ণ হয়ে আসল GitHub Actions (Build #403)-এ
