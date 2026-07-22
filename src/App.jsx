@@ -6403,6 +6403,14 @@ const pushCashLog = (entry) => {
   return entry;
 };
 
+// ── returns-ও এখন (Phase 8) windowed real-time sync (৩৫ দিন), একই কারণে
+// useFSSCollection আর local→remote push করে না। processReturn()-এ নতুন রিটার্ন
+// এন্ট্রি তৈরির সময় এই হেল্পার দিয়ে সরাসরি Firestore-এ push হয়।
+const pushReturnEntry = (entry) => {
+  if (FSS.isReady()) pushDurable("returns", entry.id, withTs(entry));
+  return entry;
+};
+
 // ─── 🔴 ফিক্স (ফেজ ৩): জেনেরিক resync-trigger — শুধু "users" ছাড়া বাকি সব
 // collection mount-এ একবারই সাবস্ক্রাইব হতো, Android background listener-death
 // হলে app resume করলেও আর recover হতো না। এই global pub-sub tick প্রতিটা
@@ -12634,17 +12642,19 @@ function SmartBusinessMgmt() {
   const appResyncTick = useResyncTick();
 
   // 🔴 ফিক্স (durability গ্যাপ, পার্ট ২): pushDurable() দিয়ে SyncOutbox-এ persist
-  // হওয়া invoices/txns/stockMovements/cashLogs এন্ট্রি এই effect ছাড়া কখনো
-  // retry হতো না (useFSSCollection-এর ভেতরের flush logic শুধু সেই হুক-ব্যবহারকারী
-  // কালেকশনগুলোর জন্যই)। boot/resume/online/heartbeat-এ (fssReady বা
-  // appResyncTick বদলালে) এই ৪টা কালেকশনের বাকি-থাকা outbox এন্ট্রি আবার
-  // Firestore-এ পাঠানোর চেষ্টা করা হয়।
+  // হওয়া invoices/txns/stockMovements/cashLogs/returns/auditLogs এন্ট্রি এই effect
+  // ছাড়া কখনো retry হতো না (useFSSCollection-এর ভেতরের flush logic শুধু সেই
+  // হুক-ব্যবহারকারী কালেকশনগুলোর জন্যই)। boot/resume/online/heartbeat-এ (fssReady
+  // বা appResyncTick বদলালে) এই ৬টা windowed কালেকশনের বাকি-থাকা outbox এন্ট্রি
+  // আবার Firestore-এ পাঠানোর চেষ্টা করা হয়। (🔴 ফিক্স — Phase 8: returns/auditLogs
+  // এখন windowed হওয়ায় এই তালিকায় যোগ করা হলো, নাহলে অফলাইনে তৈরি হওয়া রিটার্ন/
+  // অডিট এন্ট্রি reconnect-এর পরও কখনো ফ্লাশ হতো না।)
   useEffect(() => {
     if (!fssReady) return;
     let cancelled = false;
     (async () => {
       if (GLOBAL_RESET_MARKER_AT && (Date.now() - GLOBAL_RESET_MARKER_AT < 120000)) return;
-      for (const coll of ["invoices", "txns", "stockMovements", "cashLogs"]) {
+      for (const coll of ["invoices", "txns", "stockMovements", "cashLogs", "returns", "auditLogs"]) {
         const items = await SyncOutbox.getAll(coll);
         if (cancelled || !items.length) continue;
         const currentPrefix = FSS._businessPrefix || null;
@@ -13048,13 +13058,66 @@ function SmartBusinessMgmt() {
   // 🔴 ফিক্স: expenses-এও একই প্যাটার্ন — auto-delete বন্ধ, ইচ্ছাকৃত ডিলিট এখন
   // সরাসরি FSS.deleteRecord("expenses", id) কল করে (দেখুন Expenses পেজ)।
   useFSSCollection("expenses", expenses, setExpenses, fssReady, { onSync: setSyncToast, syncDeletes: false });
-  // 🔴 ফিক্স (প্রিভেন্টিভ — একই কারণে, দেখুন suppliers-এর কমেন্ট)
-  useFSSCollection("returns",  returns,  setReturns,  fssReady, { onSync: setSyncToast, syncDeletes: false });
-  // 🔴 ফিক্স (products/smsLog-এর মতোই সুরক্ষা): লোকাল auditLogs ২০০০-এ ক্যাপ করা
-  // হয় (setAuditLogs(...).slice(0,2000) দেখুন) — নিছক স্টোরেজ ম্যানেজমেন্ট, তাই
-  // এই ছাঁটাইয়ে Firestore delete পাঠানো ঠিক না (অডিট ট্রেইল সব ডিভাইস থেকে
-  // হারিয়ে যাওয়ার ঝুঁকি)।
-  useFSSCollection("auditLogs", auditLogs, setAuditLogs, fssReady, { onSync: setSyncToast, syncDeletes: false });
+  // 🔴 ফিক্স (Phase 8 — returns windowing): stockMovements/cashLogs-এর মতোই এখন
+  // শুধু শেষ ৩৫ দিনের returns real-time sync হয় (আগে: পুরো collection pull,
+  // দোকান পুরনো হলে/বহু শাখায় বাড়তেই থাকত)। নতুন রিটার্ন এন্ট্রি তৈরির সময়
+  // processReturn()-এর ভেতরেই সরাসরি Firestore-এ push হয় (pushDurable দিয়ে,
+  // useFSSCollection-এর ডিফ-পুশের বদলে)। ৩৫ দিন window এই পেজের সব হিসাব
+  // (monthVoidedRefund, getReturnedAmountForInvoice ইত্যাদি) "এই মাস"-ভিত্তিক
+  // বলে যথেষ্ট — invoices নিজেই আগে থেকে ৩০-দিন windowed, তাই সামঞ্জস্যপূর্ণ।
+  // Firestore index লাগবে: returns → dateKey (ASC)।
+  useEffect(() => {
+    if (!fssReady || !FSS._db) return;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - 35);
+    const cutoff = _dateKeyOf(cutoffDate);
+
+    const colRef = FSS.col("returns");
+    const q = query(colRef, where("dateKey", ">=", cutoff), orderBy("dateKey", "desc"));
+
+    const unsub = onSnapshot(q, (snap) => {
+      const recent = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      // 🔴 ফিক্স (windowed listener merge — cashLogs/stockMovements-এর প্যারালাল)
+      setReturns(prev => {
+        const recentIds = new Set(recent.map(r => r.id));
+        const unconfirmedLocal = prev.filter(p => !recentIds.has(p.id) && !p._serverTs);
+        return [...unconfirmedLocal, ...recent];
+      });
+      FSS._notifySnapshotWaiters("returns"); // 🆕 Business Switcher waiter
+    }, () => { /* offline — Firestore cache থেকে কাজ চলবে */ });
+
+    return () => unsub();
+  }, [fssReady, appResyncTick]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 🔴 ফিক্স (Phase 8 — auditLogs windowing): একই কারণে auditLogs-ও এখন শেষ ৩৫
+  // দিনের real-time windowed sync। AuditTrailModule-এর সর্বোচ্চ dateRange ফিল্টার
+  // "month" (৩০ দিন) — তাই ৩৫ দিন window যথেষ্ট বাফার দেয়। নতুন এন্ট্রি এখন
+  // auditLog()-এর ভেতরেই সরাসরি Firestore-এ push হয় (pushDurable দিয়ে)। লোকাল
+  // ২০০০-ক্যাপ (নিচে auditLog() দেখুন) শুধু মেমরি ম্যানেজমেন্ট — উইন্ডো নিজেই
+  // এখন অনেক ছোট রাখবে বলে বাস্তবে খুব কমই hit হবে।
+  // Firestore index লাগবে: auditLogs → dateKey (ASC)।
+  useEffect(() => {
+    if (!fssReady || !FSS._db) return;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - 35);
+    const cutoff = _dateKeyOf(cutoffDate);
+
+    const colRef = FSS.col("auditLogs");
+    const q = query(colRef, where("dateKey", ">=", cutoff), orderBy("dateKey", "desc"));
+
+    const unsub = onSnapshot(q, (snap) => {
+      const recent = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      // 🔴 ফিক্স (windowed listener merge — cashLogs/stockMovements-এর প্যারালাল)
+      setAuditLogs(prev => {
+        const recentIds = new Set(recent.map(r => r.id));
+        const unconfirmedLocal = prev.filter(p => !recentIds.has(p.id) && !p._serverTs);
+        return [...unconfirmedLocal, ...recent].slice(0, 2000);
+      });
+      FSS._notifySnapshotWaiters("auditLogs"); // 🆕 Business Switcher waiter
+    }, () => { /* offline — Firestore cache থেকে কাজ চলবে */ });
+
+    return () => unsub();
+  }, [fssReady, appResyncTick]); // eslint-disable-line react-hooks/exhaustive-deps
   // 🔴 ফিক্স (প্রিভেন্টিভ — একই কারণে, দেখুন suppliers-এর কমেন্ট)
   useFSSCollection("quotations", quotations, setQuotations, fssReady, { onSync: setSyncToast, syncDeletes: false });
   // 🔴 ফিক্স: supplierPayments-এও একই প্যাটার্ন — auto-delete বন্ধ, ইচ্ছাকৃত ডিলিট
@@ -14068,6 +14131,9 @@ function SmartBusinessMgmt() {
   // ── 📋 Audit Log — কে কখন কী করলো (security-sensitive actions) ───────────────
   // action: "INVOICE_VOID" | "PRODUCT_PRICE_CHANGE" | "STOCK_ADJUST" | "DISCOUNT_APPLY" |
   //         "PRODUCT_DELETE" | "CUSTOMER_DELETE" | "BAKI_COLLECT" | "USER_ROLE_CHANGE" ইত্যাদি
+  // 🔴 ফিক্স (Phase 8): auditLogs এখন windowed real-time sync (useFSSCollection আর
+  // diff-push করে না) — তাই cashLogs/returns-এর প্যাটার্নে এখানে সরাসরি
+  // pushDurable() দিয়ে Firestore-এ push করা হচ্ছে।
   const auditLog = useCallback((action, details = {}) => {
     const entry = {
       id: uid(),
@@ -14081,6 +14147,7 @@ function SmartBusinessMgmt() {
       time:     nowStr(),
       createdAt: new Date().toISOString(),
     };
+    if (FSS.isReady()) pushDurable("auditLogs", entry.id, withTs(entry));
     setAuditLogs(prev => [entry, ...prev].slice(0, 2000)); // সর্বোচ্চ ২০০০টা রাখি — স্টোরেজ সীমিত রাখতে
     return entry;
   }, [currentUser, setAuditLogs]);
@@ -15135,6 +15202,7 @@ function SmartBusinessMgmt() {
               fssReady={fssReady}
               supplierPayments={supplierPayments}
               setSupplierPayments={setSupplierPayments}
+              returns={returns}
               onGoToPurchaseEntry={() => { setDashModal({ type: "purchase-entry" }); }}
             />
           </ErrorBoundary>
@@ -15232,6 +15300,7 @@ function SmartBusinessMgmt() {
               cashLogs={cashLogs}
               setCashLogs={setCashLogs}
               auditLog={auditLog}
+              voidInvoice={voidInvoice}
             />
           </ErrorBoundary>
         )}
@@ -19872,7 +19941,7 @@ function DashPurchaseEntryModal({ T, S, businessType = "pharmacy", products, set
 }
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
-function Dashboard({ T, S, businessType = "pharmacy", customers, totalBaki, todayBaki, todayJoma, todayTotal, todayInvs, setTab, txns, dashModal, setDashModal, invModal, setInvModal, cashModal, setCashModal, invoices, paymentInvoices, shopName, todayCashSale, todayProfit, products, purchaseOrders, voidInvoice, currentUser, onGoToPurchaseEntry, setProducts, stockMovements = [], setStockMovements, setPurchaseOrders, cashLogs, setCashLogs, reorderAlerts = [], expenses = [], cashFlow = null, fssReady = false, supplierPayments = [], setSupplierPayments }) {
+function Dashboard({ T, S, businessType = "pharmacy", customers, totalBaki, todayBaki, todayJoma, todayTotal, todayInvs, setTab, txns, dashModal, setDashModal, invModal, setInvModal, cashModal, setCashModal, invoices, paymentInvoices, shopName, todayCashSale, todayProfit, products, purchaseOrders, voidInvoice, currentUser, onGoToPurchaseEntry, setProducts, stockMovements = [], setStockMovements, setPurchaseOrders, cashLogs, setCashLogs, reorderAlerts = [], expenses = [], cashFlow = null, fssReady = false, supplierPayments = [], setSupplierPayments, returns = [] }) {
   const [viewInv,    setViewInv]    = useState(null);
   const [viewPayInv, setViewPayInv] = useState(null);
   const [listDate,   setListDate]   = useState(() => todayEn()); // YYYY-MM-DD
@@ -22126,9 +22195,19 @@ function Dashboard({ T, S, businessType = "pharmacy", customers, totalBaki, toda
   if (voidConfirm) {
     const { inv, step, reason, pinInput } = voidConfirm;
     const invCode = `#${inv.id?.slice(-6).toUpperCase()}`;
-    const bakiAmt = inv.payType === "baki" ? inv.total : (inv.bakiAmount || 0);
+    // 🔴 ফিক্স (Phase 7 — আংশিক রিটার্ন-অ্যাওয়্যার ভয়েড প্রিভিউ): এই ইনভয়েসে আগে
+    // থেকেই কোনো পণ্য প্রোডাক্ট-রিটার্নে ফেরত নেওয়া থাকলে raw inv.bakiAmount/
+    // inv.items ব্যবহার করলে ভয়েড কনফার্মেশনে ভুল (বেশি) বাকি/স্টক-পরিমাণ দেখাত —
+    // getReturnedAmountForInvoice/getReturnedQtyForInvoice দিয়ে এখন প্রকৃত
+    // অবশিষ্ট অংশ হিসাব করা হচ্ছে (calcVoidNetChange()-এ যেভাবে হিসাব হয়, একই সূত্র)।
+    const alreadyReturnedBakiAmt = getReturnedAmountForInvoice(returns, inv.id, "baki");
+    const hasPriorReturns = (returns || []).some(r => r && r.invoiceId === inv.id);
+    const bakiAmt = Math.max(0, (inv.payType === "baki" ? inv.total : (inv.bakiAmount || 0)) - alreadyReturnedBakiAmt);
     const hasBaki = (inv.payType === "baki" || inv.payType === "partial") && bakiAmt > 0;
-    const hasStock = inv.items && inv.items.length > 0;
+    const remainingStockItems = (inv.items || [])
+      .map(it => ({ ...it, remainingQty: Math.max(0, (it.qty || 0) - getReturnedQtyForInvoice(returns, inv.id, it.productId)) }))
+      .filter(it => it.remainingQty > 0);
+    const hasStock = remainingStockItems.length > 0;
 
     const overlayStyle = {
       position: "fixed", inset: 0, zIndex: 9999,
@@ -22191,8 +22270,17 @@ function Dashboard({ T, S, businessType = "pharmacy", customers, totalBaki, toda
                 <div>
                   <div style={{ color:"#0ea5e9", fontWeight:700, fontSize:12 }}>স্টক ফিরে আসবে</div>
                   <div style={{ color:"#94a3b8", fontSize:11, marginTop:2 }}>
-                    {inv.items?.map(it => `${it.name || it.productName} (${it.qty}${it.unit||""})`).join(", ")} ইনভেন্টরিতে যোগ হবে
+                    {remainingStockItems.map(it => `${it.name || it.productName} (${it.remainingQty}${it.unit||""})`).join(", ")} ইনভেন্টরিতে যোগ হবে
                   </div>
+                </div>
+              </div>
+            )}
+            {hasPriorReturns && (
+              <div style={{ display:"flex", alignItems:"flex-start", gap:10, background:"#eab3080e", border:"1px solid #eab30833", borderRadius:10, padding:"10px 12px" }}>
+                <span style={{ fontSize:16, flexShrink:0 }}>⚠️</span>
+                <div>
+                  <div style={{ color:"#eab308", fontWeight:700, fontSize:12 }}>এই ইনভয়েসে আগেই আংশিক পণ্য ফেরত নেওয়া হয়েছে</div>
+                  <div style={{ color:"#94a3b8", fontSize:11, marginTop:2 }}>উপরের বাকি/স্টকের হিসাব সেই ফেরত বাদ দিয়ে দেখানো হচ্ছে</div>
                 </div>
               </div>
             )}
@@ -24092,6 +24180,7 @@ function InvoiceReceipt({ T, S, inv, customer, type = "buyer" }) {
       return `<tr><td class="serial">${i+1}</td><td>${medBadgeHtmlStr(item.dosageForm)}${item.name}</td><td class="num">${item.qty}</td><td class="num">৳${fmtMoney(item.price)}</td><td class="num" style="color:#16a34a;">${_d>0?`–৳${fmtMoney(_d)}${_p>0?` (${_p}%)`:""}`:"—"}</td><td class="amount" style="color:#3b82f6;">৳${fmtMoney(_g-_d)}</td></tr>`;
     }).join("");
     const content = `
+      ${inv.status === "voided" ? `<div style="margin-bottom:10px;background:#ef444422;border:1px solid #ef444455;border-radius:8px;padding:6px 12px;display:inline-block;"><span style="color:#ef4444;font-weight:800;font-size:13px;">❌ বাতিলকৃত</span>${inv.voidReason ? ` <span style="color:#ef4444cc;font-size:12px;">— ${inv.voidReason}</span>` : ""}</div>` : ""}
       <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
         <div style="flex:1;background:#0369a115;border-radius:10px;padding:10px 14px;">
           <div style="color:#666;font-size:11px;">কাস্টমার</div>
@@ -24137,6 +24226,12 @@ function InvoiceReceipt({ T, S, inv, customer, type = "buyer" }) {
             {isBuyer ? "ক্রেতার কপি" : "বিক্রেতার কপি"} · #{inv.id.toUpperCase()}
           </div>
           <div style={{ color: T.sub, fontSize: 11 }}>{inv.date}</div>
+          {inv.status === "voided" && (
+            <div style={{ marginTop: 8, display: "inline-block", background: "#ef444422", border: "1px solid #ef444455", borderRadius: 8, padding: "4px 10px" }}>
+              <span style={{ color: "#ef4444", fontWeight: 800, fontSize: 12 }}>❌ বাতিলকৃত</span>
+              {inv.voidReason && <span style={{ color: "#ef4444cc", fontSize: 11 }}> — {inv.voidReason}</span>}
+            </div>
+          )}
         </div>
         <div style={S.dashed} />
         <div style={{ fontSize: 12, color: T.sub, display: "flex", flexDirection: "column", gap: 3, marginBottom: 10 }}>
@@ -24290,6 +24385,11 @@ function InvoiceReceiptPrint({ inv, customer, type }) {
       <div className="center bold" style={{ fontSize: 16 }}>{inv.shopName || "SBM"}</div>
       <div className="center" style={{ fontSize: 11 }}>{isBuyer ? "ক্রেতার কপি" : "বিক্রেতার কপি"} | #{inv.id.toUpperCase()}</div>
       <div className="center" style={{ fontSize: 11 }}>{inv.date}</div>
+      {inv.status === "voided" && (
+        <div className="center bold" style={{ fontSize: 12, marginTop: 2 }}>
+          ❌ বাতিলকৃত{inv.voidReason ? ` — ${inv.voidReason}` : ""}
+        </div>
+      )}
       <div className="line" />
       <div style={{ fontSize: 11 }}>কাস্টমার: {inv.customerName}</div>
       <div style={{ fontSize: 11 }}>মোবাইল: {inv.customerMobile}</div>
@@ -26857,7 +26957,7 @@ const RH_MONTH_NAMES_BN = ["জানুয়ারি","ফেব্রুয�
 const rhDayLabel   = (dk) => { const d = new Date(dk); if (isNaN(d.getTime())) return dk; return `${d.getDate()} ${RH_MONTH_NAMES_BN[d.getMonth()]}, ${d.getFullYear()}`; };
 const rhMonthLabel = (mk) => { const [y, m] = (mk || "").split("-"); return m ? `${RH_MONTH_NAMES_BN[parseInt(m, 10) - 1]} ${y}` : mk; };
 
-function ReturnModule({ T, S, invoices, products, customers, returns, setReturns, setProducts, setCustomers, setStockMovements, addTxn, showToast, currentUser, shopName, setCashLogs, auditLog }) {
+function ReturnModule({ T, S, invoices, products, customers, returns, setReturns, setProducts, setCustomers, setStockMovements, addTxn, showToast, currentUser, shopName, setCashLogs, auditLog, voidInvoice }) {
 
   const fmt      = n => fmtMoney(n);
   const todayKey = _dateKeyOf(new Date());
@@ -26869,6 +26969,16 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
   // থেকেই এখন প্রতিটা পণ্যের জন্য ফেরত (return) প্রসেস করা যাবে (নিচে দেখুন) ──
   const [invSearch, setInvSearch]   = React.useState("");
   const [detailInv, setDetailInv]   = React.useState(null); // ফুল ডিটেইলস মোডাল — যেকোনো সোর্স থেকে ওপেন হয়
+  // 🆕 Phase 7 — এই মোডাল থেকেই পুরো ইনভয়েস ভয়েড করার কোলাপসিবল সেকশন (voidInvoice()
+  // Invoice History-এর সাথে শেয়ার্ড — একই জায়গা থেকে void + partial return দুটোই)
+  const [voidSectionOpen, setVoidSectionOpen] = React.useState(false);
+  const [voidReasonInput, setVoidReasonInput] = React.useState("");
+  const [voidBusy, setVoidBusy] = React.useState(false);
+  React.useEffect(() => {
+    setVoidSectionOpen(false);
+    setVoidReasonInput("");
+    setVoidBusy(false);
+  }, [detailInv?.id]);
 
   const searchInvoice = React.useCallback(() => {
     const q = invSearch.trim().toUpperCase();
@@ -27212,6 +27322,32 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
           }, 0);
           return { ...c, balance: newBal };
         }));
+        // 🔴 ফিক্স (Phase 6 — পেমেন্ট রিমাইন্ডার সিঙ্ক): createInvoice()-এ
+        // Notif.schedulePaymentReminder() দিয়ে শিডিউল করা এই ইনভয়েসের due-date
+        // রিমাইন্ডার এতদিন বাকি-মোড রিটার্নের পরও পুরনো (বড়) amount নিয়ে চলতেই
+        // থাকত — voidInvoice()-এ পুরো ইনভয়েস বাতিল হলে যেমন cancelPaymentReminder()
+        // কল হয় (দেখুন সেই ফিক্স), ঠিক একইভাবে এখানে আংশিক রিটার্নের পর এই
+        // ইনভয়েসের নিজের অবশিষ্ট বাকি হিসাব করে হয় রিমাইন্ডার রিশিডিউল (কম amount
+        // দিয়ে) নয়তো (বাকি ০ বা কম হলে) সম্পূর্ণ বাতিল করা হচ্ছে। schedulePaymentReminder()
+        // একই invId→idHash সূত্র ব্যবহার করে বলে নতুন কল আগেরটাকেই ওভাররাইট/রিশিডিউল করে।
+        if (inv.dueDate) {
+          const freshReturnsNow = useAppStore.getState().returns || [];
+          // এই রিটার্ন এন্ট্রি এখনো returns কালেকশনে push হয়নি (নিচে ধাপ ৪-এ হবে),
+          // তাই এখনকার refundAmount আলাদাভাবে যোগ করা হচ্ছে।
+          const alreadyReturnedBakiAmount = getReturnedAmountForInvoice(freshReturnsNow, inv.id, "baki") + refundAmount;
+          const originalInvoiceBaki = (inv.payType === "baki" ? inv.total : (inv.bakiAmount || 0)) - (inv.overpayAmount || 0);
+          const remainingInvoiceBaki = Math.max(0, originalInvoiceBaki - alreadyReturnedBakiAmount);
+          if (remainingInvoiceBaki <= 0) {
+            Notif.cancelPaymentReminder(inv.id);
+          } else {
+            Notif.schedulePaymentReminder({
+              invId: inv.id,
+              customerName: cust.name,
+              amount: remainingInvoiceBaki,
+              dueDate: inv.dueDate,
+            });
+          }
+        }
       } else if (mode === "cash" && typeof setCashLogs === "function") {
         const cashEntry = {
           id: uid(), type: "withdrawal", cashType: "other", party: "",
@@ -27225,9 +27361,10 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
         setCashLogs(prev => [cashEntry, ...(prev || [])]);
       }
 
-      // ── ৪. returns কালেকশনে audit রেকর্ড — useFSSCollection-এর জেনেরিক
-      // diff-push দিয়েই সিঙ্ক হবে (customers/products-এর মতো), আলাদা pushDurable
-      // দরকার নেই কারণ এটা windowed কালেকশন না।
+      // ── ৪. returns কালেকশনে audit রেকর্ড — 🔴 ফিক্স (Phase 8): returns এখন
+      // windowed real-time sync (useFSSCollection আর diff-push করে না), তাই
+      // cashLogs/stockMovements-এর প্যাটার্নে এখানে সরাসরি pushReturnEntry() দিয়ে
+      // Firestore-এ push করা হচ্ছে।
       const retEntry = {
         id: uid(), invoiceId: inv.id, invoiceNo: inv.invoiceNo || inv.id,
         productId, productName: item.name || localP?.name || "",
@@ -27238,6 +27375,7 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
         reason, date: todayStr(), dateKey: todayKey, time: nowStr(),
         createdAt: new Date().toISOString(), createdBy: currentUser?.name || "মালিক",
       };
+      pushReturnEntry(retEntry);
       setReturns(prev => [retEntry, ...(prev || [])]);
 
       // 🔴 ফিক্স (Phase 5 — অডিট): voidInvoice()-এর auditLog("INVOICE_VOID", {...})-এর
@@ -27619,6 +27757,51 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
                     </div>
                   );
                 })}
+              </div>
+            )}
+
+            {/* ══ 🗑️ পুরো ইনভয়েস বাতিল করুন — কোলাপসড, staff থেকে লুকানো, ভয়েড হয়ে
+                গেলে হাইড (Invoice History-এর voidInvoice() একই ফাংশন এখান থেকেও কল হয়,
+                যাতে ভয়েড + আংশিক রিটার্ন দুটোই এক জায়গা থেকে করা যায়) ══ */}
+            {detailInv.status !== "voided" && currentUser?.role !== "staff" && typeof voidInvoice === "function" && (
+              <div style={{ marginTop:14, borderTop:`1px dashed ${T.border}`, paddingTop:12 }}>
+                <button
+                  onClick={() => setVoidSectionOpen(v => !v)}
+                  style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", padding:"4px 0", cursor:"pointer", fontFamily:"inherit" }}
+                >
+                  <span style={{ color:"#ef4444", fontWeight:800, fontSize:13 }}>🗑️ পুরো ইনভয়েস বাতিল করুন</span>
+                  <span style={{ color:"#ef4444", fontSize:13 }}>{voidSectionOpen ? "▲" : "▼"}</span>
+                </button>
+                {voidSectionOpen && (
+                  <div style={{ marginTop:10, background:"#ef444410", border:"1px solid #ef444428", borderRadius:12, padding:"10px 12px" }}>
+                    <div style={{ color:T.sub, fontSize:11.5, marginBottom:8 }}>
+                      এই কাজ পূর্বাবস্থায় ফেরানো যাবে না — ইনভয়েস স্থায়ীভাবে বাতিল হবে, স্টক ফিরে আসবে ও বাকি (থাকলে) সংশোধন হবে।
+                    </div>
+                    <input
+                      placeholder="ভয়েডের কারণ (বাধ্যতামূলক)"
+                      value={voidReasonInput}
+                      onChange={e => setVoidReasonInput(e.target.value)}
+                      style={{ ...S.input, marginTop:0, marginBottom:8 }}
+                    />
+                    <button
+                      disabled={!voidReasonInput.trim() || voidBusy}
+                      onClick={() => {
+                        if (!window.confirm(`নিশ্চিত? ইনভয়েস ${detailInv.invoiceNo || detailInv.id} স্থায়ীভাবে বাতিল হয়ে যাবে।`)) return;
+                        setVoidBusy(true);
+                        Promise.resolve(voidInvoice(detailInv, voidReasonInput.trim()))
+                          .then(() => { setVoidSectionOpen(false); setDetailInv(null); })
+                          .catch(e => showToast("⚠️ ভয়েড ব্যর্থ হয়েছে: " + (e?.message || ""), "#ef4444"))
+                          .finally(() => setVoidBusy(false));
+                      }}
+                      style={{ width:"100%", padding:"11px 0", borderRadius:10, border:"none",
+                        background: (!voidReasonInput.trim() || voidBusy) ? "#94a3b855" : "linear-gradient(135deg,#b91c1c,#ef4444)",
+                        color:"#fff", fontWeight:800, fontSize:13,
+                        cursor: (!voidReasonInput.trim() || voidBusy) ? "not-allowed" : "pointer" }}
+                    >
+                      {voidBusy ? "প্রসেস হচ্ছে..." : "🗑️ ভয়েড নিশ্চিত করুন"}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
