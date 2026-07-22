@@ -198,10 +198,52 @@ export function calcInvoiceTotal(items, discount, extraCharge) {
 // ─── ভয়েড-রিভার্সাল netChange সূত্র — voidInvoice() সরাসরি এই ফাংশন কল করে ────
 /**
  * @param {{payType?:string, total?:number, bakiAmount?:number, overpayAmount?:number}} inv
+ * @param {number} [alreadyReturnedBakiAmount] - এই ইনভয়েসে আগে "বাকি" মোডে প্রোডাক্ট
+ *   রিটার্ন হয়ে থাকলে (processReturn()-এ কাস্টমারের balance থেকে ইতিমধ্যেই যতটা কমানো
+ *   হয়ে গেছে), সেই অংশ — নাহলে পুরো ইনভয়েস ভয়েড করার সময় একই টাকা দ্বিতীয়বার
+ *   ফেরত দেওয়া হয়ে যাবে (ডাবল-রিভার্সাল বাগ)।
  * @returns {number}
  */
-export function calcVoidNetChange(inv) {
-  return (inv.payType === "baki" ? inv.total : (inv.bakiAmount || 0)) - (inv.overpayAmount || 0);
+export function calcVoidNetChange(inv, alreadyReturnedBakiAmount = 0) {
+  const base = (inv.payType === "baki" ? inv.total : (inv.bakiAmount || 0)) - (inv.overpayAmount || 0);
+  return base - (alreadyReturnedBakiAmount || 0);
+}
+
+// ─── রিটার্ন-অ্যাওয়্যার হেল্পার — voidInvoice()/ReturnModule দুই জায়গাতেই ব্যবহার হয় ──
+/**
+ * নির্দিষ্ট ইনভয়েসের নির্দিষ্ট প্রোডাক্টের জন্য এখন পর্যন্ত মোট কত qty ফেরত (return)
+ * নেওয়া হয়েছে। voidInvoice()-এ পুরো ইনভয়েস বাতিল করার সময় স্টক রিস্টোর করার আগে এই
+ * পরিমাণ বাদ দিতে হবে — নাহলে আগে যে qty রিটার্নে ফেরত গেছে, সেটাও আবার ভয়েডে দ্বিতীয়বার
+ * স্টকে যোগ হয়ে যাবে (ডাবল-স্টক বাগ)।
+ * @param {Array<{invoiceId?:string, productId?:string, qty?:number}>} returns
+ * @param {string} invoiceId
+ * @param {string} productId
+ * @returns {number}
+ */
+export function getReturnedQtyForInvoice(returns, invoiceId, productId) {
+  if (!Array.isArray(returns)) return 0;
+  return returns.reduce((sum, r) => (
+    r && r.invoiceId === invoiceId && r.productId === productId
+  ) ? sum + (r.qty || 0) : sum, 0);
+}
+
+/**
+ * নির্দিষ্ট ইনভয়েসের জন্য এখন পর্যন্ত মোট কত টাকা রিফান্ড হয়েছে — ঐচ্ছিকভাবে
+ * refundMode ("baki" বা "cash") দিয়ে ফিল্টার করা যায়। "baki" মোড calcVoidNetChange()-এর
+ * alreadyReturnedBakiAmount হিসাবে ব্যবহার হয়; "cash" মোড voidInvoice()-এ ক্যাশ ড্রয়ার
+ * রিভার্সালের (নতুন deposit এন্ট্রি) পরিমাণ ঠিক করতে ব্যবহার হয়।
+ * @param {Array<{invoiceId?:string, refundAmount?:number, refundMode?:string}>} returns
+ * @param {string} invoiceId
+ * @param {string|null} [mode]
+ * @returns {number}
+ */
+export function getReturnedAmountForInvoice(returns, invoiceId, mode = null) {
+  if (!Array.isArray(returns)) return 0;
+  return returns.reduce((sum, r) => {
+    if (!r || r.invoiceId !== invoiceId) return sum;
+    if (mode && r.refundMode !== mode) return sum;
+    return sum + (r.refundAmount || 0);
+  }, 0);
 }
 
 // ─── ক্যাশ ড্রয়ার সূত্র — buildDailySummaryData() সরাসরি এই ফাংশন কল করে ──────

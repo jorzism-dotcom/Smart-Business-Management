@@ -26,7 +26,7 @@ import {
   calcNextBatch, isBatchExpired, getSortedActiveBatches, getActiveBatch, getSellableStock,
   computeSupplierDueMap, _itemCostPrice, calcInvoiceProfit, calcProfitTotal,
   calcInvoiceTotal, calcVoidNetChange, calcCashDrawer, restoreBatchQty,
-  runInvariantChecks,
+  runInvariantChecks, getReturnedQtyForInvoice, getReturnedAmountForInvoice,
 } from "./logic.js";
 // 🧪 Schema validation (zod) — Firestore write-এর আগে টাকা/স্টক-সংক্রান্ত
 // ফিল্ডে NaN/undefined ঢুকে যাচ্ছে কিনা যাচাই করে। দেখুন src/schemas.js-এর
@@ -14152,7 +14152,12 @@ function SmartBusinessMgmt() {
       // স্বাভাবিকভাবে চলতে থাকে।
       const restoreResults = await Promise.all(sellableRestoreItems.map(async (soldItem) => {
        try {
-        const restoredQty = soldItem.qty || 0;
+        // 🔴 ফিক্স (Phase 1 — রিটার্ন-অ্যাওয়্যার ভয়েড): এই প্রোডাক্টের কিছু qty যদি
+        // ইতিমধ্যে আলাদা রিটার্নে ফেরত নেওয়া হয়ে থাকে (ReturnModule-এর processReturn()),
+        // সেটা এখানে বাদ দেওয়া হচ্ছে — নাহলে পুরো ইনভয়েস ভয়েড করলে সেই qty আবার
+        // দ্বিতীয়বার স্টকে যোগ হয়ে যেত (ডাবল-স্টক বাগ)।
+        const alreadyReturnedQty = getReturnedQtyForInvoice(returns, inv.id, soldItem.productId);
+        const restoredQty = Math.max(0, (soldItem.qty || 0) - alreadyReturnedQty);
         if (restoredQty <= 0) return null;
         // 🔴 ফিক্স (রুট কজ — "ভয়েড করলে স্টক একদমই বাড়ে না"): voidInvoice()
         // useCallback()-এর dependency array-তে `products` নেই (নিচে দেখুন —
@@ -14292,7 +14297,9 @@ function SmartBusinessMgmt() {
         // আইটেমগুলো স্বাভাবিকভাবে চলতে থাকে।
         logErrorToCentral?.("voidInvoice:restoreItem", e, { invoiceId: inv.id, productId: soldItem.productId });
         pendingVoidStockItems.push({
-          productId: soldItem.productId, qty: soldItem.qty || 0, batchNo: soldItem.batchNo || "",
+          productId: soldItem.productId,
+          qty: Math.max(0, (soldItem.qty || 0) - getReturnedQtyForInvoice(returns, inv.id, soldItem.productId)),
+          batchNo: soldItem.batchNo || "",
           costPrice: soldItem.costPrice || 0, expiryDate: soldItem.expiryDate || "",
           batchBreakdown: (Array.isArray(soldItem.batchBreakdown) && soldItem.batchBreakdown.length > 0) ? soldItem.batchBreakdown : undefined,
           voidAdjBatchNo: `VOID-ADJ-${inv.id.slice(-6)}`,
@@ -14325,7 +14332,12 @@ function SmartBusinessMgmt() {
     if ((inv.payType === "baki" || inv.payType === "partial") && inv.customerId) {
       // 🧪 shared formula (src/logic.js) — regression test suite এখন সরাসরি এই
       // একই কোড টেস্ট করে, আলাদা "reference-copy" না।
-      const netChange = calcVoidNetChange(inv);
+      // 🔴 ফিক্স (Phase 1 — ডাবল-রিভার্সাল বাগ): এই ইনভয়েসে আগে "বাকি" মোডে কোনো
+      // প্রোডাক্ট রিটার্ন হয়ে থাকলে processReturn()-ই ইতিমধ্যে কাস্টমারের balance
+      // থেকে সেই অংশ কমিয়ে দিয়েছে — পুরো ইনভয়েস ভয়েড করার সময় সেটা বাদ না দিলে
+      // একই টাকা দ্বিতীয়বার ফেরত (over-reversal) হয়ে যেত।
+      const alreadyReturnedBakiAmount = getReturnedAmountForInvoice(returns, inv.id, "baki");
+      const netChange = calcVoidNetChange(inv, alreadyReturnedBakiAmount);
       if (netChange !== 0) {
         // 🔴 Transaction fix — Firebase enabled থাকলে সার্ভারের বর্তমান balance
         // থেকে atomic transaction-এ বিয়োগ করা হয় (অন্য ডিভাইসের concurrent এডিট
@@ -14354,6 +14366,30 @@ function SmartBusinessMgmt() {
           return updated;
         });
       }
+    }
+
+    // ── Phase 2 (ক্যাশ ড্রয়ার রিভার্সাল): এই ইনভয়েসে আগে "নগদ ফেরত" মোডে কোনো
+    // প্রোডাক্ট রিটার্ন হয়ে থাকলে (processReturn()-এ cashLogs-এ withdrawal এন্ট্রি
+    // হিসেবে লগ হয়েছিল, দেখুন ReturnModule), পুরো ইনভয়েস ভয়েড করার সময় সেটাও
+    // রিভার্স করা দরকার — নাহলে ক্যাশ ড্রয়ার সূত্রে (Opening + Cash Sales +
+    // Collections − Withdrawals) দিন শেষে সেই টাকাটা "নেই" দেখাবে, অথচ আসলে
+    // কখনো বের হয়নি (পুরো ইনভয়েসই বাতিল)। পুরনো withdrawal এন্ট্রি এডিট না করে
+    // নতুন `deposit` এন্ট্রি যোগ করা হচ্ছে — processReturn()-এর withdrawal তৈরির
+    // ঠিক একই প্যাটার্নে (pushCashLog), যাতে সম্পূর্ণ audit trail বজায় থাকে
+    // (কখন রিফান্ড হয়েছিল আর কখন ভয়েডের কারণে সেটা রিভার্স হলো — দুটোই
+    // cashLogs হিস্ট্রিতে আলাদাভাবে দেখা যাবে)।
+    const cashRefundedAmount = getReturnedAmountForInvoice(returns, inv.id, "cash");
+    if (cashRefundedAmount > 0 && typeof setCashLogs === "function") {
+      const cashReversalEntry = {
+        id: uid(), type: "deposit", cashType: "other", party: "",
+        amount: cashRefundedAmount,
+        note: `ভয়েড-রিভার্সাল — ইনভয়েস ${inv.invoiceNo || inv.id.slice(-6).toUpperCase()}-এর আগের নগদ রিটার্ন-রিফান্ড বাতিল`,
+        date: todayStr(), dateKey: inv.dateKey || todayEn(),
+        createdAt: new Date().toISOString(),
+        by: currentUser?.name || "মালিক",
+      };
+      pushCashLog(cashReversalEntry);
+      setCashLogs(prev => [cashReversalEntry, ...(prev || [])]);
     }
 
     // 🔴 ফিক্স: অফলাইনে স্কিপ-করা, অথবা অনলাইনে থেকেও transient error-এ ব্যর্থ হওয়া
@@ -14415,7 +14451,7 @@ function SmartBusinessMgmt() {
       logErrorToCentral?.("voidInvoice", e, { invoiceId: inv.id });
       showToast("⚠️ ভয়েড প্রসেসিং-এ একটা সমস্যা হয়েছে — ইনভয়েসটা voided দেখাচ্ছে, কিন্তু স্টক/ব্যালেন্স ঠিকমতো ফেরত গেছে কিনা যাচাই করুন", "#ef4444");
     }
-  }, [setInvoices, setCustomers, setProducts, setStockMovements, addTxn, showToast, auditLog]);
+  }, [setInvoices, setCustomers, setProducts, setStockMovements, addTxn, showToast, auditLog, returns, setCashLogs, currentUser]);
 
   const connectBluetooth = useCallback(async () => {
     await BT.init();
