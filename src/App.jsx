@@ -6374,6 +6374,22 @@ let GLOBAL_RESET_MARKER_AT = 0;
 
 // ── withTs: record-এ _updatedAt timestamp যোগ করে (Master Sync merge-এর জন্য) ──
 const withTs = (rec) => ({ ...rec, _updatedAt: Date.now() });
+
+// 🔴 ফিক্স (LIFO ইনকনসিস্টেন্সি): কাস্টমার ডিটেইল পেজের লেনদেন-ইতিহাস আগে শুধু
+// `dateKey` দিয়ে সর্ট হতো। একই dateKey-এর একাধিক এন্ট্রি থাকলে (যেমন "পুরাতন
+// এন্ট্রি"/backdated এন্ট্রি অন্য এন্ট্রির সাথে same-day হলে) টাই ব্রেক
+// অনির্দিষ্ট থাকতো — কখনো Firestore doc-id অনুযায়ী, কখনো লোকাল array-এর
+// insertion order অনুযায়ী — ফলে একই এন্ট্রি কখনো তালিকার উপরে কখনো নিচে
+// দেখাতো। এখন সবসময় dateKey → _updatedAt (push সময়ের প্রকৃত টাইমস্ট্যাম্প) →
+// time স্ট্রিং — এই ক্রমে স্থিতিশীলভাবে সর্ট হয়, উৎস (Firestore query বা
+// লোকাল windowed state) যা-ই হোক না কেন।
+const sortTxnsDesc = (list) => [...(list || [])].sort((a, b) => {
+  const dk = (b.dateKey || "").localeCompare(a.dateKey || "");
+  if (dk !== 0) return dk;
+  const tsDiff = (b._updatedAt || 0) - (a._updatedAt || 0);
+  if (tsDiff !== 0) return tsDiff;
+  return (b.time || "").localeCompare(a.time || "");
+});
 // 🔴 ফিক্স: FSS.setRecord() প্রতিটা write-এ সার্ভার-সাইড _serverTs যোগ করে, যেটা
 // শুধু Firestore-কনফার্মড কপিতেই থাকে (fresh local edit-এ কখনো থাকে না, কারণ
 // এটা write-এর সময় সার্ভার নিজে বসায়)। তাই local-vs-remote সমতা (echo/diff)
@@ -8768,9 +8784,13 @@ function UnifiedDayMonthNav({ hook, accentColor = "#1fd15e", T, onPrint }) {
 // নেভিগেটর দেখায় (◄ [তারিখ] ►) — DashModalDateRangePicker-এর কাস্টম-তারিখ
 // ইনপুটেরই একই প্যাটার্ন: লেবেলের ওপর একটা অদৃশ্য native <input type="date">
 // বসানো, তাই ট্যাপ করলেই নেটিভ ক্যালেন্ডার খোলে। ভবিষ্যতের তারিখ max দিয়ে আটকানো। ──
-function OldEntryDateNav({ dateKey, setDateKey, accentColor = "#8b5cf6" }) {
+function OldEntryDateNav({ dateKey, setDateKey, accentColor = "#8b5cf6", T }) {
   const todayKey = todayEn();
   const isToday = dateKey === todayKey;
+  // 🔴 ফিক্স: আগে লেবেল/অ্যারো-বাটনের রং হার্ডকোড করা ছিল "#fff", যেটা লাইট থিমে
+  // সাদা ব্যাকগ্রাউন্ডের ওপর প্রায় অদৃশ্য হয়ে যেত। এখন থিম-অ্যাওয়্যার (T.text) —
+  // ডার্ক ও লাইট দুই থিমেই স্পষ্ট দেখা যাবে।
+  const labelColor = T?.text || "#fff";
   const shift = (days) => {
     const d = new Date(dateKey + "T00:00:00");
     d.setDate(d.getDate() + days);
@@ -8782,17 +8802,17 @@ function OldEntryDateNav({ dateKey, setDateKey, accentColor = "#8b5cf6" }) {
     catch { return dateKey; }
   })();
   return (
-    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom: 10, background:"rgba(255,255,255,0.03)", border:`1px solid ${accentColor}33`, borderRadius:14, padding:"8px 10px" }}>
+    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom: 10, background: T?.card || "rgba(255,255,255,0.03)", border:`1px solid ${accentColor}33`, borderRadius:14, padding:"8px 10px" }}>
       <button type="button" onClick={() => shift(-1)}
-        style={{ width:34, height:34, borderRadius:10, background:`${accentColor}1f`, border:`1px solid ${accentColor}4d`, color:"#fff", fontSize:16, fontWeight:900, cursor:"pointer", flexShrink:0 }}>‹</button>
+        style={{ width:34, height:34, borderRadius:10, background:`${accentColor}1f`, border:`1px solid ${accentColor}4d`, color: accentColor, fontSize:16, fontWeight:900, cursor:"pointer", flexShrink:0 }}>‹</button>
       <div style={{ flex:1, position:"relative", textAlign:"center" }}>
-        <div style={{ color:"#fff", fontSize:12, fontWeight:800 }}>📅 {isToday ? "আজ" : dateLabel}</div>
+        <div style={{ color: labelColor, fontSize:12, fontWeight:800 }}>📅 {isToday ? "আজ" : dateLabel}</div>
         <input type="date" value={dateKey} max={todayKey}
           onChange={e => e.target.value && setDateKey(e.target.value)}
           style={{ position:"absolute", inset:0, opacity:0, width:"100%", height:"100%", border:"none", cursor:"pointer" }} />
       </div>
       <button type="button" onClick={() => shift(1)} disabled={isToday}
-        style={{ width:34, height:34, borderRadius:10, background:`${accentColor}1f`, border:`1px solid ${accentColor}4d`, color: isToday ? "#4b4566" : "#fff", fontSize:16, fontWeight:900, cursor: isToday ? "default" : "pointer", flexShrink:0 }}>›</button>
+        style={{ width:34, height:34, borderRadius:10, background:`${accentColor}1f`, border:`1px solid ${accentColor}4d`, color: isToday ? "#9ca3af" : accentColor, fontSize:16, fontWeight:900, cursor: isToday ? "default" : "pointer", flexShrink:0 }}>›</button>
     </div>
   );
 }
@@ -13021,7 +13041,7 @@ function SmartBusinessMgmt() {
         const q = query(colRef, where("customerId", "==", detailCId), orderBy("dateKey", "desc"));
         const snap = await getDocs(q);
         if (cancelled) return;
-        const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const rows = sortTxnsDesc(snap.docs.map(d => ({ id: d.id, ...d.data() })));
         setCustomerTxnsFull({ customerId: detailCId, rows });
       } catch (err) {
         console.error("customerTxnsFull query failed:", err);
@@ -15287,7 +15307,7 @@ function SmartBusinessMgmt() {
           <ErrorBoundary T={T}>
             <CustomerDetail T={T} S={S}
               customer={detailCust}
-              txns={(customerTxnsFull.customerId === detailCId && customerTxnsFull.rows) ? customerTxnsFull.rows : txns.filter(t => t.customerId === detailCId)}
+              txns={(customerTxnsFull.customerId === detailCId && customerTxnsFull.rows) ? customerTxnsFull.rows : sortTxnsDesc(txns.filter(t => t.customerId === detailCId))}
               invoices={invoices} customers={customers} paymentInvoices={paymentInvoices.filter(p => p.customerId === detailCId)}
               shopName={shopName}
               onGoToInvoice={(c, type) => { setPreselectedCust(c); setPreselectedType(type || null); setTab("invoice"); setDetailCId(null); }}
@@ -23997,7 +24017,7 @@ function TransactionModal({ T, S, customer, setCustomers, sendSMS, showToast, ad
           <button style={{ ...S.modeBtn, ...(mode === "joma" ? { background: "#22c55e", color: "#fff" } : {}) }} onClick={() => setMode("joma")}>▼ জমা</button>
         </div>
         {/* 🗓️ পুরাতন এন্ট্রি টগল — অন করলে নিচে তারিখ নেভিগেটর দেখাবে (ডিফল্ট আজ) */}
-        <div style={{ display:"flex", justifyContent:"flex-end", marginBottom: 8, marginTop: -4 }}>
+        <div style={{ display:"flex", justifyContent:"center", marginBottom: 8, marginTop: -4 }}>
           <button type="button"
             onClick={() => {
               setShowOldEntry(v => {
@@ -24018,14 +24038,8 @@ function TransactionModal({ T, S, customer, setCustomers, sendSMS, showToast, ad
           </button>
         </div>
         {showOldEntry && (
-          <>
-            <OldEntryDateNav dateKey={entryDateKey} setDateKey={setEntryDateKey}
-              accentColor={mode === "baki" ? "#ef4444" : "#22c55e"} />
-            <label style={{ display:"flex", alignItems:"center", gap:8, marginTop:-4, marginBottom: 10, color: T.sub, fontSize: 11, cursor:"pointer" }}>
-              <input type="checkbox" checked={sendSmsBackdated} onChange={e => setSendSmsBackdated(e.target.checked)} />
-              কাস্টমারকে SMS পাঠান
-            </label>
-          </>
+          <OldEntryDateNav dateKey={entryDateKey} setDateKey={setEntryDateKey}
+            accentColor={mode === "baki" ? "#ef4444" : "#22c55e"} T={T} />
         )}
         <div style={{ marginBottom: 10 }}>
           <div style={{ color: T.sub, fontSize: 11, marginBottom: 8 }}>দ্রুত পরিমাণ <span style={{ color: T.accent, fontWeight: 700 }}>(একাধিকবার ক্লিক করুন)</span>:</div>
