@@ -46,7 +46,7 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
-    "@capacitor/cli": "^6.2.0",
+    "@capacitor/cli": "^8.4.2",
     "@eslint/js": "^9.39.5",
     "@firebase/rules-unit-testing": "^5.0.1",
     "@stryker-mutator/core": "^8.6.0",
