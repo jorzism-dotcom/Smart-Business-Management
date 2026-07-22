@@ -26,6 +26,7 @@ import {
   calcNextBatch, isBatchExpired, getSortedActiveBatches, getActiveBatch, getSellableStock,
   computeSupplierDueMap, _itemCostPrice, calcInvoiceProfit, calcProfitTotal,
   calcInvoiceTotal, calcVoidNetChange, calcCashDrawer, restoreBatchQty,
+  runInvariantChecks,
 } from "./logic.js";
 // 🧪 Schema validation (zod) — Firestore write-এর আগে টাকা/স্টক-সংক্রান্ত
 // ফিল্ডে NaN/undefined ঢুকে যাচ্ছে কিনা যাচাই করে। দেখুন src/schemas.js-এর
@@ -5187,6 +5188,16 @@ const FSS = {
   _authUid: null,
   _authInitTried: false,
 
+  // ─── ফেজ D/D3 (ENTERPRISE_MONITORING_PLAN.md) — কিল-সুইচ ───────────────────
+  // admin_config/appVersion-এ haltSync:true সেট করলে (admin.html থেকে) এই
+  // ফ্ল্যাগ true হয়ে যায় — তারপর setRecord()/setRecordMerge()/deleteRecord()
+  // (সব collection-এর একমাত্র লেখার পথ) কোনো নতুন write Firestore-এ পাঠাবে না,
+  // শুধু { ok:false, halted:true } ফেরত দেবে। read/onSnapshot listener এখনো
+  // চলবে (দোকানদার ডেটা দেখতে পারবেন, শুধু নতুন লেখা যাবে না) — কোনো খারাপ
+  // রিলিজ প্রোডাকশনে ডেটা করাপ্ট করা শুরু করলে এটাই জরুরি "থামান" বোতাম।
+  _syncHalted: false,
+  setSyncHalted(halted) { this._syncHalted = !!halted; },
+
   isReady() { return !!this._db; },
 
   // ─── ধাপ ১ (Multi-Business System Plan, ১৮ জুলাই ২০২৬): কেন্দ্রীয় collection-name
@@ -5797,6 +5808,7 @@ const FSS = {
   // effectiveTs() ও performMasterSync)।
   async setRecord(coll, id, data) {
     if (!this._db || id === undefined || id === null || id === "") return { ok: false, msg: "Firestore সংযুক্ত নেই" };
+    if (this._syncHalted) return { ok: false, halted: true, msg: "সিঙ্ক সাময়িকভাবে বন্ধ (admin কিল-সুইচ) — দেখুন ENTERPRISE_MONITORING_PLAN.md ফেজ D/D3" };
     // 🧪 Schema validation (soft mode) — write আটকায় না, শুধু সমস্যা হলে লগ করে।
     // দেখুন src/schemas.js-এর শুরুর কমেন্ট কেন hard-reject না করে soft mode বেছে নেওয়া হলো।
     const { valid, errors } = validateRecord(coll, data);
@@ -5831,6 +5843,7 @@ const FSS = {
   // atomic transaction-এর সাথে কোনো রেস/রিভার্ট না ঘটে (দেখুন _fieldTxPending কমেন্ট)।
   async setRecordMerge(coll, id, data) {
     if (!this._db || id === undefined || id === null || id === "") return { ok: false, msg: "Firestore সংযুক্ত নেই" };
+    if (this._syncHalted) return { ok: false, halted: true, msg: "সিঙ্ক সাময়িকভাবে বন্ধ (admin কিল-সুইচ) — দেখুন ENTERPRISE_MONITORING_PLAN.md ফেজ D/D3" };
     try {
       const cleaned = stripUndefinedDeep(data);
       await setDoc(this.doc(coll, id), { ...cleaned, _serverTs: serverTimestamp() }, { merge: true });
@@ -5843,6 +5856,7 @@ const FSS = {
   // রেকর্ড মুছে ফেলো (write পরিবর্তন: deleteDoc = delete)
   async deleteRecord(coll, id) {
     if (!this._db || id === undefined || id === null || id === "") return { ok: false, msg: "Firestore সংযুক্ত নেই" };
+    if (this._syncHalted) return { ok: false, halted: true, msg: "সিঙ্ক সাময়িকভাবে বন্ধ (admin কিল-সুইচ) — দেখুন ENTERPRISE_MONITORING_PLAN.md ফেজ D/D3" };
     try {
       await deleteDoc(this.doc(coll, id));
       return { ok: true };
@@ -5850,6 +5864,7 @@ const FSS = {
       return { ok: false, msg: e.message || "Firestore delete ব্যর্থ" };
     }
   },
+
 
   async setSettings(partial) {
     if (!this._db) return { ok: false, msg: "Firestore সংযুক্ত নেই" };
@@ -12778,6 +12793,61 @@ function SmartBusinessMgmt() {
     }
     _lastAppliedBizPrefixRef.current = prefix;
   }, [fssReady, businessType, enabledBusinessTypes]);
+
+  // ─── ফেজ D/D3 (ENTERPRISE_MONITORING_PLAN.md) — কিল-সুইচ লিসেনার ───────────
+  // admin_config/appVersion ডকুমেন্ট real-time শোনা হয় — admin.html থেকে কেউ
+  // haltSync:true সেট করলেই (কোনো রিফ্রেশ/রিস্টার্ট ছাড়াই) FSS._syncHalted
+  // true হয়ে যায় এবং নতুন কোনো write আর Firestore-এ যাবে না (দেখুন
+  // FSS.setRecord/setRecordMerge/deleteRecord)। halted অবস্থায় প্রবেশ করলে
+  // একবার app_errors-এ লগ করা হয় (context: "kill_switch") — যাতে admin.html-এর
+  // এরর প্যানেলেই নিশ্চিত হওয়া যায় ডিভাইসগুলো ফ্ল্যাগটা দেখেছে।
+  const _killSwitchNotifiedRef = useRef(false);
+  useEffect(() => {
+    if (!fssReady || !_db) return;
+    const unsub = onSnapshot(doc(_db, "admin_config", "appVersion"), (snap) => {
+      const halted = !!snap.data()?.haltSync;
+      FSS.setSyncHalted(halted);
+      if (halted && !_killSwitchNotifiedRef.current) {
+        _killSwitchNotifiedRef.current = true;
+        logErrorToCentral?.("kill_switch", new Error("admin কিল-সুইচ সক্রিয় — নতুন sync বন্ধ করা হয়েছে"),
+          { reason: snap.data()?.haltSyncReason || "" }).catch?.(() => {});
+      }
+      if (!halted) _killSwitchNotifiedRef.current = false;
+    }, () => { /* offline/no-perm হলে চুপচাপ — sync-halted false-ই থাকবে, ডিফল্ট আচরণ */ });
+    return () => unsub();
+  }, [fssReady]);
+
+  // ─── ফেজ D/D1 (ENTERPRISE_MONITORING_PLAN.md) — পিরিওডিক ইনভ্যারিয়েন্ট-চেক ──
+  // প্রতি ২০ মিনিটে একবার (ready হওয়ার পর প্রথমবার সাথে সাথেও) নেগেটিভ স্টক ও
+  // ক্যাশ-ড্রয়ার mismatch চেক করে — কোনো violation পেলে app_errors-এ লগ হয়
+  // (context: "invariant_check:<type>"), admin.html-এর এরর প্যানেলে (ERROR_KB-সহ)
+  // সেটা স্বয়ংক্রিয়ভাবে দেখা যায়। runInvariantChecks() নিজে pure/side-effect-free
+  // (দেখুন src/logic.js ও tests/logic-tests.mjs) — এখানে শুধু state জোগাড় করে
+  // কল করা হচ্ছে এবং ফলাফল লগ করা হচ্ছে।
+  useEffect(() => {
+    if (!fssReady) return;
+    const runCheck = () => {
+      try {
+        const summary = buildDailySummaryData({ invoices, txns, customers, products, cashLogs, purchaseOrders });
+        const violations = runInvariantChecks({
+          products,
+          opening: summary?.openingCash,
+          cashSale: summary?.cashSale,
+          joma: summary?.jomaToday,
+          withdrawal: summary?.cashOutToday,
+        });
+        for (const v of violations) {
+          logErrorToCentral?.(`invariant_check:${v.type}`, new Error(v.message), {}).catch?.(() => {});
+        }
+      } catch (err) {
+        logErrorToCentral?.("invariant_check:runner", err, {}).catch?.(() => {});
+      }
+    };
+    runCheck(); // ready হওয়ার পর প্রথমবার সাথে সাথেই
+    const intervalId = setInterval(runCheck, 20 * 60 * 1000); // প্রতি ২০ মিনিটে
+    return () => clearInterval(intervalId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fssReady, invoices, txns, customers, products, cashLogs, purchaseOrders]);
 
   // ── প্রতিটা collection — local array ↔ Firestore (record-level, real-time) ──
   // 🔴 ফিক্স: customers-এও products-এর মতো একই bug ছিল — diff-ভিত্তিক অটো-ডিলিট
@@ -29837,12 +29907,24 @@ function AppVersionCard({ T, S }) {
           const myPhone = localStorage.getItem("sbm_phone_sync") || localStorage.getItem("sbm_phone") || "";
           if (!myPhone || !targets.includes(myPhone)) return; // এই দোকান টার্গেট তালিকায় নেই
         }
-        if (d.version && compareVersions(APP_VERSION_CODE, d.version) < 0) {
+        // 🔴 ফেজ D/D3 (ENTERPRISE_MONITORING_PLAN.md) — রোলব্যাক মোড। স্বাভাবিক
+        // অবস্থায় এই কার্ড শুধু "নতুন" ভার্সন (compareVersions(...) < 0) দেখলেই
+        // দেখা যায় — একটা খারাপ রিলিজ থেকে আগের ভার্সনে ফেরানোর জন্য এটা
+        // যথেষ্ট না, কারণ আগের ভার্সনের "ভার্সন নাম্বার" বর্তমানেরটার চেয়ে
+        // ছোটই থাকবে। admin.html-এ "রোলব্যাক মোড" চালু করে d.rollbackMode:true
+        // পাঠালে এই ভার্সন-তুলনা বাইপাস হয়ে যায় — কার্ডটা সবসময় দেখা যাবে
+        // (ভার্সন নাম্বার বাড়ুক বা কমুক), যতক্ষণ না admin এটা বন্ধ করেন। এখনো
+        // সম্পূর্ণ নীরব/optional কার্ড — কোনো জোরপূর্বক লক তৈরি হয় না, দোকানদার
+        // নিজেই Settings-এ এসে ইনস্টল করবেন কিনা ঠিক করেন (বিদ্যমান ডিজাইন
+        // অপরিবর্তিত রাখা হয়েছে)।
+        const isRollback = d.rollbackMode === true;
+        if (d.version && (isRollback || compareVersions(APP_VERSION_CODE, d.version) < 0)) {
           setInfo({
             version:   d.version       || "",
             notes:     d.updateNotesBn || "",
             updateUrl: d.updateUrl     || "",
             mandatory: d.forceUpdate === true,
+            rollback:  isRollback,
           });
         }
       } catch { /* নীরবে ব্যর্থ — কোনো error UI দোকানদারকে দেখানো হয় না */ }
@@ -29874,7 +29956,10 @@ function AppVersionCard({ T, S }) {
           <div style={{ color: T.text, fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={info ? "#22d3ee" : "#f97316"} strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
             অ্যাপ ভার্সন
-            {info?.mandatory && (
+            {info?.rollback && (
+              <span style={{ fontSize: 10, fontWeight: 700, color: "#fca5a5", background: "rgba(239,68,68,0.15)", borderRadius: 20, padding: "2px 8px" }}>⏪ রোলব্যাক</span>
+            )}
+            {info?.mandatory && !info?.rollback && (
               <span style={{ fontSize: 10, fontWeight: 700, color: "#fca5a5", background: "rgba(239,68,68,0.15)", borderRadius: 20, padding: "2px 8px" }}>জরুরি</span>
             )}
           </div>
@@ -29888,7 +29973,9 @@ function AppVersionCard({ T, S }) {
 
       {info && (
         <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-          <div style={{ color: T.text, fontWeight: 700, fontSize: 13 }}>⬆️ নতুন ভার্সন {info.version} উপলব্ধ</div>
+          <div style={{ color: T.text, fontWeight: 700, fontSize: 13 }}>
+            {info.rollback ? `⏪ ভার্সন ${info.version}-এ ফিরে যাওয়ার পরামর্শ দেওয়া হয়েছে` : `⬆️ নতুন ভার্সন ${info.version} উপলব্ধ`}
+          </div>
           {info.notes ? (
             <div style={{ color: T.sub, fontSize: 12, marginTop: 8, whiteSpace: "pre-line", lineHeight: 1.6, background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: "8px 10px" }}>
               {info.notes}
@@ -29911,7 +29998,7 @@ function AppVersionCard({ T, S }) {
               boxShadow: downloading ? "none" : "0 4px 16px rgba(6,182,212,0.3)",
             }}
           >
-            {downloading ? `⬇️ ডাউনলোড হচ্ছে... ${progress}%` : "⬇️ এক ট্যাপে ডাউনলোড ও ইনস্টল করুন"}
+            {downloading ? `⬇️ ডাউনলোড হচ্ছে... ${progress}%` : (info.rollback ? "⏪ এক ট্যাপে আগের ভার্সনে ফিরুন" : "⬇️ এক ট্যাপে ডাউনলোড ও ইনস্টল করুন")}
           </button>
         </div>
       )}

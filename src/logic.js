@@ -231,3 +231,69 @@ export function restoreBatchQty(batches, batchNo, restoredQty, fallback = {}) {
   else updated.push({ batchNo, qty: restoredQty, ...fallback });
   return updated;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTERPRISE_MONITORING_PLAN.md ফেজ D / D1 — প্রোডাকশন রানটাইম ইনভ্যারিয়েন্ট-চেক
+// ═══════════════════════════════════════════════════════════════════════════
+// এই ফাংশন সম্পূর্ণ pure (কোনো Firestore/React কল না) — App.jsx একটা periodic
+// টাইমারে এটা কল করে, ফলাফলে কোনো violation পেলে logErrorToCentral() দিয়ে
+// app_errors-এ (context: "invariant_check:<type>") লগ করে — admin.html-এর
+// এরর লগ প্যানেলে (ERROR_KB-সহ) সেটা স্বয়ংক্রিয়ভাবে দেখা যায়।
+//
+// কভারেজ (D1-এ উল্লেখিত দুটো নির্দিষ্ট ইনভ্যারিয়েন্ট):
+//   ১. নেগেটিভ স্টক — কোনো পণ্যের stock (বা কোনো ব্যাচের qty) ০-এর নিচে নামা
+//      কখনোই সম্ভব হওয়ার কথা না — তাই যদি তাও দেখা যায়, সেটা একটা real
+//      bug/রেস-কন্ডিশনের লক্ষণ।
+//   ২. ক্যাশ-ড্রয়ার mismatch — calcCashDrawer() দিয়ে হিসাব করা প্রত্যাশিত ক্যাশ
+//      ঋণাত্মক হওয়া মানে opening/cashSale/joma/withdrawal-এর কোথাও ভুল ডেটা
+//      ঢুকেছে (ডাবল-কাউন্ট, মিসিং txn ইত্যাদি)।
+//
+// নোট: এই ফাংশন নিজে কিছু লগ করে না (pure, তাই tests/logic-tests.mjs থেকে
+// সরাসরি টেস্ট করা যায়) — শুধু violation-এর তালিকা ফেরত দেয়, লগ করাটা
+// caller (App.jsx)-এর দায়িত্ব।
+function _isFiniteNum(v) { return typeof v === "number" && Number.isFinite(v); }
+
+/**
+ * @param {{
+ *   products?: Array<{id?:string,name?:string,stock?:number,batches?:Array<{batchNo?:string,qty?:number}>}>,
+ *   opening?: number, cashSale?: number, joma?: number, withdrawal?: number,
+ * }} state
+ * @returns {Array<{type:string, message:string}>}
+ */
+export function runInvariantChecks(state = {}) {
+  const violations = [];
+  const products = state.products || [];
+
+  // ১) নেগেটিভ স্টক — পণ্যের top-level stock এবং প্রতিটা ব্যাচের qty দুটোই চেক
+  for (const p of products) {
+    if (_isFiniteNum(p?.stock) && p.stock < 0) {
+      violations.push({
+        type: "negative_stock",
+        message: `পণ্য "${p.name || p.id || "?"}" (id: ${p.id || "?"})-এর stock ঋণাত্মক: ${p.stock}`,
+      });
+    }
+    for (const b of (p?.batches || [])) {
+      if (_isFiniteNum(b?.qty) && b.qty < 0) {
+        violations.push({
+          type: "negative_stock",
+          message: `পণ্য "${p.name || p.id || "?"}"-এর ব্যাচ "${b.batchNo || "?"}"-এর qty ঋণাত্মক: ${b.qty}`,
+        });
+      }
+    }
+  }
+
+  // ২) ক্যাশ-ড্রয়ার mismatch — শুধু ইনপুট দেওয়া থাকলেই চেক করা হয় (caller
+  // buildDailySummaryData()-এর ফলাফল থেকে opening/cashSale/joma/withdrawal পাঠায়)
+  const { opening, cashSale, joma, withdrawal } = state;
+  if ([opening, cashSale, joma, withdrawal].some(_isFiniteNum)) {
+    const drawer = calcCashDrawer(opening || 0, cashSale || 0, joma || 0, withdrawal || 0);
+    if (drawer < 0) {
+      violations.push({
+        type: "cash_drawer_mismatch",
+        message: `ক্যাশ ড্রয়ার হিসাব ঋণাত্মক: opening=${opening || 0} + cashSale=${cashSale || 0} + joma=${joma || 0} - withdrawal=${withdrawal || 0} = ${drawer}`,
+      });
+    }
+  }
+
+  return violations;
+}
