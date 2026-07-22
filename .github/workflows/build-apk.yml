@@ -24,7 +24,7 @@ jobs:
           node-version: '20'
 
       - name: Setup Java (JDK 21 — firebase-tools-এর নতুন ভার্সন এখন Java 21+ চায়, JDK 17-এ emulator চলে না)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '21'
           distribution: 'temurin'
@@ -70,7 +70,7 @@ jobs:
           node-version: '20'
 
       - name: Setup Java (JDK 21 — firebase-tools emulator-এর জন্য)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '21'
           distribution: 'temurin'
@@ -104,7 +104,7 @@ jobs:
           node-version: '20'
 
       - name: Setup Java (JDK 17)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
