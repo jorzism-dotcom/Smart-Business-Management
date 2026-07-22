@@ -13,7 +13,7 @@ import {
   calcInvoiceProfit, calcProfitTotal, calcInvoiceTotal, calcVoidNetChange,
   calcCashDrawer, restoreBatchQty, isBatchExpired, getSortedActiveBatches,
   getActiveBatch, getSellableStock, computeSupplierDueMap, calcNextBatch,
-  runInvariantChecks,
+  runInvariantChecks, getReturnedQtyForInvoice, getReturnedAmountForInvoice,
 } from "../src/logic.js";
 
 let passCount = 0;
@@ -125,6 +125,60 @@ t("ভয়েড রিভার্সাল সূত্র", "কোনো �
   const actual = calcVoidNetChange({ payType: "cash", total: 500, bakiAmount: 0, overpayAmount: 0 });
   return { pass: actual === 0, expected: 0, actual };
 });
+t("ভয়েড রিভার্সাল সূত্র", "আগে কিছু qty 'বাকি' মোডে রিটার্ন হয়ে থাকলে, ভয়েডে সেই অংশ দ্বিতীয়বার রিভার্স হওয়া উচিত না", () => {
+  const actual = calcVoidNetChange({ payType: "baki", total: 500, bakiAmount: 0, overpayAmount: 0 }, 150);
+  return { pass: actual === 350, expected: 350, actual };
+});
+t("ভয়েড রিভার্সাল সূত্র", "alreadyReturnedBakiAmount না দিলে (backward-compat) আগের আচরণ অপরিবর্তিত থাকা উচিত", () => {
+  const actual = calcVoidNetChange({ payType: "baki", total: 500, bakiAmount: 0, overpayAmount: 0 });
+  return { pass: actual === 500, expected: 500, actual };
+});
+
+// ── রিটার্ন-অ্যাওয়্যার হেল্পার (getReturnedQtyForInvoice / getReturnedAmountForInvoice) ──
+t("রিটার্ন-অ্যাওয়্যার হেল্পার", "getReturnedQtyForInvoice — একই ইনভয়েস/প্রোডাক্টের একাধিক রিটার্ন যোগ হওয়া উচিত", () => {
+  const returns = [
+    { invoiceId: "inv1", productId: "p1", qty: 2 },
+    { invoiceId: "inv1", productId: "p1", qty: 3 },
+    { invoiceId: "inv1", productId: "p2", qty: 5 },
+    { invoiceId: "inv2", productId: "p1", qty: 9 },
+  ];
+  const actual = getReturnedQtyForInvoice(returns, "inv1", "p1");
+  return { pass: actual === 5, expected: 5, actual };
+});
+t("রিটার্ন-অ্যাওয়্যার হেল্পার", "getReturnedQtyForInvoice — কোনো রিটার্ন না থাকলে ০ ফেরত দেওয়া উচিত", () => {
+  const actual = getReturnedQtyForInvoice([], "inv1", "p1");
+  return { pass: actual === 0, expected: 0, actual };
+});
+t("রিটার্ন-অ্যাওয়্যার হেল্পার", "getReturnedQtyForInvoice — returns undefined/null হলেও ক্র্যাশ না করে ০ ফেরত দেওয়া উচিত", () => {
+  const actual = getReturnedQtyForInvoice(undefined, "inv1", "p1");
+  return { pass: actual === 0, expected: 0, actual };
+});
+t("রিটার্ন-অ্যাওয়্যার হেল্পার", "getReturnedAmountForInvoice — refundMode ফিল্টার ছাড়া সব মোড যোগ হওয়া উচিত", () => {
+  const returns = [
+    { invoiceId: "inv1", refundAmount: 100, refundMode: "baki" },
+    { invoiceId: "inv1", refundAmount: 50, refundMode: "cash" },
+    { invoiceId: "inv2", refundAmount: 999, refundMode: "cash" },
+  ];
+  const actual = getReturnedAmountForInvoice(returns, "inv1");
+  return { pass: actual === 150, expected: 150, actual };
+});
+t("রিটার্ন-অ্যাওয়্যার হেল্পার", "getReturnedAmountForInvoice — refundMode='baki' দিলে শুধু বাকি-মোড রিটার্ন গোনা উচিত", () => {
+  const returns = [
+    { invoiceId: "inv1", refundAmount: 100, refundMode: "baki" },
+    { invoiceId: "inv1", refundAmount: 50, refundMode: "cash" },
+  ];
+  const actual = getReturnedAmountForInvoice(returns, "inv1", "baki");
+  return { pass: actual === 100, expected: 100, actual };
+});
+t("রিটার্ন-অ্যাওয়্যার হেল্পার", "getReturnedAmountForInvoice — refundMode='cash' দিলে শুধু নগদ-মোড রিটার্ন গোনা উচিত", () => {
+  const returns = [
+    { invoiceId: "inv1", refundAmount: 100, refundMode: "baki" },
+    { invoiceId: "inv1", refundAmount: 50, refundMode: "cash" },
+  ];
+  const actual = getReturnedAmountForInvoice(returns, "inv1", "cash");
+  return { pass: actual === 50, expected: 50, actual };
+});
+
 t("ব্যালেন্স ক্ল্যাম্প", "ভয়েড রিভার্সালে balance কখনো নেগেটিভ হয়ে যাওয়া উচিত না", () => {
   const newBal = Math.max(0, 100 - 500);
   return { pass: newBal === 0, expected: 0, actual: newBal };
