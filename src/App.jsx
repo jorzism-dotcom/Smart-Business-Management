@@ -27,7 +27,7 @@ import {
   computeSupplierDueMap, _itemCostPrice, calcInvoiceProfit, calcProfitTotal,
   calcInvoiceTotal, calcVoidNetChange, calcCashDrawer, restoreBatchQty,
   runInvariantChecks, getReturnedQtyForInvoice, getReturnedAmountForInvoice,
-  calcReturnRefundAmount,
+  calcReturnRefundAmount, scaleBatchBreakdownForVoid,
 } from "./logic.js";
 // 🧪 Schema validation (zod) — Firestore write-এর আগে টাকা/স্টক-সংক্রান্ত
 // ফিল্ডে NaN/undefined ঢুকে যাচ্ছে কিনা যাচাই করে। দেখুন src/schemas.js-এর
@@ -10414,7 +10414,7 @@ function useKpiStats({ customers, invoices, products, txns, expenses = [], cashL
       monthPurchaseCost, todayExpense, monthExpense, monthSale, monthProfit, monthMargin,
       stockValue, lowStockItems, monthExpiredValue, monthExpiredCount,
     };
-  }, [customers, invoices, products, txns, expenses, cashLogs, purchaseOrders, stockMovements]);
+  }, [customers, invoices, products, txns, expenses, cashLogs, purchaseOrders, stockMovements, returns]);
 }
 
 // ── ২০টি KPI কার্ডের গ্রিড — AI ড্যাশবোর্ড ও "দৈনিক সারসংক্ষেপ" উভয় জায়গায় হুবহু একই ──
@@ -10552,7 +10552,7 @@ function KpiCardsGrid({ T, stats, compact = false }) {
   );
 }
 
-function AIPage_({ T, S, customers, invoices, products, txns, paymentInvoices, shopName, anthropicKey, expenses = [], cashLogs = [], purchaseOrders = [], stockMovements = [] }) {
+function AIPage_({ T, S, customers, invoices, products, txns, paymentInvoices, shopName, anthropicKey, expenses = [], cashLogs = [], purchaseOrders = [], stockMovements = [], returns = [] }) {
   const [aiTab, setAiTab] = React.useState("dashboard");
   const [chatMessages, setChatMessages] = React.useState([]);
   const [chatInput, setChatInput] = React.useState("");
@@ -10597,17 +10597,32 @@ function AIPage_({ T, S, customers, invoices, products, txns, paymentInvoices, s
   const monthInvs = invAll.filter(i => (i.dateKey || i.date || "") >= monthStartKey);
   const prevMonthInvs = invAll.filter(i => (i.dateKey || i.date || "") >= prevMonthStartKey && (i.dateKey || i.date || "") < monthStartKey);
 
-  const todaySale = todayInvs.reduce((s, i) => s + (i.total || 0), 0);
-  const weekSale = weekInvs.reduce((s, i) => s + (i.total || 0), 0);
-  const monthSale = monthInvs.reduce((s, i) => s + (i.total || 0), 0);
+  // 🔴 ফিক্স (রুট কজ — AIPage-এর ডুপ্লিকেট হিসাব returns প্রপই নিত না): useKpiStats
+  // হুকে (হোম ড্যাশবোর্ড) এই একই returns-নেট-আউট আগেই ফিক্স হয়েছিল, কিন্তু এই ফাংশন
+  // (AIPage_) নিজের আলাদা কপি ব্যবহার করে বলে ফিক্সটা এখানে কপি হয়নি। এখন একই
+  // প্যাটার্ন এখানেও প্রয়োগ করা হলো যাতে হোম ড্যাশবোর্ড আর AI পেজের সংখ্যা মেলে।
+  const returnsAll = returns || [];
+  const todayReturns = returnsAll.filter(r => r.dateKey === todayKey);
+  const weekReturns = returnsAll.filter(r => (r.dateKey || "") >= d7);
+  const monthReturns = returnsAll.filter(r => (r.dateKey || "") >= monthStartKey);
+  const todayReturnsRefund = todayReturns.reduce((s, r) => s + (r.refundAmount || 0), 0);
+  const weekReturnsRefund = weekReturns.reduce((s, r) => s + (r.refundAmount || 0), 0);
+  const monthReturnsRefund = monthReturns.reduce((s, r) => s + (r.refundAmount || 0), 0);
+  const todayReturnsCashRefund = todayReturns.filter(r => r.refundMode === "cash").reduce((s, r) => s + (r.refundAmount || 0), 0);
+  const todayReturnsProfitImpact = todayReturns.reduce((s, r) => s + ((r.refundAmount || 0) - (r.costPrice || 0) * (r.qty || 0)), 0);
+  const monthReturnsProfitImpact = monthReturns.reduce((s, r) => s + ((r.refundAmount || 0) - (r.costPrice || 0) * (r.qty || 0)), 0);
+
+  const todaySale = todayInvs.reduce((s, i) => s + (i.total || 0), 0) - todayReturnsRefund;
+  const weekSale = weekInvs.reduce((s, i) => s + (i.total || 0), 0) - weekReturnsRefund;
+  const monthSale = monthInvs.reduce((s, i) => s + (i.total || 0), 0) - monthReturnsRefund;
   const prevMonthSale = prevMonthInvs.reduce((s, i) => s + (i.total || 0), 0);
   const growthPct = prevMonthSale > 0 ? Math.round(((monthSale - prevMonthSale) / prevMonthSale) * 100) : null;
 
   const prodMap = React.useMemo(() => new Map(prodAll.map(p => [p.id, p])), [prodAll]);
   const calcProfit = (invList) => calcProfitTotal(invList, prodMap);
 
-  const todayProfit = calcProfit(todayInvs);
-  const monthProfit = calcProfit(monthInvs);
+  const todayProfit = calcProfit(todayInvs) - todayReturnsProfitImpact;
+  const monthProfit = calcProfit(monthInvs) - monthReturnsProfitImpact;
   const monthMargin = pct(monthProfit, monthSale);
   const totalBaki = custAll.reduce((s, c) => s + (c.balance || 0), 0);
   const bakiCustomers = custAll.filter(c => (c.balance || 0) > 0).length;
@@ -10665,7 +10680,7 @@ function AIPage_({ T, S, customers, invoices, products, txns, paymentInvoices, s
     if (i.payType === "cash") return s + (i.total || 0);
     if (i.payType === "partial") return s + Math.min(i.paidAmount || 0, i.total || 0);
     return s;
-  }, 0);
+  }, 0) - todayReturnsCashRefund;
   const todayCashProfit = calcProfit(todayInvs.filter(i => i.payType === "cash" || i.payType === "partial"));
 
   // ── আজকের বাকি (নতুন) ও আজকের বাকি আদায় ────────────────────────────────
@@ -14285,6 +14300,19 @@ function SmartBusinessMgmt() {
     // reconcile করবে। এই মুহূর্তে UI-এর জন্য নিচের local fallback হিসাব
     // ব্যবহার হবে (single-device optimistic update)।
     const isOffline = typeof navigator !== "undefined" && navigator.onLine === false;
+    // 🔴 ফিক্স (পারফরম্যান্স — সিকোয়েন্সিয়াল Firestore round-trip): আগে স্টক-রিস্টোর
+    // Promise.all সম্পূর্ণ শেষ হওয়ার *পরেই* কাস্টমার-ব্যালেন্স transaction শুরু হতো —
+    // অথচ এই দুইটা সম্পূর্ণ আলাদা Firestore ডকুমেন্ট (products vs customers), তাই
+    // একটার জন্য আরেকটাকে অপেক্ষা করার দরকার নেই। এখন netChange এখানেই আগে থেকে বের
+    // করে balance transaction-টা স্টক-রিস্টোরের সাথে সমান্তরালে (concurrently) চালু
+    // করে দেওয়া হচ্ছে — নিচে (ধাপ ৩) শুধু ফলাফলটা await করা হবে। ধীর নেটওয়ার্কে এতে
+    // মোট সময় প্রায় অর্ধেক নেমে আসে (দুইটা রাউন্ড-ট্রিপের বদলে একটার সমান সময়ে)।
+    const alreadyReturnedBakiAmount = getReturnedAmountForInvoice(returns, inv.id, "baki");
+    const voidNetChange = calcVoidNetChange(inv, alreadyReturnedBakiAmount);
+    const shouldReverseBalance = (inv.payType === "baki" || inv.payType === "partial") && inv.customerId && voidNetChange !== 0;
+    const balanceTxPromise = (shouldReverseBalance && !isOffline)
+      ? FSS.transactionUpdateBalance(inv.customerId, (serverBal) => Math.max(0, serverBal - voidNetChange))
+      : Promise.resolve(null);
     const pendingVoidStockItems = [];
     // 🔴 ফিক্স (বাগ ৩): কোনো আইটেমের পণ্য সত্যিই ডিলিট হয়ে গেলে (তাই স্টক ফেরত
     // দেওয়ার কিছু নেই) সেটা এখানে জমা হবে, শেষে দোকানদারকে জানানো হবে — আগে এটা
@@ -14336,7 +14364,17 @@ function SmartBusinessMgmt() {
         // qty/costPrice/expiryDate সহ আলাদাভাবে ফেরত যাবে — আগের মতো একটা মাত্র
         // ব্যাচে মিশে যাবে না। পুরনো ইনভয়েসে (এই ফিক্সের আগে তৈরি) breakdown
         // নেই — সেগুলোর জন্য আগের single-batch আচরণই fallback হিসেবে চলবে।
-        const hasBreakdown = Array.isArray(soldItem.batchBreakdown) && soldItem.batchBreakdown.length > 0;
+        // 🔴 ফিক্স (ক্রিটিক্যাল — ডাবল-স্টক বাগ): soldItem.batchBreakdown সরাসরি ব্যবহার
+        // করলে আগে আলাদা রিটার্নে (processReturn()) যে qty ফেরত নেওয়া হয়ে গেছে সেটাও
+        // ভয়েডে আবার সেই ব্যাচে যোগ হয়ে যেত (restoredQty আগে শুধু non-breakdown পাথে
+        // ব্যবহার হতো)। এখন scaleBatchBreakdownForVoid() দিয়ে alreadyReturnedQty
+        // (FIFO ক্রমে) বাদ দেওয়া breakdown-ই সব জায়গায় (queue/transaction/local
+        // fallback) ব্যবহার হচ্ছে।
+        const rawHasBreakdown = Array.isArray(soldItem.batchBreakdown) && soldItem.batchBreakdown.length > 0;
+        const adjustedBatchBreakdown = rawHasBreakdown
+          ? scaleBatchBreakdownForVoid(soldItem.batchBreakdown, alreadyReturnedQty)
+          : [];
+        const hasBreakdown = adjustedBatchBreakdown.length > 0;
         if (isOffline) {
           // অফলাইনে transaction অ্যাটেম্পটই করা হচ্ছে না — সরাসরি কিউতে জমা,
           // reconnect-এর পর আসল atomic transaction দিয়ে reconcile হবে।
@@ -14344,12 +14382,12 @@ function SmartBusinessMgmt() {
             productId: soldItem.productId, qty: restoredQty, batchNo: soldBatchNo,
             costPrice: soldItem.costPrice || localP?.costPrice || 0,
             expiryDate: soldItem.expiryDate || "",
-            batchBreakdown: hasBreakdown ? soldItem.batchBreakdown : undefined,
+            batchBreakdown: hasBreakdown ? adjustedBatchBreakdown : undefined,
             voidAdjBatchNo: `VOID-ADJ-${inv.id.slice(-6)}`,
           });
         } else if (FSS.isReady()) {
           const txResult = hasBreakdown
-            ? await FSS.transactionRestoreStockBatches(soldItem.productId, soldItem.batchBreakdown, `VOID-ADJ-${inv.id.slice(-6)}`)
+            ? await FSS.transactionRestoreStockBatches(soldItem.productId, adjustedBatchBreakdown, `VOID-ADJ-${inv.id.slice(-6)}`)
             : await FSS.transactionRestoreStock(soldItem.productId, restoredQty, soldBatchNo, {
                 costPrice: soldItem.costPrice || localP?.costPrice || 0,
                 expiryDate: soldItem.expiryDate || "",
@@ -14382,7 +14420,7 @@ function SmartBusinessMgmt() {
             productId: soldItem.productId, qty: restoredQty, batchNo: soldBatchNo,
             costPrice: soldItem.costPrice || localP?.costPrice || 0,
             expiryDate: soldItem.expiryDate || "",
-            batchBreakdown: hasBreakdown ? soldItem.batchBreakdown : undefined,
+            batchBreakdown: hasBreakdown ? adjustedBatchBreakdown : undefined,
             voidAdjBatchNo: `VOID-ADJ-${inv.id.slice(-6)}`,
           });
         }
@@ -14406,7 +14444,7 @@ function SmartBusinessMgmt() {
         if (hasBreakdown) {
           // প্রতিটা ব্যাচ আলাদাভাবে, তার নিজের qty/costPrice/expiryDate সহ ফেরত
           updatedBatches = existingBatches;
-          soldItem.batchBreakdown.forEach((bi, idx) => {
+          adjustedBatchBreakdown.forEach((bi, idx) => {
             const biQty = bi.qty || 0;
             if (biQty <= 0) return;
             const biBatchNo = bi.batchNo || `VOID-ADJ-${inv.id.slice(-6)}-L${idx}`;
@@ -14444,12 +14482,18 @@ function SmartBusinessMgmt() {
         // না করে শুধু এই আইটেমটাই queue-তে জমা রাখা হচ্ছে (পরে রিট্রাই হবে), বাকি
         // আইটেমগুলো স্বাভাবিকভাবে চলতে থাকে।
         logErrorToCentral?.("voidInvoice:restoreItem", e, { invoiceId: inv.id, productId: soldItem.productId });
+        // 🔴 ফিক্স: catch ব্লকের নিজস্ব স্কোপ — উপরের try-তে declare করা
+        // alreadyReturnedQty/adjustedBatchBreakdown এখানে অ্যাক্সেসযোগ্য না, তাই একই
+        // হিসাব এখানে আবার করা হচ্ছে যাতে এই এরর-ফলব্যাক পাথেও ডাবল-স্টক বাগ না ঘটে।
+        const catchAlreadyReturnedQty = getReturnedQtyForInvoice(returns, inv.id, soldItem.productId);
+        const catchRawBreakdown = (Array.isArray(soldItem.batchBreakdown) && soldItem.batchBreakdown.length > 0) ? soldItem.batchBreakdown : [];
+        const catchAdjustedBreakdown = scaleBatchBreakdownForVoid(catchRawBreakdown, catchAlreadyReturnedQty);
         pendingVoidStockItems.push({
           productId: soldItem.productId,
-          qty: Math.max(0, (soldItem.qty || 0) - getReturnedQtyForInvoice(returns, inv.id, soldItem.productId)),
+          qty: Math.max(0, (soldItem.qty || 0) - catchAlreadyReturnedQty),
           batchNo: soldItem.batchNo || "",
           costPrice: soldItem.costPrice || 0, expiryDate: soldItem.expiryDate || "",
-          batchBreakdown: (Array.isArray(soldItem.batchBreakdown) && soldItem.batchBreakdown.length > 0) ? soldItem.batchBreakdown : undefined,
+          batchBreakdown: catchAdjustedBreakdown.length > 0 ? catchAdjustedBreakdown : undefined,
           voidAdjBatchNo: `VOID-ADJ-${inv.id.slice(-6)}`,
         });
         return null;
@@ -14477,16 +14521,16 @@ function SmartBusinessMgmt() {
     // ── 3. Reverse customer balance with CORRECT balanceAfter ─────────────────
     // নেট প্রভাব: এই ইনভয়েস বাকি যোগ করেছিল (+bakiAmount), আর overpay থাকলে আগের
     // বাকি কমিয়েছিল (-overpayAmount) — ভয়েডে দুটোই সঠিকভাবে উল্টাতে হবে
-    if ((inv.payType === "baki" || inv.payType === "partial") && inv.customerId) {
-      // 🧪 shared formula (src/logic.js) — regression test suite এখন সরাসরি এই
-      // একই কোড টেস্ট করে, আলাদা "reference-copy" না।
-      // 🔴 ফিক্স (Phase 1 — ডাবল-রিভার্সাল বাগ): এই ইনভয়েসে আগে "বাকি" মোডে কোনো
-      // প্রোডাক্ট রিটার্ন হয়ে থাকলে processReturn()-ই ইতিমধ্যে কাস্টমারের balance
-      // থেকে সেই অংশ কমিয়ে দিয়েছে — পুরো ইনভয়েস ভয়েড করার সময় সেটা বাদ না দিলে
-      // একই টাকা দ্বিতীয়বার ফেরত (over-reversal) হয়ে যেত।
-      const alreadyReturnedBakiAmount = getReturnedAmountForInvoice(returns, inv.id, "baki");
-      const netChange = calcVoidNetChange(inv, alreadyReturnedBakiAmount);
-      if (netChange !== 0) {
+    // 🧪 shared formula (src/logic.js) — regression test suite এখন সরাসরি এই
+    // একই কোড টেস্ট করে, আলাদা "reference-copy" না।
+    // 🔴 ফিক্স (Phase 1 — ডাবল-রিভার্সাল বাগ): এই ইনভয়েসে আগে "বাকি" মোডে কোনো
+    // প্রোডাক্ট রিটার্ন হয়ে থাকলে processReturn()-ই ইতিমধ্যে কাস্টমারের balance
+    // থেকে সেই অংশ কমিয়ে দিয়েছে — পুরো ইনভয়েস ভয়েড করার সময় সেটা বাদ না দিলে
+    // একই টাকা দ্বিতীয়বার ফেরত (over-reversal) হয়ে যেত। (alreadyReturnedBakiAmount/
+    // netChange উপরে আগেভাগেই বের করা হয়েছে, যাতে balanceTxPromise স্টক-রিস্টোরের
+    // সাথে সমান্তরালে শুরু করা যায় — দেখুন উপরের কমেন্ট।)
+    const netChange = voidNetChange;
+    if (netChange !== 0 && (inv.payType === "baki" || inv.payType === "partial") && inv.customerId) {
         // 🔴 Transaction fix — Firebase enabled থাকলে সার্ভারের বর্তমান balance
         // থেকে atomic transaction-এ বিয়োগ করা হয় (অন্য ডিভাইসের concurrent এডিট
         // থাকলেও কোনো delta হারাবে না)। ব্যর্থ/local-only mode হলে local state
@@ -14494,7 +14538,7 @@ function SmartBusinessMgmt() {
         // 🔴 ফিক্স (রুট কজ — অফলাইনে balance reversal হারিয়ে যাওয়া): অফলাইনে এই
         // transaction অ্যাটেম্পটই না করে সরাসরি pendingVoidBalanceUpdate-এ জমা
         // রাখা হচ্ছে, reconnect হলে flushPendingVoidRestores() রিট্রাই করবে।
-        const txBal = isOffline ? null : await FSS.transactionUpdateBalance(inv.customerId, (serverBal) => Math.max(0, serverBal - netChange));
+        const txBal = isOffline ? null : await balanceTxPromise;
         if (isOffline) pendingVoidBalanceUpdate = { customerId: inv.customerId, netChange };
         setCustomers(prev => {
           const updated = prev.map(c => {
@@ -14514,7 +14558,6 @@ function SmartBusinessMgmt() {
           return updated;
         });
       }
-    }
 
     // ── Phase 2 (ক্যাশ ড্রয়ার রিভার্সাল): এই ইনভয়েসে আগে "নগদ ফেরত" মোডে কোনো
     // প্রোডাক্ট রিটার্ন হয়ে থাকলে (processReturn()-এ cashLogs-এ withdrawal এন্ট্রি
@@ -14799,16 +14842,28 @@ function SmartBusinessMgmt() {
   }, [txns, invoices]);
   const todayJoma  = useMemo(() => { const key = todayEn(); return txns.filter(t => t.dateKey === key && t.type === "joma" && t.source !== "partial-sale" && t.source !== "void-reversal" && t.source !== "cash-sale").reduce((s, t) => s + t.amount, 0); }, [txns]);
   const todayInvs  = useMemo(() => { const key = todayEn(); return invoices.filter(i => i.dateKey === key && !i.isSelfUse && i.status !== "voided"); }, [invoices]);
-  const todayTotal = useMemo(() => todayInvs.reduce((s, i) => s + (i.total || 0), 0), [todayInvs]);
+  // 🔴 ফিক্স (রুট কজ — আংশিক ফেরত নিলে ড্যাশবোর্ডের কোনো সংখ্যাই কমে না): আগে
+  // todayTotal/todayCashSale/todayProfit কোনোটাই `returns` অ্যারে ব্যবহার করত না —
+  // ইনভয়েসের `total` ফিল্ড আংশিক ফেরতের পরও অপরিবর্তিত থাকে বলে সরাসরি সেটা থেকে
+  // যোগ করলে ফেরত-যাওয়া অংশও বিক্রয় হিসেবে গোনা হয়ে যেত। useKpiStats হুকে (AI
+  // পেজে ব্যবহৃত) এই একই হিসাবের সঠিক ভার্সন আগে থেকেই ছিল — এখানে সেই একই
+  // প্যাটার্ন প্রয়োগ করা হলো যাতে হোম ড্যাশবোর্ড আর AI পেজের সংখ্যা মিলে যায়।
+  const todayReturns = useMemo(() => { const key = todayEn(); return (returns || []).filter(r => r.dateKey === key); }, [returns]);
+  const todayReturnsRefund = useMemo(() => todayReturns.reduce((s, r) => s + (r.refundAmount || 0), 0), [todayReturns]);
+  // ক্যাশ-মোড ফেরতই শুধু আজকের নগদ বিক্রয় থেকে বাদ যাবে — বাকি-মোড ফেরত কাস্টমারের
+  // balance সমন্বয় করে (processReturn()-এ), নগদ ড্রয়ারকে প্রভাবিত করে না।
+  const todayReturnsCashRefund = useMemo(() => todayReturns.filter(r => r.refundMode === "cash").reduce((s, r) => s + (r.refundAmount || 0), 0), [todayReturns]);
+  const todayReturnsProfitImpact = useMemo(() => todayReturns.reduce((s, r) => s + ((r.refundAmount || 0) - (r.costPrice || 0) * (r.qty || 0)), 0), [todayReturns]);
+  const todayTotal = useMemo(() => todayInvs.reduce((s, i) => s + (i.total || 0), 0) - todayReturnsRefund, [todayInvs, todayReturnsRefund]);
   const totalBaki  = useMemo(() => customers.reduce((s, c) => s + (c.balance || 0), 0), [customers]);
   const todayCashSale = useMemo(() => todayInvs.reduce((s, i) => {
     if (i.payType === "cash") return s + i.total;
     if (i.payType === "partial") return s + Math.min(i.paidAmount || 0, i.total || 0);
     return s;
-  }, 0), [todayInvs]);
+  }, 0) - todayReturnsCashRefund, [todayInvs, todayReturnsCashRefund]);
   const todayProfit = useMemo(() => {
-    return calcProfitTotal(todayInvs, globalProdMap);
-  }, [todayInvs, globalProdMap]);
+    return calcProfitTotal(todayInvs, globalProdMap) - todayReturnsProfitImpact;
+  }, [todayInvs, globalProdMap, todayReturnsProfitImpact]);
 
   // ── S (styles) এবং navItems — conditional return এর আগে রাখতে হবে (Rules of Hooks) ──
   const S = React.useMemo(() => makeS(T), [activeTheme, darkMode, fontSize]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -15658,6 +15713,7 @@ function SmartBusinessMgmt() {
               cashLogs={cashLogs}
               purchaseOrders={purchaseOrders}
               stockMovements={stockMovements}
+              returns={returns}
             />
             </React.Suspense>
           </ErrorBoundary>
@@ -20193,6 +20249,36 @@ function InvoiceVoidModal({ inv, returns = [], products = [], customers = [], cu
   });
   const topBar = (accent) => ({ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg,transparent,${accent},transparent)` });
   const backBtn = { flex: 1, padding: "12px 0", borderRadius: 12, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" };
+  // 🆕 UI আধুনিকীকরণ — সাদামাটা ইমোজি হেডারের বদলে গ্রেডিয়েন্ট সার্কেল ব্যাজ, আর
+  // "ধাপ X / ৩" টেক্সটের সাথে একটা ভিজ্যুয়াল প্রোগ্রেস-ডট (কতদূর এগোলাম, কতদূর বাকি —
+  // এক নজরে বোঝা যায়)। সব ৭টা স্টেজেই (choice + full1-3 + partial1-3) একই শেয়ার্ড
+  // স্টাইল ব্যবহার হচ্ছে, তাই ভবিষ্যতে চাইলে একজায়গায় বদলালেই সব জায়গায় বদলাবে।
+  const iconBadge = (accent, size = 56) => ({
+    width: size, height: size, borderRadius: "50%", flexShrink: 0,
+    background: `radial-gradient(circle at 32% 28%, ${accent}3d, ${accent}12 70%)`,
+    border: `1px solid ${accent}4d`, display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: Math.round(size * 0.46), margin: "0 auto 10px", boxShadow: `0 6px 20px ${accent}26`,
+  });
+  const StepDots = ({ step, accent, total = 3 }) => (
+    <div style={{ display: "flex", justifyContent: "center", gap: 5, marginTop: 8 }}>
+      {Array.from({ length: total }).map((_, i) => (
+        <div key={i} style={{
+          width: i + 1 === step ? 18 : 6, height: 6, borderRadius: 3,
+          background: i + 1 === step ? accent : (i + 1 < step ? `${accent}88` : "#334155"),
+          transition: "width .2s ease",
+        }} />
+      ))}
+    </div>
+  );
+  const StageHeader = ({ icon, accent, title, step, floatIcon = false }) => (
+    <div style={{ textAlign: "center", marginBottom: 18 }}>
+      <div style={iconBadge(accent)}>
+        <span style={floatIcon ? { display: "inline-block", animation: "hg-float 2s ease-in-out infinite" } : undefined}>{icon}</span>
+      </div>
+      <div style={{ color: accent, fontWeight: 900, fontSize: 17, letterSpacing: 0.3 }}>{title}</div>
+      {step ? <StepDots step={step} accent={accent} /> : null}
+    </div>
+  );
 
   // ══ চয়েস স্ক্রিন ══
   if (stage === "choice") return (
@@ -20200,27 +20286,29 @@ function InvoiceVoidModal({ inv, returns = [], products = [], customers = [], cu
       <div style={boxStyleFor("#ef4444")} onClick={e => e.stopPropagation()}>
         <div style={topBar("#ef4444")} />
         <div style={{ textAlign: "center", marginBottom: 18 }}>
-          <div style={{ fontSize: 38, marginBottom: 8 }}>🗑️</div>
+          <div style={iconBadge("#ef4444", 60)}>🗑️</div>
           <div style={{ color: "#f1f5f9", fontWeight: 900, fontSize: 17 }}>ইনভয়েস ভয়েড</div>
           <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 6 }}>{inv.customerName} · {invCode} · ৳{fmt(inv.total)}</div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
           <button onClick={() => setStage("full1")}
-            style={{ display: "flex", alignItems: "center", gap: 10, textAlign: "left", background: "#ef444412", border: "1px solid #ef444433", borderRadius: 14, padding: "14px 14px", cursor: "pointer", fontFamily: "inherit" }}>
-            <span style={{ fontSize: 22 }}>🗑️</span>
-            <div>
+            style={{ display: "flex", alignItems: "center", gap: 12, textAlign: "left", background: "linear-gradient(135deg,#ef444414,#ef444408)", border: "1px solid #ef444433", borderRadius: 16, padding: "14px 14px", cursor: "pointer", fontFamily: "inherit" }}>
+            <span style={{ width: 42, height: 42, borderRadius: 12, background: "#ef444422", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>🗑️</span>
+            <div style={{ flex: 1 }}>
               <div style={{ color: "#ef4444", fontWeight: 800, fontSize: 14 }}>পুরো ইনভয়েস ভয়েড</div>
               <div style={{ color: "#94a3b8", fontSize: 11.5, marginTop: 2 }}>পুরো ইনভয়েস বাতিল, সব স্টক ফিরে আসবে</div>
             </div>
+            <span style={{ color: "#ef444488", fontSize: 18, flexShrink: 0 }}>›</span>
           </button>
           {returnableItems.length > 0 && (
             <button onClick={() => setStage("partial1")}
-              style={{ display: "flex", alignItems: "center", gap: 10, textAlign: "left", background: "#0ea5e912", border: "1px solid #0ea5e933", borderRadius: 14, padding: "14px 14px", cursor: "pointer", fontFamily: "inherit" }}>
-              <span style={{ fontSize: 22 }}>🔄</span>
-              <div>
+              style={{ display: "flex", alignItems: "center", gap: 12, textAlign: "left", background: "linear-gradient(135deg,#0ea5e914,#0ea5e908)", border: "1px solid #0ea5e933", borderRadius: 16, padding: "14px 14px", cursor: "pointer", fontFamily: "inherit" }}>
+              <span style={{ width: 42, height: 42, borderRadius: 12, background: "#0ea5e922", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>🔄</span>
+              <div style={{ flex: 1 }}>
                 <div style={{ color: "#0ea5e9", fontWeight: 800, fontSize: 14 }}>আংশিক পণ্য ফেরত</div>
                 <div style={{ color: "#94a3b8", fontSize: 11.5, marginTop: 2 }}>নির্দিষ্ট পণ্য আংশিক/পূর্ণ ফেরত নিন</div>
               </div>
+              <span style={{ color: "#0ea5e988", fontSize: 18, flexShrink: 0 }}>›</span>
             </button>
           )}
         </div>
@@ -20236,11 +20324,7 @@ function InvoiceVoidModal({ inv, returns = [], products = [], customers = [], cu
     <div style={overlayStyle} onClick={close}>
       <div style={boxStyleFor("#ef4444")} onClick={e => e.stopPropagation()}>
         <div style={topBar("#ef4444")} />
-        <div style={{ textAlign: "center", marginBottom: 18 }}>
-          <div style={{ fontSize: 42, marginBottom: 8, animation: "hg-float 2s ease-in-out infinite" }}>⚠️</div>
-          <div style={{ color: "#ef4444", fontWeight: 900, fontSize: 17, letterSpacing: 0.5 }}>ইনভয়েস ভয়েড সতর্কতা</div>
-          <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 4 }}>ধাপ ১ / ৩</div>
-        </div>
+        <StageHeader icon="⚠️" accent="#ef4444" title="ইনভয়েস ভয়েড সতর্কতা" step={1} floatIcon />
         <div style={{ background: "#ef444410", border: "1px solid #ef444428", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
@@ -20307,11 +20391,7 @@ function InvoiceVoidModal({ inv, returns = [], products = [], customers = [], cu
     <div style={overlayStyle} onClick={close}>
       <div style={boxStyleFor("#f59e0b")} onClick={e => e.stopPropagation()}>
         <div style={topBar("#f59e0b")} />
-        <div style={{ textAlign: "center", marginBottom: 18 }}>
-          <div style={{ fontSize: 36, marginBottom: 8 }}>📝</div>
-          <div style={{ color: "#f59e0b", fontWeight: 900, fontSize: 16 }}>ভয়েডের কারণ লিখুন</div>
-          <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 4 }}>ধাপ ২ / ৩</div>
-        </div>
+        <StageHeader icon="📝" accent="#f59e0b" title="ভয়েডের কারণ লিখুন" step={2} />
         <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 6, fontWeight: 600 }}>কারণ (বাধ্যতামূলক):</div>
         <textarea value={reason} onChange={e => setReason(e.target.value)} rows={3}
           style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 10, padding: "10px 12px", color: "#f1f5f9", fontSize: 13, fontFamily: "inherit", resize: "none", outline: "none", boxSizing: "border-box" }} />
@@ -20339,11 +20419,8 @@ function InvoiceVoidModal({ inv, returns = [], products = [], customers = [], cu
     <div style={overlayStyle} onClick={close}>
       <div style={boxStyleFor("#a855f7")} onClick={e => e.stopPropagation()}>
         <div style={topBar("#a855f7")} />
-        <div style={{ textAlign: "center", marginBottom: 16 }}>
-          <div style={{ fontSize: 36, marginBottom: 8 }}>🔐</div>
-          <div style={{ color: "#a855f7", fontWeight: 900, fontSize: 16 }}>চূড়ান্ত নিশ্চিতকরণ</div>
-          <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 4 }}>ধাপ ৩ / ৩ — শেষ সুযোগ</div>
-        </div>
+        <StageHeader icon="🔐" accent="#a855f7" title="চূড়ান্ত নিশ্চিতকরণ" step={3} />
+        <div style={{ textAlign: "center", marginTop: -12, marginBottom: 16, color: "#94a3b8", fontSize: 11 }}>শেষ সুযোগ — ফেরানো যাবে না</div>
         <div style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
           <div style={{ color: "#94a3b8", fontSize: 11, marginBottom: 4 }}>ভয়েড করা হবে:</div>
           <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 14 }}>{inv.customerName} — {invCode}</div>
@@ -20383,11 +20460,8 @@ function InvoiceVoidModal({ inv, returns = [], products = [], customers = [], cu
       <div style={overlayStyle} onClick={close}>
         <div style={boxStyleFor("#0ea5e9")} onClick={e => e.stopPropagation()}>
           <div style={topBar("#0ea5e9")} />
-          <div style={{ textAlign: "center", marginBottom: 16 }}>
-            <div style={{ fontSize: 36, marginBottom: 8 }}>🔄</div>
-            <div style={{ color: "#0ea5e9", fontWeight: 900, fontSize: 16 }}>পণ্য ফেরত নিন</div>
-            <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 4 }}>ধাপ ১ / ৩ — {inv.customerName} · {invCode}</div>
-          </div>
+          <StageHeader icon="🔄" accent="#0ea5e9" title="পণ্য ফেরত নিন" step={1} />
+          <div style={{ textAlign: "center", marginTop: -12, marginBottom: 16, color: "#94a3b8", fontSize: 11 }}>{inv.customerName} · {invCode}</div>
           <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 6, fontWeight: 600 }}>কোন পণ্য ফেরত নেবেন:</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12, maxHeight: 160, overflowY: "auto" }}>
             {returnableItems.map(it => {
@@ -20442,17 +20516,24 @@ function InvoiceVoidModal({ inv, returns = [], products = [], customers = [], cu
     <div style={overlayStyle} onClick={close}>
       <div style={boxStyleFor("#f59e0b")} onClick={e => e.stopPropagation()}>
         <div style={topBar("#f59e0b")} />
-        <div style={{ textAlign: "center", marginBottom: 18 }}>
-          <div style={{ fontSize: 36, marginBottom: 8 }}>📝</div>
-          <div style={{ color: "#f59e0b", fontWeight: 900, fontSize: 16 }}>ফেরতের কারণ (ঐচ্ছিক)</div>
-          <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 4 }}>ধাপ ২ / ৩</div>
-        </div>
+        <StageHeader icon="📝" accent="#f59e0b" title="ফেরতের কারণ লিখুন" step={2} />
+        {/* 🔴 ফিক্স: ফুল-ভয়েডের সাথে সামঞ্জস্যপূর্ণ করতে প্রিসেট চিপ যোগ করা হলো —
+            আগে শুধু একটা খালি textarea ছিল, কোনো প্রিসেট ছিল না। */}
+        <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 6, fontWeight: 600 }}>কারণ (বাধ্যতামূলক):</div>
         <textarea value={reason} onChange={e => setReason(e.target.value)} rows={3} placeholder="যেমন: পণ্য নষ্ট, ভুল অর্ডার..."
-          style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 10, padding: "10px 12px", color: "#f1f5f9", fontSize: 13, fontFamily: "inherit", resize: "none", outline: "none", boxSizing: "border-box", marginBottom: 18 }} />
+          style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 10, padding: "10px 12px", color: "#f1f5f9", fontSize: 13, fontFamily: "inherit", resize: "none", outline: "none", boxSizing: "border-box" }} />
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10, marginBottom: 18 }}>
+          {["পণ্য নষ্ট/ত্রুটিপূর্ণ", "ভুল পণ্য দেওয়া হয়েছিল", "মেয়াদোত্তীর্ণ", "কাস্টমার পছন্দ হয়নি"].map(r => (
+            <button key={r} onClick={() => setReason(r)}
+              style={{ background: reason === r ? "#f59e0b22" : "#1e293b", border: `1px solid ${reason === r ? "#f59e0b44" : "#334155"}`, borderRadius: 8, padding: "4px 10px", color: reason === r ? "#f59e0b" : "#94a3b8", fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+              {r}
+            </button>
+          ))}
+        </div>
         <div style={{ display: "flex", gap: 10 }}>
           <button onClick={() => setStage("partial1")} style={backBtn}>← পেছনে</button>
-          <button onClick={() => setStage("partial3")}
-            style={{ flex: 1, padding: "12px 0", borderRadius: 12, border: "none", background: "linear-gradient(135deg,#b45309,#f59e0b)", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer", boxShadow: "0 4px 16px #f59e0b40", fontFamily: "inherit" }}>
+          <button disabled={!reason.trim()} onClick={() => setStage("partial3")}
+            style={{ flex: 1, padding: "12px 0", borderRadius: 12, border: "none", background: reason.trim() ? "linear-gradient(135deg,#b45309,#f59e0b)" : "#1e293b", color: reason.trim() ? "#fff" : "#4b5563", fontWeight: 700, fontSize: 14, cursor: reason.trim() ? "pointer" : "not-allowed", boxShadow: reason.trim() ? "0 4px 16px #f59e0b40" : "none", fontFamily: "inherit" }}>
             পরের ধাপ →
           </button>
         </div>
@@ -20470,11 +20551,7 @@ function InvoiceVoidModal({ inv, returns = [], products = [], customers = [], cu
       <div style={overlayStyle} onClick={close}>
         <div style={boxStyleFor("#a855f7")} onClick={e => e.stopPropagation()}>
           <div style={topBar("#a855f7")} />
-          <div style={{ textAlign: "center", marginBottom: 16 }}>
-            <div style={{ fontSize: 36, marginBottom: 8 }}>✅</div>
-            <div style={{ color: "#a855f7", fontWeight: 900, fontSize: 16 }}>চূড়ান্ত নিশ্চিতকরণ</div>
-            <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 4 }}>ধাপ ৩ / ৩</div>
-          </div>
+          <StageHeader icon="✅" accent="#a855f7" title="চূড়ান্ত নিশ্চিতকরণ" step={3} />
           <div style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 12, padding: "12px 14px", marginBottom: 16 }}>
             <div style={{ color: "#94a3b8", fontSize: 11, marginBottom: 4 }}>ফেরত নেওয়া হবে:</div>
             <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 14 }}>{selItem.name || selItem.productName} × {qtyNum}{selItem.unit || ""}</div>

@@ -294,6 +294,39 @@ export function restoreBatchQty(batches, batchNo, restoredQty, fallback = {}) {
   return updated;
 }
 
+// ─── ভয়েডের সময় batchBreakdown থেকে আগে-রিটার্ন-হওয়া qty বাদ দেওয়া ────────────
+/**
+ * voidInvoice()-এ পুরো ইনভয়েস বাতিল করার সময় স্টক রিস্টোর করার আগে এই ফাংশন দিয়ে
+ * `soldItem.batchBreakdown`-কে scale down করতে হয় — নাহলে যে qty ইতিমধ্যে আলাদা
+ * রিটার্নে (processReturn()) ফেরত নেওয়া হয়ে গেছে, সেটা ভয়েডে আবার দ্বিতীয়বার সেই
+ * ব্যাচে যোগ হয়ে যাবে (ডাবল-স্টক বাগ — getReturnedQtyForInvoice() শুধু single-batch
+ * পাথে (restoredQty) ব্যবহার হতো, batchBreakdown পাথে হতো না)।
+ *
+ * FIFO ধরে নেওয়া হয় — অর্থাৎ আগে যা রিটার্ন হয়েছে সেটা batchBreakdown-এর প্রথম
+ * এন্ট্রি(গুলো) থেকে বাদ যায় (computeStockDeductionFIFO()-ও একই ক্রমে batchBreakdown
+ * তৈরি করে, তাই এই ধারাবাহিকতা যৌক্তিক)। একটা ব্যাচ পুরোপুরি আগেই ফেরত হয়ে থাকলে সেটা
+ * আউটপুট থেকে বাদ পড়ে; আংশিক ফেরত হয়ে থাকলে সেই এন্ট্রির qty কমে যায়।
+ * @param {Array<{batchNo?:string, qty?:number, costPrice?:number, expiryDate?:string}>} batchBreakdown
+ * @param {number} alreadyReturnedQty
+ * @returns {Array<{batchNo?:string, qty:number, costPrice?:number, expiryDate?:string}>}
+ */
+export function scaleBatchBreakdownForVoid(batchBreakdown, alreadyReturnedQty) {
+  if (!Array.isArray(batchBreakdown)) return [];
+  let remaining = Math.max(0, alreadyReturnedQty || 0);
+  const result = [];
+  for (const b of batchBreakdown) {
+    const bQty = (b && b.qty) || 0;
+    if (remaining >= bQty) {
+      remaining -= bQty; // পুরো ব্যাচটাই আগে রিটার্নে ফেরত গেছে — ভয়েডে আর ফেরত দেওয়া হবে না
+      continue;
+    }
+    const newQty = bQty - remaining;
+    remaining = 0;
+    if (newQty > 0) result.push({ ...b, qty: newQty });
+  }
+  return result;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ENTERPRISE_MONITORING_PLAN.md ফেজ D / D1 — প্রোডাকশন রানটাইম ইনভ্যারিয়েন্ট-চেক
 // ═══════════════════════════════════════════════════════════════════════════
