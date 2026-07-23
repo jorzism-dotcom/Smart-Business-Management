@@ -10191,6 +10191,11 @@ function LiveDateTime({ themeColor = "#fde68a", accentColor = "#7dffc0", compact
   // 🔴 ফিক্স: লাইভ ঘড়ি এখন সবসময় GMT+6 (বাংলাদেশ) সময় দেখায়, ডিভাইসের টাইমজোন যা-ই থাকুক
   const time = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: compact ? undefined : "2-digit", timeZone: "Asia/Dhaka" });
   const date = now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Dhaka" });
+  // 🔴 ফিক্স: date/dot আগে raw accentColor ব্যবহার করত, যেটা অনেক থিমে হেডারের
+  // মতোই hue (যেমন rosequartz-এ accent === header রং) — ফলে কালচে গ্লাস পিলের ওপর
+  // "সাদা দেখাচ্ছে না" — লো-কনট্রাস্ট/মিশে যাওয়া দেখাত। পিল সবসময় কালচে-স্বচ্ছ (rgba(0,0,0,..))
+  // ব্যাকগ্রাউন্ড, তাই accentColor-কে সাদার দিকে অনেকখানি হালকা করে নিরাপদ কনট্রাস্ট রাখা হলো।
+  const dateColor = shadeColor(accentColor, 62);
   if (compact) {
     // ── কমপ্যাক্ট, এক-লাইন pill — সময় ও তারিখ পাশাপাশি, শপ নামের নিচে আলাদা লাইনে ──
     return (
@@ -10204,8 +10209,8 @@ function LiveDateTime({ themeColor = "#fde68a", accentColor = "#7dffc0", compact
       }}>
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={themeColor} strokeWidth="2.4" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         <span style={{ color: themeColor, fontWeight: 800, fontSize: 13.5, letterSpacing: 0.4, fontVariantNumeric: "tabular-nums" }}>{time}</span>
-        <span style={{ color: `${accentColor}99`, fontSize: 12 }}>•</span>
-        <span style={{ color: accentColor, fontWeight: 700, fontSize: 13, letterSpacing: 0.2 }}>{date}</span>
+        <span style={{ color: `${dateColor}99`, fontSize: 12 }}>•</span>
+        <span style={{ color: dateColor, fontWeight: 700, fontSize: 13, letterSpacing: 0.2 }}>{date}</span>
       </div>
     );
   }
@@ -10230,9 +10235,9 @@ function LiveDateTime({ themeColor = "#fde68a", accentColor = "#7dffc0", compact
           fontVariantNumeric: "tabular-nums",
         }}>{time}</span>
       </div>
-      {/* Date tag — vibrant accent color */}
+      {/* Date tag — vibrant accent color, লাইট-করা যাতে কালচে পিলের ওপর মিশে না যায় */}
       <span style={{
-        color: accentColor,
+        color: dateColor,
         fontWeight: 800, fontSize: 12,
         letterSpacing: 0.5,
         textShadow: `0 0 10px ${accentColor}88, 0 1px 6px rgba(0,0,0,0.5)`,
@@ -28704,10 +28709,10 @@ function DailyNotifCard({ S, T = {}, shopName, showToast, customers = [], invoic
                     value={timeInputVal}
                     onChange={(e) => handleTimeChange(idx, e.target.value)}
                     style={{
-                      flex:1, background:"rgba(255,255,255,0.07)", color:"#fff",
-                      border:"1px solid #a78bfa44", borderRadius:12,
+                      flex:1, background: isLight ? "#ffffff" : "rgba(255,255,255,0.07)", color: isLight ? "#1e1033" : "#fff",
+                      border: isLight ? "1px solid #a78bfa66" : "1px solid #a78bfa44", borderRadius:12,
                       padding:"10px 14px", fontSize:15, fontWeight:800, fontFamily:"inherit",
-                      colorScheme: "dark", textAlign:"center",
+                      colorScheme: isLight ? "light" : "dark", textAlign:"center",
                     }}
                   />
                   {notifTimes.length > 1 && (
@@ -28935,6 +28940,7 @@ function RecoverySetupCard({ T, S, showToast, recoveryPhone, setRecoveryPhone, r
 
 // ── StaffCustomTimePicker — কাস্টম সময় পিক করে স্টাফ পার্মিশন দেওয়া ─────────────
 function StaffCustomTimePicker({ T, staffName, onGrant }) {
+  const isLight = T.bg && (T.bg.startsWith("#f") || T.bg.startsWith("#e") || T.bg.startsWith("rgb(2") || T.bg === "#ffffff");
   const [mode, setMode] = React.useState("preset"); // "preset" | "custom"
   const [customDt, setCustomDt] = React.useState(() => {
     // default: এখন থেকে ১ ঘণ্টা পরে, local datetime-local input format
@@ -28987,7 +28993,7 @@ function StaffCustomTimePicker({ T, staffName, onGrant }) {
         <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
           {PRESETS.map(p => (
             <button key={p.label}
-              style={{ background: "#7c3aed22", border: "1px solid #7c3aed44", color: "#c4b5fd", borderRadius: 7, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" }}
+              style={{ background: isLight ? "#7c3aed18" : "#7c3aed22", border: "1px solid #7c3aed44", color: isLight ? "#5b21b6" : "#c4b5fd", borderRadius: 7, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" }}
               onClick={() => handlePreset(p)}>
               {p.label}
             </button>
@@ -29001,7 +29007,7 @@ function StaffCustomTimePicker({ T, staffName, onGrant }) {
             value={customDt}
             onChange={e => setCustomDt(e.target.value)}
             min={(() => { const d = new Date(); const pad = n => String(n).padStart(2,"0"); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; })()}
-            style={{ background: "#7c3aed15", border: "1px solid #7c3aed55", color: "#c4b5fd", borderRadius: 8, padding: "7px 10px", fontSize: 12, fontFamily: "inherit", outline: "none", width: "100%", boxSizing: "border-box", colorScheme: "dark" }}
+            style={{ background: isLight ? "#ffffff" : "#7c3aed15", border: isLight ? "1px solid #7c3aed66" : "1px solid #7c3aed55", color: isLight ? "#4c1d95" : "#c4b5fd", borderRadius: 8, padding: "7px 10px", fontSize: 12, fontFamily: "inherit", outline: "none", width: "100%", boxSizing: "border-box", colorScheme: isLight ? "light" : "dark" }}
           />
           <button
             onClick={handleCustomGrant}
@@ -29445,6 +29451,7 @@ function StaffAutoScheduler({ T, schedule, onChange }) {
   const sched = schedule || { key: "purchase_entry", enabled: false, startHour: 22, startMinute: 0, endHour: 0, endMinute: 0 };
   const toTimeStr = (h, m) => `${String(h ?? 0).padStart(2,"0")}:${String(m ?? 0).padStart(2,"0")}`;
   const active = isAutoScheduleActive(sched);
+  const isLight = T.bg && (T.bg.startsWith("#f") || T.bg.startsWith("#e") || T.bg.startsWith("rgb(2") || T.bg === "#ffffff");
 
   return (
     <div>
@@ -29477,14 +29484,14 @@ function StaffAutoScheduler({ T, schedule, onChange }) {
             <div style={{ fontSize:9, color:T.sub, marginBottom:3 }}>শুরু</div>
             <input type="time" value={toTimeStr(sched.startHour, sched.startMinute)}
               onChange={e => { const [h,m] = e.target.value.split(":").map(Number); onChange({ ...sched, startHour:h, startMinute:m }); }}
-              style={{ width:"100%", background:"#7c3aed15", border:"1px solid #7c3aed44", color:"#c4b5fd", borderRadius:8, padding:"6px 8px", fontSize:12, fontFamily:"inherit", colorScheme:"dark", boxSizing:"border-box" }} />
+              style={{ width:"100%", background: isLight ? "#ffffff" : "#7c3aed15", border: isLight ? "1px solid #7c3aed55" : "1px solid #7c3aed44", color: isLight ? "#4c1d95" : "#c4b5fd", borderRadius:8, padding:"6px 8px", fontSize:12, fontFamily:"inherit", colorScheme: isLight ? "light" : "dark", boxSizing:"border-box" }} />
           </div>
           <span style={{ color:T.sub, fontSize:12, marginTop:14 }}>→</span>
           <div style={{ flex:1 }}>
             <div style={{ fontSize:9, color:T.sub, marginBottom:3 }}>শেষ</div>
             <input type="time" value={toTimeStr(sched.endHour, sched.endMinute)}
               onChange={e => { const [h,m] = e.target.value.split(":").map(Number); onChange({ ...sched, endHour:h, endMinute:m }); }}
-              style={{ width:"100%", background:"#7c3aed15", border:"1px solid #7c3aed44", color:"#c4b5fd", borderRadius:8, padding:"6px 8px", fontSize:12, fontFamily:"inherit", colorScheme:"dark", boxSizing:"border-box" }} />
+              style={{ width:"100%", background: isLight ? "#ffffff" : "#7c3aed15", border: isLight ? "1px solid #7c3aed55" : "1px solid #7c3aed44", color: isLight ? "#4c1d95" : "#c4b5fd", borderRadius:8, padding:"6px 8px", fontSize:12, fontFamily:"inherit", colorScheme: isLight ? "light" : "dark", boxSizing:"border-box" }} />
           </div>
         </div>
         <div style={{ color:T.sub, fontSize:9, marginTop:6, opacity:0.75, lineHeight:1.5 }}>
@@ -33957,6 +33964,7 @@ function GoogleDriveSection({ data, setters, showToast, T, S, googleDriveToken, 
 
 // ─── Local Storage / File Section ─────────────────────────────────────────────
 function LocalStorageSection({ data, setters, showToast, T, S, currentBusinessType, currentEnabledTypes }) {
+  const isLight = T.bg && (T.bg.startsWith("#f") || T.bg.startsWith("#e") || T.bg.startsWith("rgb(2") || T.bg === "#ffffff");
   const [expanded, setExpanded] = useState(false);
   const [autoEnabled, setAutoEnabled] = useState(() => LocalBackup.isAutoEnabled());
   const [schedule, setSchedule] = useState(() => LocalBackup.getSchedule());
@@ -34436,11 +34444,11 @@ function LocalStorageSection({ data, setters, showToast, T, S, currentBusinessTy
           {/* 🔐 E2E Encryption Toggle */}
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "space-between",
-            background: "#a855f710", border: "1px solid #a855f730",
+            background: isLight ? "#a855f712" : "#a855f710", border: "1px solid #a855f730",
             borderRadius: 12, padding: "10px 14px", marginBottom: 14,
           }}>
             <div style={{ flex: 1 }}>
-              <div style={{ color: "#c4b5fd", fontWeight: 800, fontSize: 12 }}>🔐 এনক্রিপ্টেড ব্যাকআপ</div>
+              <div style={{ color: isLight ? "#7c3aed" : "#c4b5fd", fontWeight: 800, fontSize: 12 }}>🔐 এনক্রিপ্টেড ব্যাকআপ</div>
               <div style={{ color: "#64748b", fontSize: 10, marginTop: 2 }}>
                 AES-256 — PIN ছাড়া কেউ ফাইল খুলতে পারবে না। PIN ভুলে গেলে ব্যাকআপ উদ্ধার অসম্ভব!
                 {/* 🔴 ফিক্স #৪: আগে এই টগল অন করলে ইউজার ধরে নিতেন সব ব্যাকআপ
