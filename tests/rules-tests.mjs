@@ -124,8 +124,8 @@ async function main() {
   });
 
   // ── purchaseOrders / stockMovements / cashLogs / paymentInvoices ────────
-  await check("purchaseOrders: ঋণাত্মক totalAmount ব্যর্থ হয়", async () => {
-    await assertFails(setDoc(doc(db, "purchaseOrders/po1"), { totalAmount: -1 }));
+  await check("purchaseOrders: ঋণাত্মক totalCost ব্যর্থ হয়", async () => {
+    await assertFails(setDoc(doc(db, "purchaseOrders/po1"), { totalCost: -1 }));
   });
   await check("stockMovements: qty সংখ্যা না হলে ব্যর্থ হয়", async () => {
     await assertFails(setDoc(doc(db, "stockMovements/sm1"), { qty: "ten" }));
