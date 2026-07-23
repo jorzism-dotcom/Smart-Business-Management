@@ -365,5 +365,14 @@ service cloud.firestore {
     match /stats_pharmacy/{id}   { allow read, write: if true; }
     match /stats_veterinary/{id} { allow read, write: if true; }
     match /stats_semen/{id}      { allow read, write: if true; }
+
+    // ── SBM Control Center (admin.html) নিজের কালেকশন ──
+    // 🆕 ফিক্স (২৩ জুলাই ২০২৬): admin_config/subscriptions/app_errors/businessTypeAuditLog
+    // এই ৪টা কালেকশনের জন্য কোনো match ব্লক ছিল না বলে ডিফল্টভাবে deny হচ্ছিল
+    // (root cause: admin.html থেকে অ্যাপ-আপডেট প্রকাশ ব্যর্থ হওয়া)।
+    match /admin_config/{id}         { allow read, write: if true; }
+    match /subscriptions/{id}        { allow read, write: if true; }
+    match /app_errors/{id}           { allow read, write: if true; }
+    match /businessTypeAuditLog/{id} { allow read, write: if true; }
   }
 }
