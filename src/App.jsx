@@ -9559,6 +9559,15 @@ const runLogicTests = () => {
     const actual = calcCashDrawer(0, 0, 0, 0);
     return { pass: actual === 0, expected: 0, actual };
   });
+  // 🆕 (২৪ জুলাই ২০২৬) — পণ্য ফেরত রিফান্ড/রিভার্সাল এখন উত্তোলন থেকে আলাদা প্যারামিটার
+  t("ক্যাশ ড্রয়ার সূত্র", "পণ্য ফেরত রিফান্ড উত্তোলনের সাথে না মিশে আলাদাভাবে বিয়োগ হওয়া উচিত", () => {
+    const actual = calcCashDrawer(1000, 5000, 800, 1200, 40, 0);
+    return { pass: actual === 5560, expected: 5560, actual };
+  });
+  t("ক্যাশ ড্রয়ার সূত্র", "ভয়েড-রিভার্সাল আগের রিফান্ডকে ঠিকমতো ফেরত যোগ করা উচিত", () => {
+    const actual = calcCashDrawer(1000, 5000, 800, 1200, 40, 40);
+    return { pass: actual === 5600, expected: 5600, actual };
+  });
 
   // ── ব্যাচ-স্টক রিস্টোর — এখন src/logic.js থেকে import করা ──
   t("ব্যাচ রিস্টোর সূত্র", "বিদ্যমান ব্যাচে qty যোগ হওয়া উচিত (প্রতিস্থাপন নয়)", () => {
@@ -10331,9 +10340,19 @@ function useKpiStats({ customers, invoices, products, txns, expenses = [], cashL
     // profit থেকেও একই লজিকে বাদ যাচ্ছে, কিন্তু পুরো refundAmount না — শুধু
     // লাভের অংশটুকু (refundAmount - ফেরত যাওয়া পণ্যের cost), কারণ পণ্যটা আবার
     // স্টকে ফিরে এসেছে বলে cost-টা হারায়নি, শুধু বিক্রয়ের লাভটাই উবে গেছে।
+    // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — আংশিক ফেরতের পর পুরো ইনভয়েস ভয়েড করলে বিক্রয়
+    // ঋণাত্মক (negative) দেখানো বাগ): আংশিক ফেরত (processReturn) নেওয়ার পর সেই
+    // return রেকর্ডটা returns[]-এ থেকেই যায়। পরে পুরো ইনভয়েসটা voidInvoice()
+    // দিয়ে ভয়েড করা হলে সেই ইনভয়েসের total ইতিমধ্যেই todayInvs (voided বাদ)
+    // থেকে সম্পূর্ণ বাদ পড়ে যায় — অথচ আগের সেই আংশিক-ফেরতের refundAmount তখনও
+    // todayReturnsRefund-এ যোগ হয়েই থাকত, ফলে সেই অংশটা দুইবার বাদ যেত (একবার
+    // ইনভয়েস বাদ পড়ায়, আরেকবার returns-এর কারণে) — "আজকের বিক্রয়" ঋণাত্মক হয়ে
+    // যেত। এখন যে ইনভয়েস ইতিমধ্যে voided, তার সাথে যুক্ত returns এখানে বাদ
+    // দেওয়া হচ্ছে (সেই ইনভয়েসের পুরো টাকাই তো এমনিতেই বাদ পড়ে গেছে)।
+    const voidedInvIdsForReturns = new Set((invoices || []).filter(i => i.status === "voided").map(i => i.id));
     const returnsAll = returns || [];
-    const todayReturns = returnsAll.filter(r => r.dateKey === todayKey);
-    const monthReturns = returnsAll.filter(r => (r.dateKey || "") >= monthStartKey);
+    const todayReturns = returnsAll.filter(r => r.dateKey === todayKey && !voidedInvIdsForReturns.has(r.invoiceId));
+    const monthReturns = returnsAll.filter(r => (r.dateKey || "") >= monthStartKey && !voidedInvIdsForReturns.has(r.invoiceId));
     const todayReturnsRefund = todayReturns.reduce((s, r) => s + (r.refundAmount || 0), 0);
     const monthReturnsRefund = monthReturns.reduce((s, r) => s + (r.refundAmount || 0), 0);
     const todayReturnsProfitImpact = todayReturns.reduce((s, r) => s + ((r.refundAmount || 0) - (r.costPrice || 0) * (r.qty || 0)), 0);
@@ -10393,7 +10412,14 @@ function useKpiStats({ customers, invoices, products, txns, expenses = [], cashL
 
     const cashLogsAll = cashLogs || [];
     const openingCashToday = cashLogsAll.filter(c => c.type === "opening" && c.dateKey === todayKeyEn).reduce((s, c) => s + (c.amount || 0), 0);
+    // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — উইথড্রয়াল/বাতিল conflation): "withdrawal" টাইপ এখন
+    // শুধু মালিক/স্টাফের সত্যিকারের ক্যাশ উত্তোলন বোঝায় — পণ্য ফেরতের রিফান্ড
+    // (return_refund) বা তার ভয়েড-রিভার্সাল (return_refund_reversal) এতে ধরা পড়ে
+    // না। ক্যাশ ড্রয়ারের প্রকৃত হিসাবে সেগুলো এখনও লাগে (আসল টাকা বেরিয়েছিল),
+    // তাই আলাদাভাবে যোগ/বিয়োগ করা হচ্ছে।
     const withdrawalToday = cashLogsAll.filter(c => c.type === "withdrawal" && c.dateKey === todayKeyEn).reduce((s, c) => s + (c.amount || 0), 0);
+    const returnRefundToday = cashLogsAll.filter(c => c.type === "return_refund" && c.dateKey === todayKeyEn).reduce((s, c) => s + (c.amount || 0), 0);
+    const returnReversalToday = cashLogsAll.filter(c => c.type === "return_refund_reversal" && c.dateKey === todayKeyEn).reduce((s, c) => s + (c.amount || 0), 0);
 
     const purchaseOrdersAll = (purchaseOrders || []).filter(p => p._type === "pe");
     const todayPurchases = purchaseOrdersAll.filter(p => p.dateKey === todayKey);
@@ -10401,7 +10427,7 @@ function useKpiStats({ customers, invoices, products, txns, expenses = [], cashL
     const todayPurchaseCount = todayPurchases.length;
     const monthPurchaseCost = purchaseOrdersAll.filter(p => (p.dateKey || "") >= monthStartKey).reduce((s, p) => s + (p.totalCost || 0), 0);
 
-    const currentCashDrawer = openingCashToday + todayCashSale + todayJoma - withdrawalToday;
+    const currentCashDrawer = openingCashToday + todayCashSale + todayJoma - withdrawalToday - returnRefundToday + returnReversalToday;
 
     const todayExpense = (expenses || []).filter(e => (e.dateKey || e.date) === todayKey).reduce((s, e) => s + (e.amount || 0), 0);
     const monthExpense = (expenses || []).filter(e => (e.dateKey || e.date || "") >= monthStartKey).reduce((s, e) => s + (e.amount || 0), 0);
@@ -10601,10 +10627,14 @@ function AIPage_({ T, S, customers, invoices, products, txns, paymentInvoices, s
   // হুকে (হোম ড্যাশবোর্ড) এই একই returns-নেট-আউট আগেই ফিক্স হয়েছিল, কিন্তু এই ফাংশন
   // (AIPage_) নিজের আলাদা কপি ব্যবহার করে বলে ফিক্সটা এখানে কপি হয়নি। এখন একই
   // প্যাটার্ন এখানেও প্রয়োগ করা হলো যাতে হোম ড্যাশবোর্ড আর AI পেজের সংখ্যা মেলে।
+  // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — নেগেটিভ বিক্রয় বাগ, useKpiStats-এর মতোই): আংশিক
+  // ফেরতের পর ইনভয়েস ভয়েড হলে সেই আংশিক-ফেরতের returns এন্ট্রি এখানেও বাদ
+  // দেওয়া দরকার — নাহলে একই টাকা দুইবার বাদ যায়।
+  const voidedInvIdsForReturnsAI = new Set((invoices || []).filter(i => i.status === "voided").map(i => i.id));
   const returnsAll = returns || [];
-  const todayReturns = returnsAll.filter(r => r.dateKey === todayKey);
-  const weekReturns = returnsAll.filter(r => (r.dateKey || "") >= d7);
-  const monthReturns = returnsAll.filter(r => (r.dateKey || "") >= monthStartKey);
+  const todayReturns = returnsAll.filter(r => r.dateKey === todayKey && !voidedInvIdsForReturnsAI.has(r.invoiceId));
+  const weekReturns = returnsAll.filter(r => (r.dateKey || "") >= d7 && !voidedInvIdsForReturnsAI.has(r.invoiceId));
+  const monthReturns = returnsAll.filter(r => (r.dateKey || "") >= monthStartKey && !voidedInvIdsForReturnsAI.has(r.invoiceId));
   const todayReturnsRefund = todayReturns.reduce((s, r) => s + (r.refundAmount || 0), 0);
   const weekReturnsRefund = weekReturns.reduce((s, r) => s + (r.refundAmount || 0), 0);
   const monthReturnsRefund = monthReturns.reduce((s, r) => s + (r.refundAmount || 0), 0);
@@ -10692,7 +10722,12 @@ function AIPage_({ T, S, customers, invoices, products, txns, paymentInvoices, s
   // ── ক্যাশ ড্রয়ার — ওপেনিং/উইথড্রয়াল/বর্তমান ক্যাশ ────────────────────────
   const cashLogsAll = cashLogs || [];
   const openingCashToday = cashLogsAll.filter(c => c.type === "opening" && c.dateKey === todayKeyEn).reduce((s, c) => s + (c.amount || 0), 0);
+  // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — উইথড্রয়াল/বাতিল conflation): দেখুন useKpiStats-এর
+  // একই ফিক্সের কমেন্ট — "withdrawal" এখন শুধু সত্যিকারের ক্যাশ উত্তোলন,
+  // পণ্য ফেরত/ভয়েড-রিভার্সাল আলাদাভাবে ধরা হচ্ছে।
   const withdrawalToday = cashLogsAll.filter(c => c.type === "withdrawal" && c.dateKey === todayKeyEn).reduce((s, c) => s + (c.amount || 0), 0);
+  const returnRefundToday = cashLogsAll.filter(c => c.type === "return_refund" && c.dateKey === todayKeyEn).reduce((s, c) => s + (c.amount || 0), 0);
+  const returnReversalToday = cashLogsAll.filter(c => c.type === "return_refund_reversal" && c.dateKey === todayKeyEn).reduce((s, c) => s + (c.amount || 0), 0);
 
   // ── ক্রয় (আজ/এই মাস) ────────────────────────────────────────────────────
   const purchaseOrdersAll = (purchaseOrders || []).filter(p => p._type === "pe");
@@ -10701,7 +10736,7 @@ function AIPage_({ T, S, customers, invoices, products, txns, paymentInvoices, s
   const todayPurchaseCount = todayPurchases.length;
   const monthPurchaseCost = purchaseOrdersAll.filter(p => (p.dateKey || "") >= monthStartKey).reduce((s, p) => s + (p.totalCost || 0), 0);
 
-  const currentCashDrawer = openingCashToday + todayCashSale + todayJoma - withdrawalToday;
+  const currentCashDrawer = openingCashToday + todayCashSale + todayJoma - withdrawalToday - returnRefundToday + returnReversalToday;
 
   // ── খরচ (আজ/এই মাস) ─────────────────────────────────────────────────────
   const todayExpense = (expenses || []).filter(e => (e.dateKey || e.date) === todayKey).reduce((s, e) => s + (e.amount || 0), 0);
@@ -14571,8 +14606,11 @@ function SmartBusinessMgmt() {
     // cashLogs হিস্ট্রিতে আলাদাভাবে দেখা যাবে)।
     const cashRefundedAmount = getReturnedAmountForInvoice(returns, inv.id, "cash");
     if (cashRefundedAmount > 0 && typeof setCashLogs === "function") {
+      // 🔴 ফিক্স (২৪ জুলাই ২০২৬): processReturn()-এর "return_refund" টাইপের সাথে
+      // সঙ্গতিপূর্ণ রাখতে এই রিভার্সাল এন্ট্রিও নিজের আলাদা টাইপ ব্যবহার করছে —
+      // কোনো সাধারণ "deposit"/"withdrawal" এর সাথে মিশে যাবে না।
       const cashReversalEntry = {
-        id: uid(), type: "deposit", cashType: "other", party: "",
+        id: uid(), type: "return_refund_reversal", cashType: "return_reversal", party: "",
         amount: cashRefundedAmount,
         note: `ভয়েড-রিভার্সাল — ইনভয়েস ${inv.invoiceNo || inv.id.slice(-6).toUpperCase()}-এর আগের নগদ রিটার্ন-রিফান্ড বাতিল`,
         date: todayStr(), dateKey: todayEn(),
@@ -14781,8 +14819,16 @@ function SmartBusinessMgmt() {
         }
       }
     } else if (mode === "cash" && typeof setCashLogs === "function") {
+      // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — উইথড্রয়াল/বাতিল conflation বাগ): এই এন্ট্রি আগে
+      // type: "withdrawal" হিসেবে লগ হতো, ফলে ড্যাশবোর্ডের "আজকের উইথড্রয়াল" স্ট্যাট
+      // (যেটা আসলে মালিক/স্টাফের সত্যিকারের ক্যাশ উত্তোলন ট্র্যাক করার জন্য) পণ্য
+      // ফেরতের রিফান্ডের সাথে মিশে যেত (উদাহরণ: ৪০ টাকার আংশিক ফেরত নিলেই
+      // "আজকের উইথড্রয়াল ৳৪০" দেখাতো, যদিও কেউ ক্যাশ ড্রয়ার থেকে সত্যিকারে টাকা
+      // তোলেনি)। এখন আলাদা "return_refund" টাইপ ব্যবহার করা হচ্ছে — ক্যাশ ড্রয়ারের
+      // মোট হিসাব (currentCashDrawer)-এ এটা এখনও যোগ হয় (আসল টাকা তো বেরিয়েছে),
+      // কিন্তু "উইথড্রয়াল" লেবেলের সাথে আর গুলিয়ে যাবে না।
       const cashEntry = {
-        id: uid(), type: "withdrawal", cashType: "other", party: "",
+        id: uid(), type: "return_refund", cashType: "return", party: "",
         amount: refundAmount,
         note: `পণ্য ফেরত (নগদ) — ইনভয়েস ${inv.invoiceNo || inv.id} — ${item.name || localP?.name || ""}${reason ? " (" + reason + ")" : ""}`,
         date: todayStr(), dateKey: todayKey,
@@ -14874,7 +14920,20 @@ function SmartBusinessMgmt() {
   // যোগ করলে ফেরত-যাওয়া অংশও বিক্রয় হিসেবে গোনা হয়ে যেত। useKpiStats হুকে (AI
   // পেজে ব্যবহৃত) এই একই হিসাবের সঠিক ভার্সন আগে থেকেই ছিল — এখানে সেই একই
   // প্যাটার্ন প্রয়োগ করা হলো যাতে হোম ড্যাশবোর্ড আর AI পেজের সংখ্যা মিলে যায়।
-  const todayReturns = useMemo(() => { const key = todayEn(); return (returns || []).filter(r => r.dateKey === key); }, [returns]);
+  // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — রুট কজ: আংশিক ফেরতের পর ইনভয়েস ভয়েড করলে "আজকের
+  // বিক্রয়" ঋণাত্মক দেখানো বাগ): কোনো ইনভয়েস থেকে আংশিক পণ্য ফেরত (processReturn)
+  // নেওয়ার পর সেই returns এন্ট্রি returns[]-এ থেকে যায়। পরে সেই একই ইনভয়েস পুরোপুরি
+  // voidInvoice() দিয়ে ভয়েড করা হলে todayInvs (যেটা voided বাদ দেয়) থেকে তার total
+  // (পুরো ২০০ টাকা) সম্পূর্ণ বাদ পড়ে যায় — অথচ আগের আংশিক-ফেরতের refundAmount (৪০
+  // টাকা) তখনও todayReturnsRefund-এ যোগ হয়েই থাকত, ফলে সেই ৪০ টাকা দুইবার বাদ
+  // যেত (একবার গোটা ইনভয়েস বাদ পড়ায়, আরেকবার returns-এর কারণে) — ফলাফলে "আজকের
+  // বিক্রয়" ০ - ৪০ = -৪০ দেখাত। এখন যে ইনভয়েসের status ইতিমধ্যে "voided", তার সাথে
+  // যুক্ত returns এখানে বাদ দেওয়া হচ্ছে (সেই ইনভয়েসের পুরো টাকাই এমনিতেই বাদ গেছে)।
+  const todayReturns = useMemo(() => {
+    const key = todayEn();
+    const voidedInvIds = new Set(invoices.filter(i => i.status === "voided").map(i => i.id));
+    return (returns || []).filter(r => r.dateKey === key && !voidedInvIds.has(r.invoiceId));
+  }, [returns, invoices]);
   const todayReturnsRefund = useMemo(() => todayReturns.reduce((s, r) => s + (r.refundAmount || 0), 0), [todayReturns]);
   // ক্যাশ-মোড ফেরতই শুধু আজকের নগদ বিক্রয় থেকে বাদ যাবে — বাকি-মোড ফেরত কাস্টমারের
   // balance সমন্বয় করে (processReturn()-এ), নগদ ড্রয়ারকে প্রভাবিত করে না।
@@ -20807,6 +20866,10 @@ function Dashboard({ T, S, businessType = "pharmacy", customers, totalBaki, toda
     supplier: { label: "সাপ্লায়ারকে দেওয়া",   icon: "🏭", color: "#f59e0b" },
     expense:  { label: "বাজার/খরচ",          icon: "🛒", color: "#a855f7" },
     other:    { label: "অন্যান্য",           icon: "📋", color: "#64748b" },
+    // 🆕 এই দুটো "উইথড্রয়াল" নয় — পণ্য ফেরত/ভয়েডের কারণে ক্যাশ ড্রয়ারে হওয়া
+    // পরিবর্তন, আলাদাভাবে চেনার জন্য নিজস্ব লেবেল/আইকন।
+    return:          { label: "পণ্য ফেরত রিফান্ড (নগদ)", icon: "🔄", color: "#eab308" },
+    return_reversal: { label: "ভয়েড রিভার্সাল",         icon: "↩️", color: "#22c55e" },
   };
 
   const todayKeyStr = todayEn();
@@ -21125,7 +21188,7 @@ function Dashboard({ T, S, businessType = "pharmacy", customers, totalBaki, toda
     return (
       <div style={S.page}>
         <button style={S.textBtn} onClick={() => setViewInv(null)}>← তালিকায় ফিরুন</button>
-        <InvoiceReceipt T={T} S={S} inv={viewInv} customer={cust} type="buyer" />
+        <InvoiceReceipt T={T} S={S} inv={viewInv} customer={cust} type="buyer" returns={returns} />
       </div>
     );
   }
@@ -23159,7 +23222,11 @@ function Dashboard({ T, S, businessType = "pharmacy", customers, totalBaki, toda
               const isVoided   = inv.status === "voided";
               // 🆕 ফিক্স #২ — আংশিক পণ্য ফেরত হয়ে থাকলে সেটা এখন কার্ডেই দৃশ্যমান
               // (আগে এই তথ্য কোথাও দেখানো হতো না, void modal খুললেই শুধু বোঝা যেত)
-              const _invReturns = !isVoided ? (returns || []).filter(r => r.invoiceId === inv.id) : [];
+              // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — পুরো ভয়েডে আংশিক ফেরতের ইতিহাস হারিয়ে যাওয়া):
+              // আগে isVoided হলে _invReturns জোর করে [] বসানো হতো, ফলে কোনো ইনভয়েসে
+              // আগে আংশিক ফেরত নেওয়ার পর সেটা পরে পুরোপুরি ভয়েড হলে সেই ফেরতের কোনো
+              // চিহ্নই কার্ডে থাকত না। এখন returns সবসময় গণনা হচ্ছে — ভয়েড হলেও।
+              const _invReturns = (returns || []).filter(r => r.invoiceId === inv.id);
               const _hasPartialReturn = _invReturns.length > 0;
               // 🔒 Admin-only: প্রতিটি ইনভয়েস কার্ডে নেট লাভ — স্টাফ দেখতে পাবে না, শুধু ইনভয়েস দেখতে পারবে
               const _showNetProfit = currentUser?.role !== "staff" && !isVoided;
@@ -23214,8 +23281,19 @@ function Dashboard({ T, S, businessType = "pharmacy", customers, totalBaki, toda
                         {timeLabel && <span style={{ color: isVoided?"#6b7280":isBaki?"#fca5a5":isPartial?"#fde68a":"#86efac", fontWeight:700, marginLeft:5 }}>· ⏰ {timeLabel}</span>}
                       </div>
                       {_hasPartialReturn && (
-                        <div style={{ color: "#eab308", fontSize: 10, fontWeight: 700, marginTop: 2 }}>
-                          🔄 {_invReturns.length}টি পণ্য ফেরত হয়েছে
+                        <div style={{
+                          display: "inline-flex", alignItems: "center", gap: 5,
+                          marginTop: 5, padding: "3px 9px 3px 6px",
+                          background: "linear-gradient(135deg,#eab30833,#eab30814)",
+                          border: "1px solid #eab30866", borderRadius: 999,
+                          boxShadow: "0 2px 8px -3px #eab30877",
+                        }}>
+                          <span style={{ fontSize: 13, lineHeight: 1 }}>🔄</span>
+                          <span style={{ color: "#fde047", fontSize: 11, fontWeight: 800 }}>
+                            {isVoided
+                              ? `পুরো বাতিলের আগে ${_invReturns.length}টি পণ্য ফেরত হয়েছিল`
+                              : `${_invReturns.length}টি পণ্য ফেরত হয়েছে`}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -23486,15 +23564,31 @@ function Dashboard({ T, S, businessType = "pharmacy", customers, totalBaki, toda
               {/* লাভ/লস কার্ড — বাম লাভ, ডান লস, নিচে নেট */}
               {c.isProfit ? (() => {
                 const _prodMap = new Map(products.map(p => [p.id, p]));
-                const _totalProfit = (repData.invs || []).reduce((s, inv) => {
+                const _rawProfit = (repData.invs || []).reduce((s, inv) => {
                   const p = calcInvoiceProfit(inv, _prodMap);
                   return s + (p > 0 ? p : 0);
                 }, 0);
-                const _totalLoss = (repData.invs || []).reduce((s, inv) => {
+                const _rawLoss = (repData.invs || []).reduce((s, inv) => {
                   const p = calcInvoiceProfit(inv, _prodMap);
                   return s + (p < 0 ? p : 0);
                 }, 0);
-                const _net = _totalProfit + _totalLoss;
+                // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — রুট কজ: আংশিক পণ্য ফেরত নিলেও এই কার্ডে
+                // "আজকের লাভ" অপরিবর্তিত থেকে যাওয়া বাগ): এই কার্ড calcInvoiceProfit()
+                // দিয়ে সরাসরি প্রতিটা সক্রিয় ইনভয়েসের মূল/অপরিবর্তিত items থেকে লাভ
+                // হিসাব করত — কোনো পণ্য আংশিকভাবে ফেরত (processReturn) নেওয়া হলেও
+                // returns[] অ্যারে এখানে কখনো দেখা হতো না, তাই ফেরত যাওয়া অংশের লাভও
+                // এই কার্ডে গণনায় থেকে যেত। buildDailySummaryData()-এ (নোটিফিকেশন
+                // টেক্সট) একই সমস্যার যে সমাধান (netAfterReturns) আগে থেকেই আছে, এখানে
+                // সেই একই প্যাটার্ন প্রয়োগ করা হলো — এবং ইতিমধ্যে ভয়েড হওয়া ইনভয়েসের
+                // সাথে যুক্ত returns বাদ দেওয়া হচ্ছে (নাহলে ভয়েড করার সময় ডাবল-কাউন্ট
+                // হয়ে যাবে, ঠিক যেমন "আজকের বিক্রয়"-এ হচ্ছিল)।
+                const _voidedInvIdsForCard = new Set((invoices || []).filter(i => i.status === "voided").map(i => i.id));
+                const _cardRangeReturns = (returns || []).filter(r => inRepRange(r.dateKey) && !_voidedInvIdsForCard.has(r.invoiceId));
+                const _cardReturnsProfitImpact = _cardRangeReturns.reduce((s, r) => s + ((r.refundAmount || 0) - (r.costPrice || 0) * (r.qty || 0)), 0);
+                const _netAfterReturns = (_rawProfit + _rawLoss) - _cardReturnsProfitImpact;
+                const _totalProfit = _netAfterReturns > 0 ? _netAfterReturns : 0;
+                const _totalLoss = _netAfterReturns < 0 ? _netAfterReturns : 0;
+                const _net = _netAfterReturns;
                 const lossAccent = DT.mono[5]; // লস সবসময় নিউট্রাল/সতর্কতামূলক ধূসর-লাল টোনে
                 const profitCol = DT.dark ? cAccent : "#fff";
                 const lossCol   = DT.dark ? (_totalLoss < 0 ? "#ef4444" : "#475569") : "#fff";
@@ -23993,7 +24087,7 @@ function CustomerDetail({ T, S, customer, txns, invoices, customers, paymentInvo
     return (
       <div style={S.page}>
         <button style={S.textBtn} onClick={() => setViewInv(null)}>← লেনদেনে ফিরুন</button>
-        <InvoiceReceipt T={T} S={S} inv={viewInv} customer={cust} type="buyer" />
+        <InvoiceReceipt T={T} S={S} inv={viewInv} customer={cust} type="buyer" returns={returns} />
       </div>
     );
   }
@@ -24168,11 +24262,30 @@ function CustomerDetail({ T, S, customer, txns, invoices, customers, paymentInvo
                 </div>
                 {inv && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {(returns || []).some(r => r.invoiceId === inv.id) && inv.status !== "voided" && (
-                      <div style={{ color: "#eab308", fontSize: 10.5, fontWeight: 700 }}>
-                        🔄 {(returns || []).filter(r => r.invoiceId === inv.id).length}টি পণ্য ফেরত হয়েছে
-                      </div>
-                    )}
+                    {(() => {
+                      // 🔴 ফিক্স (২৪ জুলাই ২০২৬): আগে inv.status !== "voided" শর্তে এই
+                      // ব্যাজ পুরো লুকিয়ে যেত — ফলে আংশিক ফেরতের পর ইনভয়েস পুরো ভয়েড
+                      // হলে সেই ফেরতের ইতিহাস আর কোথাও দেখা যেত না। এখন ভয়েড হলেও
+                      // দেখাবে, শুধু ভাষা পাল্টে যাবে।
+                      const _invRet = (returns || []).filter(r => r.invoiceId === inv.id);
+                      if (!_invRet.length) return null;
+                      return (
+                        <div style={{
+                          display: "inline-flex", alignItems: "center", gap: 5, alignSelf: "flex-start",
+                          padding: "3px 9px 3px 6px",
+                          background: "linear-gradient(135deg,#eab30833,#eab30814)",
+                          border: "1px solid #eab30866", borderRadius: 999,
+                          boxShadow: "0 2px 8px -3px #eab30877",
+                        }}>
+                          <span style={{ fontSize: 13, lineHeight: 1 }}>🔄</span>
+                          <span style={{ color: "#fde047", fontSize: 11, fontWeight: 800 }}>
+                            {inv.status === "voided"
+                              ? `পুরো বাতিলের আগে ${_invRet.length}টি পণ্য ফেরত হয়েছিল`
+                              : `${_invRet.length}টি পণ্য ফেরত হয়েছে`}
+                          </span>
+                        </div>
+                      );
+                    })()}
                     <div style={{ display: "flex", gap: 6 }}>
                     <button style={{ ...S.invBtn, flex: 3 }} onClick={() => setViewInv(inv)}>
                       <IcInvoice /><span>ক্রয় ইনভয়েস দেখুন</span>
@@ -24605,7 +24718,13 @@ function TransactionModal({ T, S, customer, setCustomers, sendSMS, showToast, ad
 }
 
 // ── Invoice Receipt ────────────────────────────────────────────────────────────
-function InvoiceReceipt({ T, S, inv, customer, type = "buyer" }) {
+function InvoiceReceipt({ T, S, inv, customer, type = "buyer", returns = [] }) {
+  // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — আংশিক বাতিলের পুরো ডিটেইলস ইনভয়েস কপিতে না থাকা):
+  // কোনো ইনভয়েস থেকে আগে আংশিক পণ্য ফেরত (processReturn) নেওয়া হয়ে থাকলে, এবং
+  // পরে সেই একই ইনভয়েস পুরোপুরি voidInvoice() দিয়ে বাতিল হলে — আগে এই কপিতে শুধু
+  // "❌ বাতিলকৃত" দেখাত, পূর্বের আংশিক ফেরতের কোনো তথ্যই থাকত না। এখন দুটোই
+  // (পুরো বাতিল + তার আগের প্রতিটা আংশিক ফেরতের ডিটেইলস) একসাথে দেখানো হচ্ছে।
+  const invReturns = (returns || []).filter(r => r.invoiceId === inv.id);
   const isBuyer = type === "buyer";
   const handleShare = () => {
     const shopName = inv.shopName || "SBM";
@@ -24662,9 +24781,18 @@ function InvoiceReceipt({ T, S, inv, customer, type = "buyer" }) {
           </div>
           <div style={{ color: T.sub, fontSize: 11 }}>{inv.date}</div>
           {inv.status === "voided" && (
-            <div style={{ marginTop: 8, display: "inline-block", background: "#ef444422", border: "1px solid #ef444455", borderRadius: 8, padding: "4px 10px" }}>
-              <span style={{ color: "#ef4444", fontWeight: 800, fontSize: 12 }}>❌ বাতিলকৃত</span>
-              {inv.voidReason && <span style={{ color: "#ef4444cc", fontSize: 11 }}> — {inv.voidReason}</span>}
+            <div style={{ marginTop: 8, display: "inline-flex", flexDirection: "column", gap: 5, alignItems: "center" }}>
+              <div style={{ display: "inline-block", background: "#ef444422", border: "1px solid #ef444455", borderRadius: 8, padding: "4px 10px" }}>
+                <span style={{ color: "#ef4444", fontWeight: 800, fontSize: 12 }}>❌ বাতিলকৃত</span>
+                {inv.voidReason && <span style={{ color: "#ef4444cc", fontSize: 11 }}> — {inv.voidReason}</span>}
+              </div>
+              {invReturns.length > 0 && (
+                <div style={{ display: "inline-block", background: "#eab30822", border: "1px solid #eab30855", borderRadius: 8, padding: "4px 10px" }}>
+                  <span style={{ color: "#eab308", fontWeight: 800, fontSize: 11 }}>
+                    🔄 পুরো বাতিলের আগে {invReturns.length}টি পণ্য আংশিক ফেরত নেওয়া হয়েছিল (৳{fmt(invReturns.reduce((s, r) => s + (r.refundAmount || 0), 0))})
+                  </span>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -24715,6 +24843,20 @@ function InvoiceReceipt({ T, S, inv, customer, type = "buyer" }) {
             );
           })}
         </div>
+        {invReturns.length > 0 && (
+          <>
+            <div style={S.dashed} />
+            <div style={{ color: "#eab308", fontSize: 11, fontWeight: 800, marginBottom: 4 }}>🔄 আংশিক ফেরতের বিস্তারিত</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 4 }}>
+              {invReturns.map((r) => (
+                <div key={r.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: T.sub }}>
+                  <span>{r.productName} × {r.qty}{r.unit ? ` ${r.unit}` : ""}{r.reason ? ` (${r.reason})` : ""}</span>
+                  <span style={{ color: "#eab308", fontWeight: 700 }}>৳{fmt(r.refundAmount || 0)} · {r.refundMode === "baki" ? "বাকি সমন্বয়" : "নগদ"}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
         <div style={S.dashed} />
         {((inv.discount||0) > 0 || (inv.itemDiscount||0) > 0 || (inv.extraCharge||0) > 0) && (
           <>
@@ -27874,7 +28016,7 @@ function ReturnModule({ T, S, invoices, products, customers, returns, setReturns
               <button onClick={() => setDetailInv(null)}
                 style={{ background:T.border, border:"none", borderRadius:8, width:30, height:30, color:T.text, fontSize:16, cursor:"pointer", fontFamily:"inherit" }}>✕</button>
             </div>
-            <InvoiceReceipt T={T} S={S} inv={detailInv} customer={custMap.get(detailInv.customerId)} type="buyer" />
+            <InvoiceReceipt T={T} S={S} inv={detailInv} customer={custMap.get(detailInv.customerId)} type="buyer" returns={returns} />
 
             {/* 🆕 একক "ইনভয়েস ভয়েড" বাটন — পুরো ভয়েড ও আংশিক ফেরত দুটোই একই শেয়ার্ড
                 InvoiceVoidModal দিয়ে (Dashboard, CustomerDetail-এর সাথে একই কম্পোনেন্ট) */}
@@ -28512,7 +28654,11 @@ function buildDailySummaryData({ invoices = [], txns = [], customers = [], produ
   // 🔴 ফিক্স (Phase 4 — returns নেট-আউট): useKpiStats()-এর একই নীতি — আজকের
   // ফেরত যাওয়া পণ্যের refundAmount বিক্রয়/লাভ থেকে বাদ, নাহলে নোটিফিকেশনে
   // দেখানো "আজকের বিক্রয়/লাভ" ফেরত যাওয়া পণ্যসহ ফোলানো থাকবে।
-  const todayReturns = (returns || []).filter(r => r.dateKey === todayKey);
+  // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — নেগেটিভ বিক্রয় বাগ, উপরের todayInvList-এর মতোই):
+  // আংশিক ফেরতের পর ইনভয়েস ভয়েড হলে সেই আংশিক-ফেরতের returns এন্ট্রি এখানেও
+  // বাদ দেওয়া দরকার — নাহলে নোটিফিকেশনেও ঋণাত্মক "আজকের বিক্রয়" দেখাবে।
+  const voidedInvIdsForNotif = new Set((invoices || []).filter(i => i.status === "voided").map(i => i.id));
+  const todayReturns = (returns || []).filter(r => r.dateKey === todayKey && !voidedInvIdsForNotif.has(r.invoiceId));
   const todayReturnsRefund = todayReturns.reduce((s, r) => s + (r.refundAmount || 0), 0);
   const todayReturnsProfitImpact = todayReturns.reduce((s, r) => s + ((r.refundAmount || 0) - (r.costPrice || 0) * (r.qty || 0)), 0);
   const revenue       = todayInvList.reduce((s, i) => s + (i.total || 0), 0) - todayReturnsRefund;
@@ -28543,13 +28689,19 @@ function buildDailySummaryData({ invoices = [], txns = [], customers = [], produ
   // 💰 ক্যাশ ড্রয়ার — ওপেনিং ক্যাশ ও আজ দোকান থেকে বের হওয়া টাকা
   const cashLogsAll  = cashLogs || [];
   const openingCash  = cashLogsAll.filter(c => c.type === "opening" && c.dateKey === todayKey).reduce((s, c) => s + (c.amount || 0), 0);
+  // 🔴 ফিক্স (২৪ জুলাই ২০২৬ — উইথড্রয়াল/বাতিল conflation): দেখুন useKpiStats-এর
+  // একই ফিক্সের কমেন্ট। "withdrawal" এখন শুধু সত্যিকারের ক্যাশ উত্তোলন।
   const cashOutToday = cashLogsAll.filter(c => c.type === "withdrawal" && c.dateKey === todayKey).reduce((s, c) => s + (c.amount || 0), 0);
+  const returnRefundToday = cashLogsAll.filter(c => c.type === "return_refund" && c.dateKey === todayKey).reduce((s, c) => s + (c.amount || 0), 0);
+  const returnReversalToday = cashLogsAll.filter(c => c.type === "return_refund_reversal" && c.dateKey === todayKey).reduce((s, c) => s + (c.amount || 0), 0);
   const todayPurchaseCost = (purchaseOrders || [])
     .filter(p => p._type === "pe" && (p.dateKey === todayKey || (p.createdAt && p.createdAt.startsWith(todayKey))))
     .reduce((s, p) => s + (p.totalCost || 0), 0);
   // 🧪 shared formula (src/logic.js) — regression test suite এখন সরাসরি এই একই
-  // calcCashDrawer() কোড টেস্ট করে, আলাদা "reference-copy" না।
-  const currentCashDrawer = calcCashDrawer(openingCash, cashSale, jomaToday, cashOutToday);
+  // calcCashDrawer() কোড টেস্ট করে, আলাদা "reference-copy" না। calcCashDrawer()
+  // এখন returnRefund/returnReversal-ও ঐচ্ছিক প্যারামিটার হিসেবে নেয় (দেখুন
+  // logic.js-এর ফিক্স)।
+  const currentCashDrawer = calcCashDrawer(openingCash, cashSale, jomaToday, cashOutToday, returnRefundToday, returnReversalToday);
   return { revenue, cashSale, bakiToday, jomaToday, totalBakiNow, totalProfit, totalLoss, openingCash, cashOutToday, currentCashDrawer, todayPurchaseCost };
 }
 

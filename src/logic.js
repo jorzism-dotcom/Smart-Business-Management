@@ -268,14 +268,23 @@ export function calcReturnRefundAmount(inv, item, qty) {
 
 // ─── ক্যাশ ড্রয়ার সূত্র — buildDailySummaryData() সরাসরি এই ফাংশন কল করে ──────
 /**
+ * 🔴 ফিক্স (২৪ জুলাই ২০২৬ — উইথড্রয়াল/বাতিল conflation): "withdrawal" এখন শুধু
+ * মালিক/স্টাফের সত্যিকারের ক্যাশ উত্তোলন বোঝায়। পণ্য ফেরতের নগদ রিফান্ড
+ * (returnRefund) এবং তার ভয়েড-রিভার্সাল (returnReversal) সম্পূর্ণ ভিন্ন cashLogs
+ * টাইপ ("return_refund"/"return_refund_reversal") — কিন্তু ক্যাশ ড্রয়ারের
+ * প্রকৃত হিসাবে (আসল টাকা বেরিয়েছিল/ফিরেছে) সেগুলো এখনও লাগে, তাই এখানে
+ * আলাদা প্যারামিটার হিসেবে যোগ করা হলো। দুটোই ঐচ্ছিক (ডিফল্ট ০) — পুরনো
+ * ৪-আর্গুমেন্ট কলগুলো (এবং তাদের টেস্ট) অপরিবর্তিত থাকবে।
  * @param {number} opening
  * @param {number} cashSale
  * @param {number} joma
  * @param {number} withdrawal
+ * @param {number} [returnRefund]
+ * @param {number} [returnReversal]
  * @returns {number}
  */
-export function calcCashDrawer(opening, cashSale, joma, withdrawal) {
-  return opening + cashSale + joma - withdrawal;
+export function calcCashDrawer(opening, cashSale, joma, withdrawal, returnRefund = 0, returnReversal = 0) {
+  return opening + cashSale + joma - withdrawal - returnRefund + returnReversal;
 }
 
 // ─── ব্যাচ-স্টক রিস্টোর — voidInvoice() সরাসরি এই ফাংশন কল করে ────────────────
@@ -352,6 +361,7 @@ function _isFiniteNum(v) { return typeof v === "number" && Number.isFinite(v); }
  * @param {{
  *   products?: Array<{id?:string,name?:string,stock?:number,batches?:Array<{batchNo?:string,qty?:number}>}>,
  *   opening?: number, cashSale?: number, joma?: number, withdrawal?: number,
+ *   returnRefund?: number, returnReversal?: number,
  * }} state
  * @returns {Array<{type:string, message:string}>}
  */
@@ -379,13 +389,14 @@ export function runInvariantChecks(state = {}) {
 
   // ২) ক্যাশ-ড্রয়ার mismatch — শুধু ইনপুট দেওয়া থাকলেই চেক করা হয় (caller
   // buildDailySummaryData()-এর ফলাফল থেকে opening/cashSale/joma/withdrawal পাঠায়)
-  const { opening, cashSale, joma, withdrawal } = state;
+  // 🆕 returnRefund/returnReversal ঐচ্ছিক — না পাঠালে আগের মতোই আচরণ করে (0/0)।
+  const { opening, cashSale, joma, withdrawal, returnRefund, returnReversal } = state;
   if ([opening, cashSale, joma, withdrawal].some(_isFiniteNum)) {
-    const drawer = calcCashDrawer(opening || 0, cashSale || 0, joma || 0, withdrawal || 0);
+    const drawer = calcCashDrawer(opening || 0, cashSale || 0, joma || 0, withdrawal || 0, returnRefund || 0, returnReversal || 0);
     if (drawer < 0) {
       violations.push({
         type: "cash_drawer_mismatch",
-        message: `ক্যাশ ড্রয়ার হিসাব ঋণাত্মক: opening=${opening || 0} + cashSale=${cashSale || 0} + joma=${joma || 0} - withdrawal=${withdrawal || 0} = ${drawer}`,
+        message: `ক্যাশ ড্রয়ার হিসাব ঋণাত্মক: opening=${opening || 0} + cashSale=${cashSale || 0} + joma=${joma || 0} - withdrawal=${withdrawal || 0} - returnRefund=${returnRefund || 0} + returnReversal=${returnReversal || 0} = ${drawer}`,
       });
     }
   }
